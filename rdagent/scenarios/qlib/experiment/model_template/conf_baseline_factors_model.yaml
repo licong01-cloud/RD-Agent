@@ -1,12 +1,12 @@
 qlib_init:
-    provider_uri: "~/.qlib/qlib_data/cn_data"
+    provider_uri: "/mnt/c/Users/lc999/NewAIstock/AIstock/qlib_bin/qlib_bin_20251209"
     region: cn
-market: &market csi300
-benchmark: &benchmark SH000300
+market: &market all
+benchmark: &benchmark ""
 data_handler_config: &data_handler_config
-    start_time: 2008-01-01
-    end_time: 2020-08-01
-    fit_start_time: 2008-01-01
+    start_time: 2010-01-07
+    end_time: 2025-12-01
+    fit_start_time: 2010-01-07
     fit_end_time: 2014-12-31
     instruments: *market
     infer_processors:
@@ -40,10 +40,10 @@ port_analysis_config: &port_analysis_config
             topk: 50
             n_drop: 5
     backtest:
-        start_time: 2017-01-01
-        end_time: 2020-08-01
+        start_time: 2021-01-01
+        # clamp to bin range and avoid last calendar step
+        end_time: 2025-11-28
         account: 100000000
-        benchmark: *benchmark
         exchange_kwargs:
             limit_threshold: 0.095
             deal_price: close
@@ -78,9 +78,9 @@ task:
                 module_path: qlib.contrib.data.handler
                 kwargs: *data_handler_config
             segments:
-                train: [2008-01-01, 2014-12-31]
-                valid: [2015-01-01, 2016-12-31]
-                test: [2017-01-01, 2020-08-01]
+                train: [2010-01-07, 2018-12-31]
+                valid: [2019-01-01, 2020-12-31]
+                test: [2021-01-01, 2025-12-01]
             {% if step_len %}step_len: {{ step_len }}{% endif %}
     record: 
         - class: SignalRecord

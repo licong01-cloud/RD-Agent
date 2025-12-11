@@ -170,7 +170,7 @@ factor_feedback_generation:
     {{ scenario }}
 
     In this test scenario, the user is mainly interested in improving an **A-share long-only stock selection strategy** on **daily data over a multi-year backtest window**, with the following requirements:
-      - Investment universe: all A-share stocks listed on the Shanghai Stock Exchange (SSE) and Shenzhen Stock Exchange (SZSE), **excluding all ST and *ST stocks，以及所有已退市或当前暂停上市的股票**。当前回测所使用的 Qlib bin 数据集和 HDF5 日线行情快照，均已在数据导出阶段完成上述过滤，确保研究与回测在同一可交易股票池上进行。
+      - Investment universe: all A-share stocks listed on the Shanghai Stock Exchange (SSE) and Shenzhen Stock Exchange (SZSE), **excluding all ST and *ST stocks**.
       - Portfolio construction: on each rebalancing date, **select exactly 30 stocks** from the eligible universe and build an **equal-weighted long-only portfolio** (no short selling, no leverage).
       - Holding period: a medium-term horizon of **5–20 trading days** for each position on a **daily trading frequency**; in practice, if a single position reaches **+10% profit** before 5 trading days, it can be taken profit and closed early, and if the unrealized loss reaches **-10%**, a stop-loss should be triggered and the position should be closed immediately.
       - Performance target: over the backtest period, the typical 5–20 day holding-period return should be **around 5%–10%**, while the **maximum portfolio drawdown should be no greater than 10%** (the smaller, the better).
@@ -335,7 +335,7 @@ action_gen:
     You are one of the most authoritative quantitative researchers at a top Wall Street hedge fund. I need your expertise to develop new factors and models that can enhance our investment returns. Based on the given context, I will ask for your assistance in designing and implementing either factors or a model.
 
     In the current testing scenario, the user is mainly interested in improving an **A-share long-only stock selection strategy** on **daily data over a multi-year backtest window**, with the following requirements:
-      - Investment universe: all A-share stocks listed on the Shanghai Stock Exchange (SSE) and Shenzhen Stock Exchange (SZSE), **excluding all ST and *ST stocks，以及所有已退市或当前暂停上市的股票**。研究因子所用的 HDF5 日线数据与回测所用的 Qlib bin 数据集在股票池上已经对齐，均只包含上述过滤后的可交易股票。
+      - Investment universe: all A-share stocks listed on the Shanghai Stock Exchange (SSE) and Shenzhen Stock Exchange (SZSE), **excluding all ST and *ST stocks**.
       - Portfolio construction: on each rebalancing date, **select exactly 30 stocks** from the eligible universe and build an **equal-weighted long-only portfolio** (no short selling, no leverage).
       - Holding period: a medium-term horizon of **5–20 trading days** for each position on a **daily trading frequency**; in practice, if a single position reaches **+10% profit** before 5 trading days, it can be taken profit and closed early, and if the unrealized loss reaches **-10%**, a stop-loss should be triggered and the position should be closed immediately.
       - Performance target: over the backtest period, the typical 5–20 day holding-period return should be **around 5%–10%**, while the **maximum portfolio drawdown should be no greater than 10%** (the smaller, the better).
@@ -363,3 +363,4 @@ action_gen:
     Here is the last trial's hypothesis and the corresponding feedback. The main feedback includes a new hypothesis for your reference only. You should evaluate the entire reasoning chain to decide whether to adopt it, propose a more suitable hypothesis, or transfer and optimize it for another scenario (e.g., factor/model), since transfers are generally encouraged:
     {{ last_hypothesis_and_feedback }}
     {% endif %}
+

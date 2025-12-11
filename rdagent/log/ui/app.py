@@ -80,7 +80,12 @@ def filter_log_folders(main_log_path):
 
 if "log_path" not in state:
     if main_log_path:
-        state.log_path = filter_log_folders(main_log_path)[0]
+        folders = filter_log_folders(main_log_path)
+        if folders:
+            state.log_path = folders[0]
+        else:
+            state.log_path = None
+            st.toast(":red[**No log subfolders found under the specified log dir. Please run a task to generate logs first.**]", icon="⚠️")
     else:
         state.log_path = None
         st.toast(":red[**Please Set Log Path!**]", icon="⚠️")
@@ -175,15 +180,19 @@ def get_msgs_until(end_func: Callable[[Message], bool] = lambda _: True):
                             isinstance(state.scenario, (QlibFactorScenario, QlibQuantScenario))
                             and state.alpha_baseline_metrics is None
                         ):
-                            try:
-                                sms = msg.content.based_experiments[0].result
-                            except AttributeError:
-                                sms = msg.content.based_experiments[0].__dict__["result"]
-                            sms = sms.loc[QLIB_SELECTED_METRICS]
-                            sms.name = "Alpha Base"
-                            state.alpha_baseline_metrics = sms
+                            bexps = getattr(msg.content, "based_experiments", None)
+                            if bexps and len(bexps) > 0:
+                                try:
+                                    sms = bexps[0].result
+                                except AttributeError:
+                                    sms = bexps[0].__dict__["result"]
+                                if sms is not None:
+                                    sms = sms.loc[QLIB_SELECTED_METRICS]
+                                    sms.name = "Alpha Base"
+                                    state.alpha_baseline_metrics = sms
 
-                        if state.lround == 1 and len(msg.content.based_experiments) > 0:
+                        bexps = getattr(msg.content, "based_experiments", None)
+                        if state.lround == 1 and bexps and len(bexps) > 0:
                             try:
                                 sms = msg.content.based_experiments[-1].result
                             except AttributeError:
@@ -453,10 +462,16 @@ def summary_window():
                 if show_true_only and len(state.hypotheses) >= len(state.metric_series):
                     if state.alpha_baseline_metrics is not None:
                         selected = ["Alpha Base"] + [
-                            i for i in df.index if i == "Baseline" or state.h_decisions[int(i[6:])]
+                            i
+                            for i in df.index
+                            if i == "Baseline" or (i.startswith("Round ") and state.h_decisions[int(i[6:])])
                         ]
                     else:
-                        selected = [i for i in df.index if i == "Baseline" or state.h_decisions[int(i[6:])]]
+                        selected = [
+                            i
+                            for i in df.index
+                            if i == "Baseline" or (i.startswith("Round ") and state.h_decisions[int(i[6:])])
+                        ]
                     df = df.loc[selected]
                 if df.shape[0] == 1:
                     st.table(df.iloc[0])
@@ -764,7 +779,10 @@ with st.sidebar:
                 st.text_input("log path", key="log_path", on_change=refresh, label_visibility="collapsed")
             else:
                 folders = filter_log_folders(main_log_path)
-                st.selectbox(f"**Select from `{main_log_path}`**", folders, key="log_path", on_change=refresh)
+                if folders:
+                    st.selectbox(f"**Select from `{main_log_path}`**", folders, key="log_path", on_change=refresh)
+                else:
+                    st.markdown(":red[**No log subfolders found. Please run an RD-Agent task (e.g., fin_quant) to generate logs.**]")
         else:
             st.text_input(":blue[**log path**]", key="log_path", on_change=refresh)
 

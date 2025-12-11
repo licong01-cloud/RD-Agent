@@ -1,3 +1,10 @@
+############################################
+# 语言与输出约定（请勿删除或修改本段注释）
+# - 所有面向用户的自然语言解释、反馈、评审意见等，默认使用「简体中文」。
+# - 如需给出英文术语，可在中文中夹带英文，例如：动量（Momentum）、波动率（Volatility）。
+# - 后续在调整具体内容时，请保留本段注释，以保证输出语言风格的一致性。
+############################################
+
 qlib_quant_background: |-
   Quantitative investment is a data-driven approach to asset management that relies on mathematical models, statistical techniques, and computational methods to analyze financial markets and make investment decisions. Two essential components of this approach are factors and models.
   
@@ -21,6 +28,11 @@ qlib_factor_background: |-
   The factor might not provide all the parts of the information above since some might not be applicable.
   Please specifically give all the hyperparameter in the factors like the window size, look back period, and so on. One factor should statically defines one output with a static source data. For example, last 10 days momentum and last 20 days momentum should be two different factors.
 
+  对于每一个因子，请用「简体中文」给出清晰的基础解释，包括：
+  - 因子名称（可以中英结合，例如：10 日动量（Momentum_10D））；
+  - 因子的直观含义（它想刻画什么金融特性，例如动量、波动率、流动性等）；
+  - 关键超参数（如窗口长度、回看期），以及这些超参数对因子行为的影响。
+
   {% if runtime_environment is not none %}
   ====== Runtime Environment ======
   You have following environment to run the code:
@@ -31,6 +43,121 @@ qlib_factor_interface: |-
   Your python code should follow the interface to better interact with the user's system.
   Your python code should contain the following part: the import part, the function part, and the main part. You should write a main function name: "calculate_{function_name}" and call this function in "if __name__ == __main__" part. Don't write any try-except block in your python code. The user will catch the exception message and provide the feedback to you.
   User will write your python code into a python file and execute the file directly with "python {your_file_name}.py". You should calculate the factor values and save the result into a HDF5(H5) file named "result.h5" in the same directory as your python file. The result file is a HDF5(H5) file containing a pandas dataframe. The index of the dataframe is the "datetime" and "instrument", and the single column name is the factor name,and the value is the factor value. The result file should be saved in the same directory as your python file.
+  
+  【统一因子脚本模板（必须遵守，LLM 只能在中间区域写逻辑）】
+  - 因子脚本应严格采用如下整体骨架，其中 **仅允许在标记的“FACTOR COMPUTATION AREA”内编写/修改代码**.
+    - 在该区域内，你可以根据本轮假设自由设计因子与信号逻辑，不局限于简单的动量/波动率/量价关系；
+    - 可以综合利用 Qlib 提供的 Alpha158 特征、预计算的 AE 因子与 daily_basic 因子（在上游统一拼接后作为模型输入特征）来构造更复杂、更多样化的因子与策略；
+    - 本轮实验不强制策略必须依赖“量价因子”，重点在于保证数据格式与索引 contract 正确的前提下，充分释放模型与因子的演进空间。
+
+    ```python
+    import pandas as pd
+    import numpy as np
+
+    def calculate_{function_name}():
+        """根据给定因子定义计算因子值，并写入 result.h5"""
+
+        # 1. 读取数据并按索引排序（索引应为 MultiIndex(datetime, instrument)）
+        df = pd.read_hdf("daily_pv.h5", key="data").sort_index()
+
+        # 2. 统一重命名（见下文“数据加载与字段名规范”），后续代码只使用不带 $ 的列名
+        rename_map = {
+            "$open": "open",
+            "$high": "high",
+            "$low": "low",
+            "$close": "close",
+            "$volume": "volume",
+            "$amount": "amount",
+            "$factor": "factor",
+            # 如存在资金流扩展字段，也在此按规则映射：
+            "$mf_net_inflow_1d": "mf_net_inflow_1d",
+            "$mf_net_inflow_5d": "mf_net_inflow_5d",
+            "$mf_large_buy_ratio": "mf_large_buy_ratio",
+        }
+        df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+
+        # 3. 再次确保索引按 (datetime, instrument) 排序
+        df = df.sort_index()
+
+        # 4. ==== BEGIN FACTOR COMPUTATION AREA ====
+        # 在此区域内，你可以自由使用 df 计算出一个或多个与 df.index 对齐的 Series/列：
+        # - 不允许修改 df.index 结构
+        # - 只允许对 df.columns / 中间 Series 做变换
+        # - 你可以根据当前任务需要，灵活组合价格、成交量、AE 因子、daily_basic 等多种信号，探索不同的因子形态与策略风格；
+        # - 不要求本区域实现的因子一定是“简单收益率”或“纯量价指标”，可以是截面打分、分位数信号、非线性组合等。
+
+        # 示意：以下只是一个占位示例，请在实际任务中用你的真实逻辑完全替换掉该 Series 的构造。
+        series = df["close"] / df["close"].groupby(level="instrument").shift(1) - 1
+
+        # 对于 groupby+rolling 的典型模式，请使用：
+        # s = df["x"].groupby(level="instrument").rolling(window=K, min_periods=K).func(...)
+        # s = s.reset_index(level=0, drop=True)  # 恢复为与 df.index 对齐
+
+        # ==== END FACTOR COMPUTATION AREA ====
+
+        # 5. 构造结果 DataFrame：索引必须与 df.index 完全一致
+        result_df = pd.DataFrame(index=df.index)
+        result_df["{function_name}"] = series.astype("float64")
+
+        # 6. 索引名称必须直接继承 df.index.names，禁止手写 ["datetime", "instrument"]
+        result_df.index.names = df.index.names
+
+        # 7. 按索引排序并写入 result.h5
+        result_df = result_df.sort_index()
+        result_df.to_hdf("result.h5", key="data", mode="w")
+
+        return result_df
+
+    if __name__ == "__main__":
+        calculate_{function_name}()
+    ```
+  - **严禁** 在上述模板之外随意增删“读取/输出/索引处理”代码:
+    - 不要重写 `result_df = pd.DataFrame(index=df.index)` 这一行的模式；
+    - 不要手工写 `result_df.index.names = ["datetime", "instrument"]`，而是始终使用 `df.index.names`；
+    - 不要对结果进行 `reset_index(drop=True)` 或 `droplevel` / `swaplevel` 等会改变索引结构的操作。
+  - 所有因子实现都应遵守统一的 **输出 contract**：
+    - `index`：MultiIndex(`datetime`, `instrument`)，与 `df.index` 完全一致并已排序；
+    - `columns`：一列或多列 `float64` 类型因子列；
+    - 输出文件固定为当前目录下的 `result.h5`，由 Qlib 上游统一加载。
+
+  【数据加载与字段名规范（必须严格遵守，用于避免 $close / close 列名错误）】
+  - 因子实现只能从当前工作目录下的 `daily_pv.h5` 读取数据，该文件索引为 MultiIndex(`datetime`, `instrument`)，列名采用 Qlib 风格:
+    `$open`, `$high`, `$low`, `$close`, `$volume`, `$amount`, `$factor`，以及未来可能新增的 `$mf_net_inflow_1d` 等主力资金字段。
+  - 在你的 `factor.py` 中，**必须首先执行如下统一重命名逻辑**，把带 `$` 前缀的字段映射为不带 `$` 的业务字段名，后续代码一律使用重命名后的字段:
+    ```python
+    import pandas as pd
+
+    df = pd.read_hdf("daily_pv.h5", key="data").sort_index()
+
+    rename_map = {
+        "$open": "open",
+        "$high": "high",
+        "$low": "low",
+        "$close": "close",
+        "$volume": "volume",
+        "$amount": "amount",
+        "$factor": "factor",
+        # 若存在主力资金等扩展字段，也按相同规则映射：
+        "$mf_net_inflow_1d": "mf_net_inflow_1d",
+        "$mf_net_inflow_5d": "mf_net_inflow_5d",
+        "$mf_large_buy_ratio": "mf_large_buy_ratio",
+    }
+    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+    ```
+  - **后续所有代码中，只能使用不带 `$` 的字段名**，例如：`df["close"]`、`df["volume"]`、`df["mf_net_inflow_1d"]`。严禁混用 `df["$close"]` 和 `df["close"]`。
+  - 当前轮实验中，`moneyflow` 相关字段（如 `mf_*`）在部分 snapshot 上可能为空或缺失，你可以选择忽略这些资金流字段，专注于价量、AE 与 daily_basic 等稳定特征进行因子设计与策略演进。
+
+  - 当前项目中，`daily_pv.h5` 已在数据导出阶段统一剔除了所有 ST 和 *ST 股票，以及所有已退市或当前暂停上市的股票，其股票池与 Qlib bin 数据集（例如 `qlib_bin_20251209`）完全对齐。你在因子实现中可以默认研究与回测使用的是同一可交易股票集合，无需在代码中再次按 ST/退市条件过滤股票。
+  - 因子结果必须保持索引为 MultiIndex(`datetime`, `instrument`)，`index.names == ["datetime", "instrument"]`，并通过：
+    ```python
+    result_df.to_hdf("result.h5", key="data", mode="w")
+    ```
+    写入同一目录下的 `result.h5` 文件，列为一个或多个 `float64` 类型的因子列。
+  - 在 Qlib 回测与联合因子实验的 YAML 模板中，还会通过 `StaticDataLoader/NestedDataLoader` 自动加载若干**预计算因子表**（无需在每个 `factor.py` 中重复计算），例如：
+    - 全局自编码器异常检测因子表：`ae_recon_error_10d`（10 日重构误差），路径类似 `.../factors/ae_recon_error_10d/result.h5`；
+    - 每日指标预计算因子表：`daily_basic_factors/result.h5`，包含估值、市值、流动性等 `db_*` 派生因子；
+    - 后续可能扩展的资金流因子表：`capital_flow_daily/result.h5` 等。
+    这些预计算表在 Qlib 侧作为额外特征自动拼接到模型输入中，用于联合因子/策略演进；你在单一 `factor.py` 中只需专注于基于 `daily_pv.h5` 的本地因子实现，不必在脚本里重复实现 AE/daily_basic/资金流整表计算逻辑。
 
 qlib_factor_strategy: |-
   Ensure that for every step of data processing, the data format (including indexes) is clearly explained through comments.
@@ -161,8 +288,53 @@ qlib_factor_from_report_rich_style_description : |-
 qlib_factor_experiment_setting: |-
   | Dataset 📊 | Model 🤖    | Factors 🌟       | Data Split  🧮                                   |
   |---------|----------|---------------|-------------------------------------------------|
-  | CSI300  | LGBModel | Alpha158 Plus | Train: 2008-01-01 to 2014-12-31 <br> Valid: 2015-01-01 to 2016-12-31 <br> Test &nbsp;: 2017-01-01 to 2020-08-01 |
+  | AIstock A-share (non-ST, non-delisted)  | GRU_TimeSeries_Model | Alpha158 Plus + AIstock factors | Train: 2016-01-01 to 2018-12-31 <br> Valid: 2019-01-01 to 2020-12-31 <br> Test &nbsp;: 2021-01-01 to 2025-12-31 |
+  
+  #### 计算资源与训练负载建议（请优先满足以下要求，以充分利用本机 12 核 24 线程 + GPU）
+  - **训练轮数与 batch 大小**：
+    - 对于主要实验，请避免使用过小配置（如 `n_epochs < 100`、`batch_size < 256`）。
+    - 推荐配置范围：`n_epochs` 在 `200~300`；`batch_size` 以 `512` 为优先（如显存不足可降到 `256`）。
+  - **并行度设置（CPU）**：
+    - 对支持 `n_jobs` 的模型或数据处理组件，优先设置为 `n_jobs: 12`（接近物理核心数）。
+    - 如 YAML 中存在 `workers` / `num_workers` / `processes` 等字段，可设置在 `8~12` 之间，避免远高于 CPU 核心数。
+  - **GPU 使用**：
+    - 对基于 PyTorch 的时序模型（如 `GRU_TimeSeries_Model`），必须保证 `use_GPU: True`，`device: "cuda:0"`，禁止随意改成 `cpu`。
+  - **链路稳定优先**：
+    - 在加大训练负载前，先用较小循环（如 `--loop-n 1`）确认整条因子与 Qlib 训练链路完全打通：
+      - 使用存在的股票池（例如 `instruments: all` 或已经在 snapshot 中提供了 `aistock.txt`）。
+      - 所有因子能在 `daily_pv.h5` 上成功计算并生成 `result.h5`。
+  - 只有在整条流水线不再出现 `$close` / 股票池不存在等基础报错后，才逐步增加 `n_epochs`、`batch_size` 与并行度。
+  
+  #### 股票池筛选与每日指标因子的优先使用原则
+  - 在因子与策略演进过程中，**优先使用预计算的 daily_basic 因子表（估值、市值、流动性等）对股票做基础筛选与风险控制**，再在筛选后的股票池上进行多因子建模与选股，而不是在全市场原始股票池上直接暴力选股：
+    - 建议剔除：极端高估值或基本面/流动性明显较差的股票（如长期换手率过低、量比极低、流通市值过小等）；
+    - 在保留“估值合理 + 流动性充足”的基础股票池后，再结合：价量因子（Alpha158/自定义因子）、AE 异常因子、资金流因子等做联合因子与策略演进；
+    - 在回测与调参时，优先比较“先按 daily_basic 做健康度筛选再建模”与“在原始股票池直接建模”的效果差异，倾向采用前者作为长期默认范式。
 
+  #### 策略演进优先级（当 IC 连续为 NaN 或收益显著为负时）
+  - 若最近若干轮实验中，**横截面 IC 大多为 NaN 或极接近 0，且组合年化收益明显为负、最大回撤过大**，请优先从以下三个方向演进，而不是盲目更换更复杂的时间序列结构：
+    1. **先改因子与标签，而非一味堆模型复杂度**：
+       - 优先调整因子组合：
+         - 充分利用预计算的 `daily_basic` 因子（估值、市值、流动性）做股票池健康度过滤与风险控制；
+         - 合理引入 AE 重构误差因子（`ae_recon_error_10d`）作为异常检测/风险因子，而不是单独承担主要选股信号；
+         - 控制新因子数量与相关性，避免高度共线和极度稀疏的因子集。
+       - 检查并优化标签定义：
+         - 合理选择预测窗口（例如 1D/5D/10D 收益），避免过短导致噪声主导、过长导致信号被摊薄；
+         - 明确标签是否为“相对收益/超额收益”，并在评估中匹配相应指标。
+    2. **优先回到稳健的 Tabular 基线模型**：
+       - 在 IC 长期为 NaN 的阶段，应优先采用：
+         - LightGBM / CatBoost 这类基于树的模型；
+         - 或结构简单的 MLP（单/双隐层）Tabular 模型，输入为截面因子（Alpha158 + daily_basic + AE 等）。
+       - 在上述简单模型上，确认能获得：
+         - 非 NaN 的横截面 IC；
+         - 至少不至于极度负收益的年化表现；
+       - 只有在 Tabular 基线表现达到“可用”水平后，才重新引入 GRU/Transformer/CNN 等复杂时间序列模型作为增量改进方向。
+    3. **控制每轮改动的粒度与可解释性**：
+       - 每轮实验尽量只在“因子集合 / 标签定义 / 模型结构”三者之一上做有限改动，并在总结中明确：
+         - 本轮主要修改了哪些因子或标签；
+         - 是否从时序模型回到 Tabular 基线；
+         - 与上一轮相比，IC 与收益/回撤是否有明显变化。
+       - 当连续多轮实验均表现为“IC NaN + 年化显著为负”时，应主动提出“暂停进一步复杂化模型、回到简单可解释基线”的建议，并明确下一轮重点：例如“固定模型为 LGB，仅调整 daily_basic 筛选阈值与 AE 因子权重”。
 
 qlib_model_background: |-
   The model is a machine learning or deep learning structure used in quantitative investment to predict the returns and risks of a portfolio or a single asset. Models are employed by investors to generate forecasts based on historical data and identified factors, which are central to many quantitative investment strategies.
@@ -256,4 +428,20 @@ qlib_model_rich_style_description: |-
 qlib_model_experiment_setting: |-
   | Dataset 📊 | Model 🤖    | Factors 🌟       | Data Split  🧮                                   |
   |---------|----------|---------------|-------------------------------------------------|
-  | CSI300  | RDAgent-dev | 20 factors (Alpha158)  | Train: 2008-01-01 to 2014-12-31 <br> Valid: 2015-01-01 to 2016-12-31 <br> Test &nbsp;: 2017-01-01 to 2020-08-01 |
+  | AIstock A-share (non-ST, non-delisted)  | 例如 GRU_TimeSeries_Model（也可替换为 LGB/MLP/Transformer 等其它模型） | 20 factors (Alpha158)  | Train: 2016-01-01 to 2018-12-31 <br> Valid: 2019-01-01 to 2020-12-31 <br> Test &nbsp;: 2021-01-01 to 2025-12-31 |
+
+transformer_volume_price_strategy: |-
+  本段落描述的是一套 **示例型** 策略设想，主要用于展示如何将量价特征与时间序列模型（例如 Transformer）结合，用于多股票组合的研究与回测。
+
+  需要特别强调的是：
+  - 这里提到的模型类型（如 TransformerEncoder）、调仓规则、持仓股票数量（例如 30 只）、止盈止损阈值等，**仅作为示例/灵感来源**；
+  - 它们 **不对当前任务或任何具体实验构成硬性约束**，你在实际研发中可以自由选择 LightGBM、CatBoost、MLP、GRU、Transformer 等任意模型，也可以自由设计选股数量与风控规则；
+  - 本项目的其它提示词（因子/模型/回测配置）同样不强制绑定某一种模型或具体策略形态，而是以“数据格式与索引 contract 正确”为唯一刚性约束。
+
+  示例思想（可选参考）：
+  - 关注未来若干交易日（例如 1/5/10/30 日）的收益表现，而不是超长周期持有；
+  - 在收益与风险之间设定合理的目标区间（例如期望年化收益、最大回撤、单笔风险敞口上限等），并在因子设计、模型结构以及调仓规则中综合考虑；
+  - 以量价特征为一个重要维度，同时允许结合估值、市值、AE 异常度、宏观情绪等多方面信号，构建多因子与多周期的策略框架；
+  - 对于时间序列建模，可以选择 Transformer、GRU、TCN 等，也可以回到简单的截面模型（如 LGB/MLP）并配合滚动窗口特征构造完成策略设计。
+
+  总之，本段仅作为“如何构思一套较为完整的量价+时序策略”的 **示例文档**。在实际自动研发与演进过程中，你完全可以根据实验结果与任务需求，自主决定使用的模型类型、选股数量、持仓周期以及是否采用止盈/止损机制。

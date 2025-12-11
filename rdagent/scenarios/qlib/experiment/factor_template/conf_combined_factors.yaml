@@ -1,39 +1,36 @@
 qlib_init:
-    provider_uri: "~/.qlib/qlib_data/cn_data"
+    provider_uri: "/mnt/c/Users/lc999/NewAIstock/AIstock/qlib_bin/qlib_bin_20251209"
     region: cn
 
-market: &market csi300
-benchmark: &benchmark SH000300
+market: &market all
+benchmark: &benchmark DAILY_ALL
 
 data_handler_config: &data_handler_config
-    start_time: 2008-01-01
-    end_time: 2022-08-01
+    start_time: 2010-01-07
+    end_time: 2025-12-01
     instruments: *market
     data_loader:
-        class: NestedDataLoader
+        class: CombinedAlpha158StaticLoader
+        module_path: rdagent.scenarios.qlib.experiment.custom_loaders
         kwargs:
-            dataloader_l:
-                - class: qlib.contrib.data.loader.Alpha158DL
-                  kwargs:
-                    config:
-                        label: 
-                            - ["Ref($close, -2)/Ref($close, -1) - 1"]
-                            - ["LABEL0"]
-                        feature:
-                            - ["Resi($close, 5)/$close", "Std(Abs($close/Ref($close, 1)-1)*$volume, 5)/(Mean(Abs($close/Ref($close, 1)-1)*$volume, 5)+1e-12)",
-                               "Rsquare($close, 5)", "($high-$low)/$open", "Rsquare($close, 10)", "Corr($close, Log($volume+1), 5)",
-                               "Corr($close/Ref($close,1), Log($volume/Ref($volume, 1)+1), 5)", "Corr($close, Log($volume+1), 10)",
-                               "Ref($close, 60)/$close", "Resi($close, 10)/$close", "Std($volume, 5)/($volume+1e-12)",
-                               "Rsquare($close, 60)", "Corr($close, Log($volume+1), 60)", "Std(Abs($close/Ref($close, 1)-1)*$volume, 60)/(Mean(Abs($close/Ref($close, 1)-1)*$volume, 60)+1e-12)",
-                               "Std($close, 5)/$close", "Rsquare($close, 20)", "Corr($close/Ref($close,1), Log($volume/Ref($volume, 1)+1), 60)",
-                               "Corr($close/Ref($close,1), Log($volume/Ref($volume, 1)+1), 10)", "Corr($close, Log($volume+1), 20)",
-                               "(Less($open, $close)-$low)/$open"]
-                            - ["RESI5", "WVMA5", "RSQR5", "KLEN", "RSQR10", "CORR5", "CORD5", "CORR10", 
-                               "ROC60", "RESI10", "VSTD5", "RSQR60", "CORR60", "WVMA60", "STD5", 
-                               "RSQR20", "CORD60", "CORD10", "CORR20", "KLOW"]
-                - class: qlib.data.dataset.loader.StaticDataLoader
-                  kwargs:
-                    config: "combined_factors_df.parquet"
+            alpha158_config:
+                label: 
+                    - ["Ref($close, -2)/Ref($close, -1) - 1"]
+                    - ["LABEL0"]
+                feature:
+                    - ["Resi($close, 5)/$close", "Std(Abs($close/Ref($close, 1)-1)*$volume, 5)/(Mean(Abs($close/Ref($close, 1)-1)*$volume, 5)+1e-12)",
+                       "Rsquare($close, 5)", "($high-$low)/$open", "Rsquare($close, 10)", "Corr($close, Log($volume+1), 5)",
+                       "Corr($close/Ref($close,1), Log($volume/Ref($volume, 1)+1), 5)", "Corr($close, Log($volume+1), 10)",
+                       "Ref($close, 60)/$close", "Resi($close, 10)/$close", "Std($volume, 5)/($volume+1e-12)",
+                       "Rsquare($close, 60)", "Corr($close, Log($volume+1), 60)", "Std(Abs($close/Ref($close, 1)-1)*$volume, 60)/(Mean(Abs($close/Ref($close, 1)-1)*$volume, 60)+1e-12)",
+                       "Std($close, 5)/$close", "Rsquare($close, 20)", "Corr($close/Ref($close,1), Log($volume/Ref($volume, 1)+1), 60)",
+                       "Corr($close/Ref($close,1), Log($volume/Ref($volume, 1)+1), 10)", "Corr($close, Log($volume+1), 20)",
+                       "(Less($open, $close)-$low)/$open"]
+                    - ["RESI5", "WVMA5", "RSQR5", "KLEN", "RSQR10", "CORR5", "CORD5", "CORR10", 
+                       "ROC60", "RESI10", "VSTD5", "RSQR60", "CORR60", "WVMA60", "STD5", 
+                       "RSQR20", "CORD60", "CORD10", "CORR20", "KLOW"]
+            static_path: "/mnt/c/Users/lc999/NewAIstock/AIstock/factors/combined_static_factors.parquet"
+            join: "outer"
 
     learn_processors:
         - class: DropnaLabel
@@ -50,15 +47,16 @@ port_analysis_config: &port_analysis_config
             topk: 50
             n_drop: 5
     backtest:
-        start_time: 2017-01-01
-        end_time: 2020-08-01
+        start_time: 2021-01-01
+        # clamp to bin range and avoid last calendar step
+        end_time: 2025-11-28
         account: 100000000
         benchmark: *benchmark
         exchange_kwargs:
             limit_threshold: 0.095
             deal_price: close
-            open_cost: 0.0005
-            close_cost: 0.0015
+            open_cost: 0.0001
+            close_cost: 0.0001
             min_cost: 5
 
 task:
@@ -84,9 +82,9 @@ task:
                 module_path: qlib.contrib.data.handler
                 kwargs: *data_handler_config
             segments:
-                train: [2008-01-01, 2014-12-31]
-                valid: [2015-01-01, 2016-12-31]
-                test: [2017-01-01, 2020-08-01]
+                train: [2016-01-01, 2018-12-31]
+                valid: [2019-01-01, 2020-12-31]
+                test: [2021-01-01, 2025-12-31]
     record: 
         - class: SignalRecord
           module_path: qlib.workflow.record_temp

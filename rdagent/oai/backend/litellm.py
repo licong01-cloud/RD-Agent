@@ -134,11 +134,18 @@ class LiteLLMAPIBackend(APIBackend):
         """
         Call the chat completion function
         """
+        model_for_schema_check = LITELLM_SETTINGS.chat_model
 
-        if response_format and not supports_response_schema(model=LITELLM_SETTINGS.chat_model):
-            # Deepseek will enter this branch
+        # NOTE: DeepSeek 官方已经支持 response_format=json_object，但当前 LiteLLM
+        # 的 supports_response_schema 对 deepseek/* 仍返回 False。
+        # 这里对 deepseek/* 做特判：
+        # - deepseek/*: 直接放行 response_format 交给 DeepSeek 处理；
+        # - 其他模型：仍严格依赖 supports_response_schema 判断。
+        is_deepseek_model = isinstance(model_for_schema_check, str) and model_for_schema_check.startswith("deepseek/")
+
+        if response_format and not is_deepseek_model and not supports_response_schema(model=model_for_schema_check):
             logger.warning(
-                f"{LogColors.YELLOW}Model {LITELLM_SETTINGS.chat_model} does not support response schema, ignoring response_format argument.{LogColors.END}",
+                f"{LogColors.YELLOW}Model {model_for_schema_check} does not support response schema, ignoring response_format argument.{LogColors.END}",
                 tag="llm_messages",
             )
             response_format = None

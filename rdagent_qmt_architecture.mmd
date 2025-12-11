@@ -1,0 +1,168 @@
+flowchart LR
+
+    %% ===========================
+    %% 左侧：行情与外部数据源
+    %% ===========================
+    subgraph DataSrc["数据源 & 采集"]
+        TDX_Client["tdx client.go"]
+        TDX_Pull["pull-kline.go\n本地K线库"]
+        TDX_HTTP["TDX HTTP API"]
+
+        TS_Tushare["Tushare API"]
+        TS_Akshare["Akshare"]
+        YF_API["yfinance"]
+    end
+
+    TDX_Client --> TDX_Pull
+    TDX_Client --> TDX_HTTP
+
+    %% ===========================
+    %% 中间：AIstock 程序平台（整体底座）
+    %% ===========================
+    subgraph AIstock["AIstock 程序平台（NewAIstock/AIstock）"]
+
+        %% --- 数据与特征模块 ---
+        DataMgr["DataSourceManager\n(TDX/Tushare/Akshare 路由)"]
+        Fetcher["StockDataFetcher\n(A股/美股/港股数据)"]
+        NetOpt["network_optimizer"]
+        FeatStore["时序/特征库\n(K线/指标/财务)"]
+
+        %% --- 实时监控与执行 ---
+        Monitor["StockMonitorService\n(价格/区间/止盈止损)"]
+        Rules["触发规则\n(条件/频率)"]
+        MiniQIF["MiniQMTInterface\n(下单/撤单/持仓)"]
+        RiskCtrl["风控/仓位控制"]
+        TradeLog["Trade/Execution Log\n(成交/订单回报)"]
+        LocalDB_Mon["监控 DB"]
+        LocalDB_PF["组合 DB"]
+
+        %% --- 策略、组合与调度 ---
+        StrAgents["策略 Agents\nai_agents / sector_*"]
+        PortMgr["portfolio_manager\n(组合管理)"]
+        SchedMon["monitor_scheduler"]
+        SchedStr["sector_strategy_scheduler"]
+        SchedPF["portfolio_scheduler"]
+        StratVer["策略版本库\n(因子/模型/参数)"]
+
+        %% --- 服务与交互 ---
+        Notify["notification_service\n(邮件/消息)"]
+        PGRepo["pg_*_repo / *_db\n(Postgres 持久化)"]
+        UI["app_pg / *.ui.py\n(前端 UI & 看板)"]
+
+    end
+
+    %% 数据进入 AIstock
+    TDX_HTTP --> DataMgr
+    TS_Tushare --> DataMgr
+    TS_Akshare --> DataMgr
+    YF_API --> Fetcher
+
+    DataMgr --> Fetcher
+    Fetcher --> NetOpt
+    NetOpt --> FeatStore
+    Fetcher --> FeatStore
+
+    %% AIstock 内部：监控与执行流
+    FeatStore --> Monitor
+    Monitor --> Rules
+    Rules --> Monitor
+    Monitor --> LocalDB_Mon
+    Monitor --> MiniQIF
+    MiniQIF --> RiskCtrl
+    RiskCtrl --> LocalDB_PF
+    TradeLog --> LocalDB_PF
+    TradeLog --> FeatStore
+
+    %% AIstock 内部：策略 & 组合 & 调度
+    StrAgents --> Monitor
+    StrAgents --> PortMgr
+    PortMgr --> LocalDB_PF
+
+    SchedMon --> Monitor
+    SchedStr --> StrAgents
+    SchedPF --> PortMgr
+
+    StratVer --> StrAgents
+    StratVer --> Monitor
+
+    %% AIstock 内部：服务 & UI
+    Monitor --> Notify
+    Notify --> PGRepo
+    LocalDB_Mon --> PGRepo
+    LocalDB_PF --> PGRepo
+
+    UI --> Monitor
+    UI --> StrAgents
+    UI --> PortMgr
+    UI --> StratVer
+
+    %% ===========================
+    %% RD-Agent(Q) 研究与演化（放在 AIstock 下方一行）
+    %% ===========================
+    subgraph RDAgent["RD-Agent(Q)（RD-Agent-main）"]
+        %% 配置与场景
+        RDEnv[".env / 环境变量\n(QLIB_DATA_PATH 等)"]
+        RDConf["qlib_rd_loop/conf.py\n(组件/场景配置)"]
+        RDScen["QlibQuantScenario\n(量化场景入口)"]
+
+        %% Experiment 与 Runner
+        RDFactorExp["QlibFactorExperiment\n(因子实验)"]
+        RDModelExp["QlibModelExperiment\n(模型实验)"]
+        RDQuantExp["QlibQuantScenario.run\n(联合进化)"]
+
+        RDFactorRunner["factor_runner\n(因子回测/评估)"]
+        RDModelRunner["model_runner\n(模型训练/预测)"]
+        RDQuantRunner["quant_runner\n(策略组合回测)"]
+
+        %% 多 Agent 组件
+        RDHypo["HypothesisAgent\n(假设/动作生成)"]
+        RDCoder["CoderAgent\n(代码/配置生成)"]
+        RDSummarizer["Summarizer\n(结果总结/建议)"]
+
+        %% CLI 与输出
+        RDCLI["rdagent fin_* 命令\n(fin_quant/fin_factor/fin_model)"]
+        RDReport["评估与报告\n(回测/选型/总结)"]
+        RDLogs["logs/ & reports/\n(运行日志/文档)"]
+    end
+
+    %% AIstock → RD-Agent(Q) 数据与配置
+    FeatStore --> QlibETL
+    QlibETL --> QlibDB
+    RDEnv --> RDConf
+    RDConf --> RDScen
+    RDScen --> RDFactorExp
+    RDScen --> RDModelExp
+    RDScen --> RDQuantExp
+    QlibDB --> RDFactorExp
+    QlibDB --> RDModelExp
+    QlibDB --> RDQuantExp
+
+    RDFactorExp --> RDFactorRunner
+    RDModelExp --> RDModelRunner
+    RDQuantExp --> RDQuantRunner
+
+    RDCLI --> RDScen
+    RDHypo --> RDFactorExp
+    RDHypo --> RDModelExp
+    RDCoder --> RDFactorRunner
+    RDCoder --> RDModelRunner
+    RDSummarizer --> RDReport
+
+    %% RD-Agent(Q) 输出策略版本与报告
+    RDQuantRunner --> RDEngine
+    RDEngine --> RDReport
+    RDEngine --> StratVer
+    RDReport --> RDLogs
+    RDReport --> UI
+
+    %% ===========================
+    %% 右侧：QMT 执行
+    %% ===========================
+    subgraph QMTExec["QMT 执行"]
+        MiniQCore["miniQMT 服务"]
+        QMTCore["QMT 平台"]
+    end
+
+    MiniQIF --> MiniQCore
+    MiniQCore --> QMTCore
+    MiniQCore --> TradeLog

@@ -1,25 +1,29 @@
 import random
 import re
 import shutil
+import subprocess
 from pathlib import Path
 
 import pandas as pd
 from jinja2 import Environment, StrictUndefined
 
 from rdagent.components.coder.factor_coder.config import FACTOR_COSTEER_SETTINGS
-from rdagent.utils.env import QTDockerEnv
 
 
 def generate_data_folder_from_qlib():
     template_path = Path(__file__).parent / "factor_data_template"
-    qtde = QTDockerEnv()
-    qtde.prepare()
-
-    # Run the Qlib backtest
-    execute_log = qtde.check_output(
-        local_path=str(template_path),
-        entry=f"python generate.py",
+    # Run the Qlib backtest locally in the current conda environment instead of Docker
+    result = subprocess.run(
+        ["python", "generate.py"],
+        cwd=str(template_path),
+        capture_output=True,
+        text=True,
     )
+    execute_log = (result.stdout or "") + "\n" + (result.stderr or "")
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Failed to run generate.py to prepare Qlib factor data. Please check the following log:\n" + execute_log
+        )
 
     assert (Path(__file__).parent / "factor_data_template" / "daily_pv_all.h5").exists(), (
         "daily_pv_all.h5 is not generated. It means rdagent/scenarios/qlib/experiment/factor_data_template/generate.py is not executed correctly. Please check the log: \n"
