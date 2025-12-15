@@ -441,5 +441,307 @@
 
 - **长期**：
   - 结合 RD-Agent 历史实验结果和 Qlib 回测摘要，将“因子/策略 → 结果反馈”也纳入 RAG 语料，形成闭环：
-    - 新一轮策略生成时，RAG+LLM 不仅参考规则和文献，还参考“该账号在本地真正跑出来的结果”；
-    - 逐渐朝着“本地量化研究知识库 + 自动化科研助手”的方向演进。
+  - 新一轮策略生成时，RAG+LLM 不仅参考规则和文献，还参考“该账号在本地真正跑出来的结果”；
+  - 逐渐朝着“本地量化研究知识库 + 自动化科研助手”的方向演进。
+
+## 11. RAG 工具选型与结论（补充：优先提升因子研发效率）
+
+本节补充对主流 RAG 组件与框架的对比，并给出在当前阶段（优先解决 RD-Agent 因子研发效率、短期不做 KG）的落地选型与工程边界建议。
+
+### 11.1 当前最优先要解决的问题定义
+
+- **目标**：降低因子研发中“反复 coding + 反复报错/返工”的时间成本，使 LLM 更稳定地产出符合本项目约束的因子实现。
+- **问题根因（高频）**：
+  - LLM 缺少项目内“硬约束”上下文（输出格式、路径、数据集对齐、不可重复过滤股票池等）；
+  - LLM 缺少“预计算因子表数据字典”，导致重复计算或与标准化预计算口径不一致；
+  - 错误往往属于“运行不报错但逻辑不符合定义”，需要 reviewer 才能发现。
+
+结论：短期最有效的 RAG 不是“引入更多外部量化知识”，而是让 LLM 在生成与评审时能够检索到并遵守 **项目内规范 + 预计算表字典 + 常见错误模式与修复模板**。
+
+### 11.2 组件分层：向量库 vs RAG 编排框架 vs 端到端系统
+
+- **向量库（存储/检索层）**：Chroma、FAISS 等。
+  - 职责：向量索引、相似度检索、metadata 过滤（视实现而定）.
+  - 非职责：不负责业务规则、提示词注入、工作流编排.
+- **RAG 编排框架（索引/检索抽象层）**：LlamaIndex、LangChain.
+  - 职责：文档加载/切分、向量化、检索器、上下文拼装、（可选）重排等.
+  - 非职责：不应直接替代 AIstock/RD-Agent 的业务编排与任务执行.
+- **端到端 RAG 系统（平台/服务）**：LightRAG.
+  - 职责：包含更完整的存储与服务化形态（如多类存储、API/WebUI、可观测等）.
+  - 代价：索引流程与运维面更重，且对索引期 LLM 能力要求更高.
+
+### 11.3 候选方案对比：LightRAG vs LangChain/LlamaIndex + Chroma/FAISS
+
+#### 11.3.1 LightRAG（HKUDS/LightRAG）
+
+- **优势**：
+  - 提供更完整的系统能力（服务化接口、WebUI、引用、评测/Tracing、删除与一致性维护等）；
+  - 支持图存储与多种向量/KV 后端；
+  - 检索模式更丰富（local/global/hybrid/mix 等）并强调 reranker.
+- **劣势（与当前阶段目标冲突点）**：
+  - 索引流程更重、成本更高；
+  - 需要更强的抽取模型与更成熟的 schema 治理；
+  - 当前最紧迫问题是因子实现的工程约束与口径一致性，向量检索注入即可显著改善.
+
+结论：LightRAG 更适合作为后续“RAG 平台化/治理 UI”方向的候选方案，而非当前“提升因子研发效率”的第一优先落地.
+
+#### 11.3.2 LangChain
+
+- **优势**：
+  - 生态广、通用工作流编排能力强，适合未来在 AIstock 上扩展阶段 B（自然语言到策略的多步骤编排）.
+- **劣势**：
+  - 抽象面更大，短期仅做检索注入时容易引入不必要的复杂度；
+  - 若不控制框架渗透，长期可能出现“业务代码里到处是 chain/agent”的边界漂移.
+
+结论：LangChain 在阶段 B 的价值更高；阶段 A 可用但需严格限制使用范围.
+
+#### 11.3.3 LlamaIndex
+
+- **优势**：
+  - 更聚焦 RAG 的索引/检索路径，概念更少，适合阶段 A 的“检索注入 + 提示词增强”；
+  - 更容易保持系统边界（只提供 `retrieve()->contexts[]`），不与 AIstock/RD-Agent 的编排逻辑冲突.
+- **劣势**：
+  - 若未来阶段 B 需要复杂多步骤编排，仍可能需要额外的 orchestrator（自研或引入 LangChain）.
+
+结论：在“优先提升因子研发效率”的短期目标下，LlamaIndex 更容易快速见效.
+
+### 11.4 最终选型（当前阶段）
+
+- **选型结论**：采用 **LlamaIndex + Chroma**.
+- **理由（与当前目标强相关）**：
+  - 最快把“项目内规范/字典/修复模式”变成可检索上下文，减少因子开发返工；
+  - 嵌入式落地简单，代码侵入 RD-Agent/AIstock 低；
+  - 不做 KG 也能实现核心价值（减少实现偏差、提高一次通过率）.
+
+### 11.5 KG（知识图谱）在本项目的价值与短期取舍
+
+- **价值**：KG 更适合支撑“策略/因子逻辑分析 UI”“组件化组合与约束筛选”等中长期能力.
+- **短期不做 KG 的原因**：
+  - 索引流程更重、成本更高；
+  - 需要更强的抽取模型与更成熟的 schema 治理；
+  - 当前最紧迫问题是因子实现的工程约束与口径一致性，向量检索注入即可显著改善.
+
+### 11.6 索引期 LLM 类型与 token 成本注意事项
+
+- **索引期模型建议**：优先使用“指令遵循强、结构化输出稳定”的模型，不建议使用偏 reasoning 的模型做批量抽取.
+- **token 成本构成**：输入（prompt + chunk）+ 输出（抽取结果/摘要）+ 重试（JSON 不合规等）.
+- **降本要点**：
+  - 控制 chunk 大小与数量，减少重复 prompt 开销；
+  - 对静态规范类文档可采用更少切分、更高复用的策略；
+  - 对预计算因子表字典优先生成结构化索引（列名/含义/来源），减少“长文本反复读”.
+
+### 11.7 KB 治理：文档删除/禁用、可追溯与可审计
+
+即使不引入 LightRAG，也必须具备知识库治理能力，避免“错误文档污染生成”。建议：
+
+- **文档唯一标识**：所有入库文档需有稳定的 `doc_id`.
+- **软删除优先**：通过 registry 将 `doc_id` 标记为 disabled，检索时过滤；保留可回滚与审计记录.
+- **引用（citation）与审计落盘**：每次生成/评审应保存 `retrieved_contexts[]`（含 doc_id、source_path、chunk_id、score、kb_version）.
+- **KB 与 Index 分离**：KB 可版本化、Index 可重建，便于回滚与一致性管理.
+
+#### 11.7.1 文档管理策略（推荐软删除优先）
+
+- **软删除/禁用（P0 必做）**：
+  - 引入 `doc_registry`（doc_id -> status/enabled/disabled + source_path + hash + tags + kb_version）。
+  - 当发现文档不准确或会污染生成时，将其标记为 disabled；检索阶段必须过滤掉 disabled 文档。
+  - 优点：可回滚、可审计、实施成本低。
+- **硬删除（P1 可选）**：
+  - 对 Chroma 中对应 doc_id 的向量做物理删除（或触发重建索引）。
+  - 适用：确定永久删除且需要回收空间时。
+
+### 11.8 阶段 A/B 的架构边界与后续演进（避免复杂化）
+
+- **阶段 A（当前）**：RAG 仅负责 `retrieve()->contexts[]`, 注入因子生成与 critic 评审提示词.
+- **阶段 B（未来 AIstock NL2Strategy 多步骤）**：
+  - 不强制替换 LlamaIndex；可以自研轻量 orchestrator，或在确实需要复杂工作流时引入 LangChain 作为编排层；
+  - 关键是始终通过统一接口隔离底层实现：
+    - `RetrieverService.retrieve(query, filters) -> contexts[]`
+    - orchestrator 只依赖该接口与 RD-Agent 执行接口，不直接依赖底层框架对象.
+
+### 11.9 与因子研发效率直接相关的落地清单（建议优先级）
+
+- **P0：入库三类权威语料**：
+  - 因子开发硬约束（输出格式、股票池假设、文件写入协议等）；
+  - 预计算因子表数据字典（表名/列名/含义/口径/路径）；
+  - 常见错误模式与修复模板（例如“因子定义为 A_minus_B 则必须直接引用预计算 A/B 列”）.
+- **P0：最小校验器（validator）**：
+  - 自动检查 MultiIndex 与 `to_hdf` 协议；
+  - 自动提示“应优先使用预计算列而非重算”的规则；
+  - 自动处理/提示除零与 inf 风险.
+- **P1：检索策略**：
+  - 模式 A（严谨）：只检索 `rdagent_spec/aistock_integration/qlib_templates/factor_spec` 等强约束文档；
+  - 外部量化文献仅作为补充，不得覆盖本系统硬约束.
+
+### 11.10 设计方案更新：因子开发使用“RAG 增强的 LLM 调用链”
+
+本项目在因子开发阶段仍然由 LLM 负责编写代码；“使用 RAG”指在调用 LLM 之前检索项目内权威上下文，并将检索结果注入同一次 LLM 请求中，从而提高一次通过率并降低返工。
+
+#### 11.10.1 标准调用链（retrieve → augment → LLM → validator → 迭代）
+
+- **Step 1：构造查询**：基于因子定义、当前场景（数据约束/输出协议）、以及最近一次失败反馈（traceback/critic/validator 输出）生成检索 query。
+- **Step 2：RAG 检索**：使用 LlamaIndex 从 Chroma 向量库检索 `top_k` 片段，强制优先命中：
+  - 因子输出协议（MultiIndex、`result.h5`、`to_hdf` 写入规则）；
+  - 预计算因子表数据字典（表名/列名/口径/路径）；
+  - 常见错误模式与修复模板（例如“定义要求用预计算列则不得重算口径”）。
+- **Step 3：上下文拼装**：将检索结果格式化为固定结构的 `knowledge_context`（带 citation：doc_id/source_path/chunk_id），并注入因子编码提示词。
+- **Step 4：调用 LLM 生成代码**：LLM 输出因子实现代码。
+- **Step 5：执行与校验**：运行因子代码并执行 validator（输出格式、预计算列引用要求、除零/inf 风险等）。
+- **Step 6：失败则迭代**：把 validator 的结构化失败原因（而非长日志）与必要的 traceback 作为新的输入，再走一轮 Step 1-5。
+
+#### 11.10.3 Retry 策略（含“硬失败 gate”）
+
+为避免长时间无效循环（例如长达数小时仍无法进入回测），建议将失败分为“可修复失败（允许 retry）”与“不可修复失败（直接终止）”，并对 retry 次数设置硬上限（例如 1-2 次）。
+
+- **可修复失败（允许 retry，建议 1-2 次）**：
+  - 代码可通过修改直接修复的问题：
+    - 输出协议/格式错误（MultiIndex、`result.h5`、`to_hdf` key、dtype 等）；
+    - 列名/字段引用错误或缺失检查不足（例如定义要求必须使用 `mf_main_net_amt_ratio_5d` 但代码使用了 `mf_main_net_amt_ratio`）；
+    - LLM 输出结构不合规（JSON 解析失败等）。
+  - 对应策略：将 validator 的结构化错误摘要作为下一轮输入，必要时补充一次检索，触发“重写/修复代码”。
+
+- **不可修复失败（直接终止 abort，不进入 retry）**：
+  - 环境/数据/依赖/路径类问题（LLM 重写代码无法解决）：
+    - 数据文件缺失或路径错误；
+    - 依赖未安装、权限不足；
+    - 回测入口配置错误导致流程无法启动等。
+  - 对应策略：输出明确的“系统修复项”并终止，待人工/系统修复后再运行。
+
+#### 11.10.2 “必须引用预计算列（当定义如此要求时）”的落地方式
+
+- 当因子定义/任务描述明确点名需要使用某些已预计算字段（例如 `mf_main_net_amt_ratio_5d`、`mf_main_net_amt_ratio_20d`）时：
+  - 因子实现必须直接读取这些字段并组合计算，不得从原始明细字段重新推导等价滚动指标，以避免与预计算口径不一致。
+- 建议在因子任务结构中显式声明依赖字段（便于 validator 强制检查），而不是仅依赖自然语言解析。
+
+### 11.11 工程隔离与落地形态（LlamaIndex 进仓库，Chroma 数据不入 git）
+
+#### 11.11.1 代码与数据的边界
+
+- **LlamaIndex 作为 RD-Agent 的必须组件可以进入 git 仓库**：用于提供统一的 `RetrieverService` 接口与实现。
+- **Chroma/向量索引产物必须不入 git**：索引数据体积大、易变、不可审计；应放入可丢弃产物目录（例如 `git_ignore_folder`）并通过环境变量配置。
+
+#### 11.11.2 建议的目录与接口边界
+
+- 建议在 `rdagent/` 下新增独立子包（示例命名）：
+  - `rdagent/rag/`：只负责检索与上下文格式化
+    - `RetrieverService.retrieve(query, filters, top_k) -> contexts[]`
+    - `contexts[]` 仅包含纯数据（text/doc_id/source_path/score/kb_version），禁止向外暴露 LlamaIndex Node/Document 对象
+  - `rdagent/factor_dev/`（或因子开发组件内部）：仅调用 `RetrieverService` 获取 `knowledge_context`，再调用现有 LLM coder
+  - `rdagent/validators/`：集中放置 validator，失败时给出结构化可回灌的错误摘要
+
+#### 11.11.3 存储路径建议
+
+- 建议使用可配置存储目录（不入 git）：
+  - `RAG_STORAGE_DIR=git_ignore_folder/rag_storage`
+  - Chroma 持久化：`git_ignore_folder/rag_storage/chroma`
+  - 文档 registry 与索引元信息（doc_id、kb_version、embedding 配置等）同目录保存，便于回滚与重建
+
+#### 11.11.4 低侵入接入点
+
+- 对 RD-Agent 的接入建议控制在极少数位置：
+  - 在因子生成/因子实现/critic 评审的 prompt 渲染处增加 `knowledge_context`；
+  - 其他业务逻辑（回测、workspace、loop 调度）保持不变。
+- 必须保留开关（例如 `RAG_ENABLED`），确保随时可退化为“无 RAG 模式”以排障或对比效果。
+
+### 11.12 P0 金标测试用例：强制引用 `mf_main_net_amt_ratio_5d`
+
+为验证“RAG + validator + retry gate + trace”闭环在因子研发中的实际效果，P0 阶段引入一个可复现、可判定的金标用例。
+
+#### 11.12.1 用例背景
+
+- 在实际运行中发现同一类错误会在多个 Evolving Rounds 中重复出现：
+  - 因子定义明确要求使用预计算列 `mf_main_net_amt_ratio_5d`（来源：`static_factors.parquet` 或等价静态因子表）；
+  - 但实现代码错误地使用原始字段 `mf_main_net_amt_ratio` 并自行计算 5 日移动平均，从而与预计算口径不一致。
+
+#### 11.12.2 金标判定标准（必须满足）
+
+- **必须项**：
+  - 代码必须显式读取并使用 `mf_main_net_amt_ratio_5d` 作为输入；
+  - 代码必须对 `mf_main_net_amt_ratio_5d` 的存在性做检查：缺失时抛出明确错误（不可静默降级到其他字段）。
+- **禁止项**：
+  - 不允许使用 `mf_main_net_amt_ratio` 通过 rolling/mean 等方式替代 `mf_main_net_amt_ratio_5d`。
+
+该用例不要求因子收益表现（alpha）好坏，仅用于验证“实现是否符合定义口径”与“自动修复闭环是否生效”。
+
+### 11.13 整体架构（内嵌 RD-Agent，低侵入）
+
+#### 11.13.1 模块与职责
+
+- **RAG 检索层（内嵌）**：
+  - `rdagent/rag/`：LlamaIndex + Chroma 的封装与 `RetrieverService` 接口
+  - 输出：结构化 `contexts[]` 与可注入的 `knowledge_context`
+- **因子代码生成器（generator）**：
+  - `FactorCodeGenerator.generate(task) -> code`
+  - 内部编排：`retrieve → augment → LLM → run → validator → retry/abort`
+- **校验器（validators）**：
+  - `output_format_validator`：MultiIndex、`result.h5`、dtype、inf
+  - `precomputed_ref_validator`：当定义要求时强制引用预计算列（P0 金标用例即该 validator）
+- **Trace 记录与诊断（workspace）**：
+  - 每次 attempt 记录 query、命中 citation、validator 结果、决策等
+
+#### 11.13.2 对 RD-Agent 侵入最小化的接入点
+
+- P0 仅接入两处：
+  - **因子写代码**（factor coder）
+  - **critic 评审**（evaluator）
+- 接入方式：仅在 prompt 渲染上下文中增加 `knowledge_context`（当 `RAG_ENABLED=0` 时为空字符串）。
+
+### 11.14 实现方式（关键接口与数据结构）
+
+#### 11.14.1 `RetrieverService` 输出结构（对外契约）
+
+- `retrieve(query, filters, top_k) -> contexts[]`
+- `contexts[]` 每条至少包含：
+  - `text`
+  - `doc_id`
+  - `source_path`
+  - `chunk_id`
+  - `score`
+  - `type`（语义类型）
+  - `tags`（标签数组）
+  - `kb_version`
+  - `doc_format`
+
+#### 11.14.2 generator 的结构化 trace（必须落盘）
+
+- trace 存储位置：workspace 内固定文件，默认采用 `rag_trace.jsonl`（一行一个 attempt，便于流式写入与诊断）。
+- 每个 attempt 记录以下字段（最小集）：
+  - `attempt_idx`, `query`, `top_k`, `kb_version`
+  - `retrieved_contexts`（citation：doc_id/source_path/chunk_id/score/type）
+  - `validator_results`（name/passed/error_code/error_summary）
+  - `decision`（accept/retry/abort）
+  - `timing_ms`（retrieve/llm/run/validate）
+
+该 trace 是诊断 RAG 是否起作用、以及定位“坏文档污染”的首要依据。
+
+#### 11.14.3 validator + retry gate（P0 必须实现）
+
+- validator 将失败分类为两类：
+  - **可修复失败**（触发 retry 1-2 次）：代码/输出协议/列名/格式
+  - **不可修复失败**（直接 abort）：环境/数据/依赖/路径
+- P0 金标用例的 validator 建议输出结构化摘要（用于回灌）：
+  - `error_code: PRECOMPUTED_COLUMN_REQUIRED`
+  - `required_columns: ["mf_main_net_amt_ratio_5d"]`
+  - `forbidden_columns: ["mf_main_net_amt_ratio"]`
+  - `fix_instruction`: 必须直接读取 required_columns，不得 rolling 替代；缺失则抛 ValueError
+
+### 11.15 落地步骤（P0）与验收标准
+
+#### 11.15.1 P0 步骤（按顺序）
+
+1. **确定 embedding provider 与模型**：通过 `.env` 配置 embedding API 与模型名（建议优先使用 `BAAI/bge-m3`）。
+2. **建立 P0 KB 语料清单**：仅索引 `docs/ + prompts + 规范片段`，并将“预计算列必须引用”的规则与反例纳入语料。
+3. **实现 `rdagent/rag/` 最小可用版本**：Chroma 持久化目录位于 `git_ignore_folder/rag_storage/chroma`。
+4. **实现 `FactorCodeGenerator`（封装调用链）**：输出结构化 trace，并支持 `RAG_ENABLED` 回退。
+5. **接入两处 prompt**：因子写代码 + critic，注入 `knowledge_context`。
+6. **实现 P0 validators**：输出协议 validator + 预计算引用 validator（覆盖金标用例）。
+7. **接入 retry gate**：对可修复失败触发 1-2 次自动修复；不可修复失败直接 abort。
+8. **实现文档管理（P0：软删除/禁用）**：落地 `doc_registry`，支持将某个 doc_id 标记为 disabled，并在检索阶段强制过滤。
+9. **跑金标用例验证**：触发一次“错误实现（使用 mf_main_net_amt_ratio rolling）”并确认系统能在一次 retry 内修正为引用 `mf_main_net_amt_ratio_5d`。
+
+#### 11.15.2 P0 验收标准
+
+- **A1：金标用例收敛**：同一因子在一次失败后，下一次 retry 能修复为“直接使用 `mf_main_net_amt_ratio_5d` 并做存在性检查”。
+- **A2：trace 完整**：workspace 中可看到每次 attempt 的 query、citation、validator 结果、以及 retry/abort 决策。
+- **A3：回退可用**：`RAG_ENABLED=0` 时，系统行为与原流程一致，不引入额外失败。
+- **A4：无效长循环被阻断**：当出现环境/数据/依赖/路径类错误时，流程能快速 abort 并给出明确修复项，不再无限重试。
+- **A5：文档可禁用**：将某个 doc_id 标记为 disabled 后，该文档不再出现在 `retrieved_contexts` 中；取消禁用后可恢复命中。
