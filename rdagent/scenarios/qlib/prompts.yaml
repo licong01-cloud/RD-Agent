@@ -93,10 +93,10 @@ model_hypothesis_specification: |-
   8. Use standard libraries for baseline models, but also explore custom architecture designs to investigate novel structures. After sufficient trials with traditional models, aim for innovation comparable to top-tier AI conferences (NeurIPS, ICLR, ICML, SIGKDD, etc.) in time series modeling.
 
 factor_hypothesis_specification: |-
-  1. **1-5 Factors per Generation:**
-    - Ensure each generation produces 1-5 factors.
-    - Balance simplicity and complexity to build a robust factor library.
-    - Make full use of the financial data provided to you instead of focusing solely on a specific field.
+  1. **1-3 Factors per Generation (优先快速验证回测有效性)：**
+    - 当前阶段每一轮因子生成只需给出 **1-3 个候选因子**，优先确保能够快速进入回测并验证结果不是统一复用。
+    - 在这 1-3 个因子中，**至少 1 个必须直接基于静态或资金流相关字段**（例如来自 static_factors.parquet 或 moneyflow 的字段），不能只使用日频价量 (`open/high/low/close/volume/amount`)。
+    - 在给出多个因子时，请在类型、数据来源和结构上保持一定多样性，避免高度相似的微调版本。
   2. **Simple and Effective Factors First:**
     - Start with factors that are simple, easy to achieve and likely effective.
     - Concisely explain why these factors are expected to work.
@@ -107,7 +107,17 @@ factor_hypothesis_specification: |-
   4. **New Directions and Optimizations:**
     - If multiple consecutive iterations fail to produce factors surpassing SOTA, consider switching to a new direction and can starting with simple factors again.
     - If optimizing a specific type of factor, proceed from simple to complex.
-  5. Note
+  5. **Data Source Constraints (非常重要)：**
+    - 你必须优先使用当前回测数据中已经提供的 **静态/资金流因子表**，尤其是 `static_factors.parquet` 中的字段（例如主力资金、北向资金、行业/规模相关特征等）。
+    - 在每一轮因子设计中，**至少设计 2 个因子必须直接依赖静态或资金流相关字段**（例如来自 static_factors 或 moneyflow 的字段），不得全部只依赖日频价量 (`open/high/low/close/volume/amount`)。
+    - 设计因子时，只能使用已经在数据侧真实存在的字段名，禁止编造新的字段名称；如果不确定字段是否存在，应避免使用。
+  6. **Avoid Trivial Price-Volume Replication（避免平庸价量重复）：**
+    - 当前 SOTA 因子库已经广泛覆盖了基于日频价量的动量、波动率、成交量放大、K 线形态等传统信号。请避免再设计与这些因子在形式上高度类似的指标，例如简单的 `past N-day return`、`volume spike`、`moving average crossover` 等轻微变体。
+    - 新因子应当在 **数据来源**（如资金流、行业/市值、持股结构、静态风格暴露等）或 **数学结构**（如非线性组合、比率结构、归一化方式）上相对于现有 SOTA 因子有明显差异，而不是对已有信号做线性变换或简单平移缩放。
+  7. **Diversification & Dissimilarity（增强差异性）：**
+    - 在同一轮中生成的多个因子之间，应尽量减少高度同质化的设计，避免只是改变窗口长度或简单参数（例如仅将 10 日动量改成 20 日动量）。
+    - 新因子的一个重要目标是：在横截面上与典型价量动量/成交量类因子不要过高相关。你可以通过引入静态资金面、风格/行业暴露、风险因子等信息来降低与传统价量信号的线性相关性。
+  8. Note
     - Highlight that factors surpassing SOTA are included in the library to avoid re-implementation.
     - No matter how many factors you plan to generate, only reply with one set of hypothesis and reason. The hypothesis can include the proposal of multiple factors at the same time.
 
@@ -152,9 +162,9 @@ model_experiment_output_format: |-
             "hyperparameter_name_3": "value of hyperparameter 3"
         },
         "training_hyperparameters" {  # All values are for reference; you can set them yourself
-            "n_epochs": "100",
+            "n_epochs": "20",
             "lr": "1e-3",
-            "early_stop": 10,
+            "early_stop": 5,
             "batch_size": 256,
             "weight_decay": 1e-4,
         }

@@ -3,7 +3,7 @@ qlib_init:
     region: cn
 
 market: &market all
-benchmark: &benchmark ""
+benchmark: &benchmark 000300.SH
 
 data_handler_config: &data_handler_config
     start_time: 2010-01-07
@@ -64,6 +64,7 @@ port_analysis_config: &port_analysis_config
         # clamp to bin range and avoid last calendar step
         end_time: 2025-11-28
         account: 100000000
+        benchmark: *benchmark
         exchange_kwargs:
             limit_threshold: 0.095
             deal_price: close

@@ -1,3 +1,6 @@
+import os
+from pathlib import Path
+
 import pandas as pd
 
 from rdagent.components.runner import CachedRunner
@@ -5,9 +8,14 @@ from rdagent.core.conf import RD_AGENT_SETTINGS
 from rdagent.core.exception import ModelEmptyError
 from rdagent.core.utils import cache_with_pickle
 from rdagent.log import rdagent_logger as logger
+from rdagent.oai.llm_utils import md5_hash
 from rdagent.scenarios.qlib.developer.utils import process_factor_data
 from rdagent.scenarios.qlib.experiment.factor_experiment import QlibFactorExperiment
 from rdagent.scenarios.qlib.experiment.model_experiment import QlibModelExperiment
+
+
+def qlib_model_cache_key(runner: "QlibModelRunner", exp: QlibModelExperiment) -> str | None:  # type: ignore[name-defined]
+    return runner.get_cache_key(exp)
 
 
 class QlibModelRunner(CachedRunner[QlibModelExperiment]):
@@ -23,7 +31,78 @@ class QlibModelRunner(CachedRunner[QlibModelExperiment]):
     - let LLM modify model.py
     """
 
-    @cache_with_pickle(CachedRunner.get_cache_key, CachedRunner.assign_cached_result)
+    def get_cache_key(self, exp: QlibModelExperiment) -> str | None:
+        """Cache key sensitive to model implementation and factor inputs.
+
+        - If env QLIB_QUANT_DISABLE_CACHE=1, disable cache.
+        - Otherwise include:
+          * default task-based key
+          * current model.py source
+          * combined_factors_df.parquet signature (size + mtime) if exists
+          * training hyperparameters dict
+        """
+
+        if os.getenv("QLIB_QUANT_DISABLE_CACHE", "0") == "1":
+            return None
+
+        base_key = CachedRunner.get_cache_key(self, exp)
+        parts: list[str] = [base_key]
+
+        if exp.sub_workspace_list and exp.sub_workspace_list[0] is not None:
+            sub_ws = exp.sub_workspace_list[0]
+            if isinstance(sub_ws.file_dict, dict):
+                model_src = sub_ws.file_dict.get("model.py")
+                if isinstance(model_src, str) and model_src:
+                    parts.append(model_src)
+
+        ws_path = getattr(exp.experiment_workspace, "workspace_path", None)
+        if isinstance(ws_path, Path):
+            cf_path = ws_path / "combined_factors_df.parquet"
+            if cf_path.exists():
+                stat = cf_path.stat()
+                parts.append(f"cf_size={stat.st_size}")
+                parts.append(f"cf_mtime={stat.st_mtime}")
+
+        training_hyperparameters = getattr(exp.sub_tasks[0], "training_hyperparameters", None)
+        if isinstance(training_hyperparameters, dict) and training_hyperparameters:
+            parts.append(str(sorted(training_hyperparameters.items())))
+
+        return md5_hash("\n".join(parts))
+
+    def _is_retryable_model_failure(self, stdout: str) -> bool:
+        if not isinstance(stdout, str) or not stdout:
+            return False
+        s = stdout.lower()
+        needles = [
+            "this type of input is not supported",
+            "notimplementederror",
+            "_get_row_col",
+            "step_len",
+            "num_timesteps",
+        ]
+        return any(n in s for n in needles)
+
+    def _execute_with_retry(
+        self,
+        exp: QlibModelExperiment,
+        qlib_config_name: str,
+        base_env: dict,
+        attempts: list[dict],
+    ):
+        last_result, last_stdout = None, ""
+        for idx, env_patch in enumerate(attempts, start=1):
+            run_env = dict(base_env)
+            run_env.update(env_patch)
+            logger.info(f"[ModelRetry] attempt {idx}/{len(attempts)} run_env={env_patch}")
+            result, stdout = exp.experiment_workspace.execute(qlib_config_name=qlib_config_name, run_env=run_env)
+            last_result, last_stdout = result, stdout
+            if result is not None:
+                return result, stdout
+            if not self._is_retryable_model_failure(stdout):
+                break
+        return last_result, last_stdout
+
+    @cache_with_pickle(qlib_model_cache_key, CachedRunner.assign_cached_result)
     def develop(self, exp: QlibModelExperiment) -> QlibModelExperiment:
         if exp.based_experiments and exp.based_experiments[-1].result is None:
             exp.based_experiments[-1] = self.develop(exp.based_experiments[-1])
@@ -71,38 +150,52 @@ class QlibModelRunner(CachedRunner[QlibModelExperiment]):
                     "weight_decay": str(training_hyperparameters.get("weight_decay", 0.0001)),
                 }
             )
+        else:
+            # Default settings tuned for end-to-end pipeline stability.
+            # Long PT trainings can take hours and are often interrupted, leaving no artifacts for read_exp_res.py.
+            env_to_use.update(
+                {
+                    "n_epochs": "20",
+                    "lr": "1e-3",
+                    "early_stop": "5",
+                    "batch_size": "256",
+                    "weight_decay": "1e-4",
+                }
+            )
 
         logger.info(f"start to run {exp.sub_tasks[0].name} model")
-        if exp.sub_tasks[0].model_type == "TimeSeries":
-            if exist_sota_factor_exp:
-                env_to_use.update(
-                    {"dataset_cls": "TSDatasetH", "num_features": num_features, "step_len": 20, "num_timesteps": 20}
-                )
-                result, stdout = exp.experiment_workspace.execute(
-                    qlib_config_name="conf_sota_factors_model.yaml", run_env=env_to_use
-                )
-            else:
-                env_to_use.update({"dataset_cls": "TSDatasetH", "step_len": 20, "num_timesteps": 20})
-                result, stdout = exp.experiment_workspace.execute(
-                    qlib_config_name="conf_baseline_factors_model.yaml", run_env=env_to_use
-                )
-        elif exp.sub_tasks[0].model_type == "Tabular":
-            if exist_sota_factor_exp:
-                env_to_use.update({"dataset_cls": "DatasetH", "num_features": num_features})
-                result, stdout = exp.experiment_workspace.execute(
-                    qlib_config_name="conf_sota_factors_model.yaml", run_env=env_to_use
-                )
-            else:
-                env_to_use.update({"dataset_cls": "DatasetH"})
-                result, stdout = exp.experiment_workspace.execute(
-                    qlib_config_name="conf_baseline_factors_model.yaml", run_env=env_to_use
-                )
+
+        model_type = getattr(exp.sub_tasks[0], "model_type", None)
+        if model_type not in ("TimeSeries", "Tabular"):
+            raise ModelEmptyError(
+                f"Unsupported model_type '{model_type}'. It must be either 'TimeSeries' or 'Tabular' so that "
+                "the runner can choose a compatible dataset format (TSDatasetH vs DatasetH)."
+            )
+
+        if model_type == "TimeSeries":
+            qlib_config_name = "conf_sota_factors_model.yaml" if exist_sota_factor_exp else "conf_baseline_factors_model.yaml"
+            attempts = [
+                {"dataset_cls": "TSDatasetH", "step_len": 20, "num_timesteps": 20, **({"num_features": num_features} if exist_sota_factor_exp else {})},
+                {"dataset_cls": "DatasetH", "step_len": 20, "num_timesteps": 20, **({"num_features": num_features} if exist_sota_factor_exp else {})},
+                {"dataset_cls": "TSDatasetH", "step_len": 60, "num_timesteps": 60, **({"num_features": num_features} if exist_sota_factor_exp else {})},
+            ]
+            result, stdout = self._execute_with_retry(exp, qlib_config_name=qlib_config_name, base_env=env_to_use, attempts=attempts)
+        elif model_type == "Tabular":
+            qlib_config_name = "conf_sota_factors_model.yaml" if exist_sota_factor_exp else "conf_baseline_factors_model.yaml"
+            attempts = [
+                {"dataset_cls": "DatasetH", **({"num_features": num_features} if exist_sota_factor_exp else {})},
+                {"dataset_cls": "TSDatasetH", "step_len": 20, "num_timesteps": 20, **({"num_features": num_features} if exist_sota_factor_exp else {})},
+                {"dataset_cls": "TSDatasetH", "step_len": 60, "num_timesteps": 60, **({"num_features": num_features} if exist_sota_factor_exp else {})},
+            ]
+            result, stdout = self._execute_with_retry(exp, qlib_config_name=qlib_config_name, base_env=env_to_use, attempts=attempts)
 
         exp.result = result
         exp.stdout = stdout
 
         if result is None:
-            logger.error(f"Failed to run {exp.sub_tasks[0].name}, because {stdout}")
-            raise ModelEmptyError(f"Failed to run {exp.sub_tasks[0].name} model, because {stdout}")
+            ws_path = getattr(getattr(exp, "experiment_workspace", None), "workspace_path", None)
+            ws_info = f" (experiment_workspace={ws_path})" if ws_path is not None else ""
+            logger.error(f"Failed to run {exp.sub_tasks[0].name}{ws_info}, because {stdout}")
+            raise ModelEmptyError(f"Failed to run {exp.sub_tasks[0].name} model{ws_info}, because {stdout}")
 
         return exp

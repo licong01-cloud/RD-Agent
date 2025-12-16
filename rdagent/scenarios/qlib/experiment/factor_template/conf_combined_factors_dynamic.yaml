@@ -34,17 +34,7 @@ data_handler_config: &data_handler_config
             min_dynamic_non_nan_ratio: 0.01
             min_instrument_overlap_ratio: 0.8
             enforce_instrument_format: true
-    
-    infer_processors:
-        - class: RobustZScoreNorm
-          kwargs:
-              fields_group: feature
-              clip_outlier: true
-              fit_start_time: 2010-01-07
-              fit_end_time: 2014-12-31
-        - class: Fillna
-          kwargs:
-              fields_group: feature
+
     learn_processors:
         - class: DropnaLabel
         - class: CSZScoreNorm
@@ -61,37 +51,34 @@ port_analysis_config: &port_analysis_config
             n_drop: 5
     backtest:
         start_time: 2021-01-01
-        # clamp to bin range and avoid last calendar step
         end_time: 2025-11-28
         account: 100000000
         benchmark: *benchmark
         exchange_kwargs:
             limit_threshold: 0.095
             deal_price: close
-            open_cost: 0.0005
-            close_cost: 0.0015
+            open_cost: 0.0001
+            close_cost: 0.0001
             min_cost: 5
 
 task:
     model:
-        class: GeneralPTNN
-        module_path: qlib.contrib.model.pytorch_general_nn
+        class: LGBModel
+        module_path: qlib.contrib.model.gbdt
         kwargs:
-            n_epochs: {{ n_epochs }}
-            lr: {{ lr }}
-            early_stop: {{ early_stop }}
-            batch_size: {{ batch_size }}
-            weight_decay: {{ weight_decay }}
-            metric: loss
             loss: mse
-            n_jobs: 20
-            GPU: 0
-            pt_model_uri: "model.model_cls"
-            pt_model_kwargs: {
-                "num_features": {{ num_features }}{% if num_timesteps %}, "num_timesteps": {{ num_timesteps }}{% endif %}
-            }
+            device_type: cpu
+            max_bin: 63
+            colsample_bytree: 0.8879
+            learning_rate: 0.2
+            subsample: 0.8789
+            lambda_l1: 205.6999
+            lambda_l2: 580.9768
+            max_depth: 8
+            num_leaves: 210
+            num_threads: 20
     dataset:
-        class: {{ dataset_cls | default("DatasetH") }}
+        class: DatasetH
         module_path: qlib.data.dataset
         kwargs:
             handler:
@@ -102,19 +89,18 @@ task:
                 train: [2016-01-01, 2018-12-31]
                 valid: [2019-01-01, 2020-12-31]
                 test: [2021-01-01, 2025-12-31]
-            {% if step_len %}step_len: {{ step_len }}{% endif %}
-    record: 
+    record:
         - class: SignalRecord
           module_path: qlib.workflow.record_temp
-          kwargs: 
+          kwargs:
             model: <MODEL>
             dataset: <DATASET>
         - class: SigAnaRecord
           module_path: qlib.workflow.record_temp
-          kwargs: 
+          kwargs:
             ana_long_short: False
             ann_scaler: 252
         - class: PortAnaRecord
           module_path: qlib.workflow.record_temp
-          kwargs: 
+          kwargs:
             config: *port_analysis_config

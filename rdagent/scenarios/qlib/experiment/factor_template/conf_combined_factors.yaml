@@ -3,7 +3,7 @@ qlib_init:
     region: cn
 
 market: &market all
-benchmark: &benchmark DAILY_ALL
+benchmark: &benchmark 000300.SH
 
 data_handler_config: &data_handler_config
     start_time: 2010-01-07
@@ -65,6 +65,9 @@ task:
         module_path: qlib.contrib.model.gbdt
         kwargs:
             loss: mse
+            device_type: gpu
+            gpu_use_dp: false
+            max_bin: 63
             colsample_bytree: 0.8879
             learning_rate: 0.2
             subsample: 0.8789

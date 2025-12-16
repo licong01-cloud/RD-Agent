@@ -2,6 +2,7 @@ import random
 import re
 import shutil
 import subprocess
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -44,6 +45,34 @@ def generate_data_folder_from_qlib():
         Path(FACTOR_COSTEER_SETTINGS.data_folder) / "README.md",
     )
 
+    repo_root = Path(__file__).resolve().parents[4]
+    repo_static_parquet = repo_root / "git_ignore_folder" / "factor_implementation_source_data" / "static_factors.parquet"
+    repo_static_schema_csv = repo_static_parquet.with_name("static_factors_schema.csv")
+    repo_static_schema_json = repo_static_parquet.with_name("static_factors_schema.json")
+
+    aistock_static_parquet = Path("/mnt/c/Users/lc999/NewAIstock/AIstock/factors/combined_static_factors.parquet")
+
+    if repo_static_parquet.exists():
+        shutil.copy(
+            repo_static_parquet,
+            Path(FACTOR_COSTEER_SETTINGS.data_folder) / "static_factors.parquet",
+        )
+        if repo_static_schema_csv.exists():
+            shutil.copy(
+                repo_static_schema_csv,
+                Path(FACTOR_COSTEER_SETTINGS.data_folder) / "static_factors_schema.csv",
+            )
+        if repo_static_schema_json.exists():
+            shutil.copy(
+                repo_static_schema_json,
+                Path(FACTOR_COSTEER_SETTINGS.data_folder) / "static_factors_schema.json",
+            )
+    elif aistock_static_parquet.exists():
+        shutil.copy(
+            aistock_static_parquet,
+            Path(FACTOR_COSTEER_SETTINGS.data_folder) / "static_factors.parquet",
+        )
+
     Path(FACTOR_COSTEER_SETTINGS.data_folder_debug).mkdir(parents=True, exist_ok=True)
     shutil.copy(
         Path(__file__).parent / "factor_data_template" / "daily_pv_debug.h5",
@@ -53,6 +82,27 @@ def generate_data_folder_from_qlib():
         Path(__file__).parent / "factor_data_template" / "README.md",
         Path(FACTOR_COSTEER_SETTINGS.data_folder_debug) / "README.md",
     )
+
+    if repo_static_parquet.exists():
+        shutil.copy(
+            repo_static_parquet,
+            Path(FACTOR_COSTEER_SETTINGS.data_folder_debug) / "static_factors.parquet",
+        )
+        if repo_static_schema_csv.exists():
+            shutil.copy(
+                repo_static_schema_csv,
+                Path(FACTOR_COSTEER_SETTINGS.data_folder_debug) / "static_factors_schema.csv",
+            )
+        if repo_static_schema_json.exists():
+            shutil.copy(
+                repo_static_schema_json,
+                Path(FACTOR_COSTEER_SETTINGS.data_folder_debug) / "static_factors_schema.json",
+            )
+    elif aistock_static_parquet.exists():
+        shutil.copy(
+            aistock_static_parquet,
+            Path(FACTOR_COSTEER_SETTINGS.data_folder_debug) / "static_factors.parquet",
+        )
 
 
 def get_file_desc(p: Path, variable_list=[]) -> str:
@@ -135,6 +185,85 @@ def get_file_desc(p: Path, variable_list=[]) -> str:
             content=df_info,
         )
 
+    elif p.name.endswith(".parquet"):
+        file_size_mb = p.stat().st_size / (1024 * 1024)
+        content = "### File Info\n"
+        content += f"- Size: {file_size_mb:.2f} MB\n"
+
+        if p.name == "static_factors.parquet":
+            content += "\n### Intended Usage\n"
+            content += "- This is a joinable static factor table (e.g., fundamentals/liquidity/flow fields)\n"
+            content += "- Typical index convention: (datetime, instrument)\n"
+            content += "- Common column prefixes: db_ (daily_basic), mf_ (moneyflow), ae_ (precomputed factors)\n"
+
+        schema_csv = p.with_name(f"{p.stem}_schema.csv")
+        schema_json = p.with_name(f"{p.stem}_schema.json")
+
+        schema_loaded = False
+        if schema_csv.exists():
+            try:
+                schema_df = pd.read_csv(schema_csv)
+                content += "\n### Schema (from .csv)\n"
+                for _, row in schema_df.head(60).iterrows():
+                    col = str(row.get("name", ""))
+                    dtype = str(row.get("dtype", ""))
+                    meaning = (
+                        row.get("meaning")
+                        if "meaning" in schema_df.columns
+                        else row.get("meaning_cn")
+                        if "meaning_cn" in schema_df.columns
+                        else row.get("meaning_zh")
+                    )
+                    meaning = "" if meaning is None else str(meaning)
+                    if col:
+                        line = f"- {col} ({dtype})"
+                        if meaning and meaning != "nan":
+                            line += f": {meaning}"
+                        content += line + "\n"
+                schema_loaded = True
+            except Exception:
+                schema_loaded = False
+        elif schema_json.exists():
+            try:
+                schema_obj = json.loads(schema_json.read_text(encoding="utf-8"))
+                cols = schema_obj.get("columns", []) if isinstance(schema_obj, dict) else []
+                content += "\n### Schema (from .json)\n"
+                for item in cols[:60]:
+                    if not isinstance(item, dict):
+                        continue
+                    col = str(item.get("name", ""))
+                    dtype = str(item.get("dtype", ""))
+                    meaning = item.get("meaning") or item.get("meaning_cn") or item.get("meaning_zh") or ""
+                    meaning = str(meaning)
+                    if col:
+                        line = f"- {col} ({dtype})"
+                        if meaning:
+                            line += f": {meaning}"
+                        content += line + "\n"
+                schema_loaded = True
+            except Exception:
+                schema_loaded = False
+
+        if not schema_loaded:
+            try:
+                import pyarrow.parquet as pq  # type: ignore[import-not-found]
+
+                pf = pq.ParquetFile(p)
+                arrow_schema = pf.schema_arrow
+                names = [arrow_schema.names[i] for i in range(len(arrow_schema.names))]
+                content += "\n### Columns (from parquet metadata)\n"
+                shown = names[:120]
+                content += ", ".join(shown) + ("\n..." if len(names) > 120 else "\n")
+            except Exception:
+                content += "\n### Columns\n"
+                content += "- Unable to read parquet schema (pyarrow not available or file unreadable).\n"
+
+        return JJ_TPL.render(
+            file_name=p.name,
+            type_desc="Parquet Data File",
+            content=content,
+        )
+
     elif p.name.endswith(".md"):
         with open(p) as f:
             content = f.read()
@@ -143,6 +272,77 @@ def get_file_desc(p: Path, variable_list=[]) -> str:
                 type_desc="Markdown Documentation",
                 content=content,
             )
+
+    elif p.name.endswith(".csv"):
+        try:
+            df = pd.read_csv(p)
+            content = ""
+            content += f"\n## Content Overview\n"
+            content += f"- rows: {len(df)}\n"
+            content += f"- columns: {list(df.columns)}\n"
+            if "name" in df.columns:
+                shown = df.head(80)
+                content += "\n### Preview (first 80 rows)\n"
+                for _, row in shown.iterrows():
+                    col = str(row.get("name", ""))
+                    dtype = str(row.get("dtype", ""))
+                    meaning = (
+                        row.get("meaning")
+                        if "meaning" in df.columns
+                        else row.get("meaning_cn")
+                        if "meaning_cn" in df.columns
+                        else row.get("meaning_zh")
+                    )
+                    meaning = "" if meaning is None else str(meaning)
+                    if col:
+                        line = f"- {col} ({dtype})"
+                        if meaning and meaning != "nan":
+                            line += f": {meaning}"
+                        content += line + "\n"
+            else:
+                content += "\n### Preview\n"
+                content += df.head(40).to_string(index=False) + "\n"
+        except Exception as e:
+            content = "\n## Content Overview\n"
+            content += f"- failed to read csv: {repr(e)}\n"
+        return JJ_TPL.render(
+            file_name=p.name,
+            type_desc="CSV Data File",
+            content=content,
+        )
+
+    elif p.name.endswith(".json"):
+        try:
+            obj = json.loads(p.read_text(encoding="utf-8"))
+            content = "\n## Content Overview\n"
+            if isinstance(obj, dict) and "columns" in obj:
+                cols = obj.get("columns", [])
+                content += f"- columns entries: {len(cols) if isinstance(cols, list) else 'N/A'}\n"
+                if isinstance(cols, list):
+                    content += "\n### Preview (first 80 columns)\n"
+                    for item in cols[:80]:
+                        if not isinstance(item, dict):
+                            continue
+                        col = str(item.get("name", ""))
+                        dtype = str(item.get("dtype", ""))
+                        meaning = item.get("meaning") or item.get("meaning_cn") or item.get("meaning_zh") or ""
+                        meaning = str(meaning)
+                        if col:
+                            line = f"- {col} ({dtype})"
+                            if meaning:
+                                line += f": {meaning}"
+                            content += line + "\n"
+            else:
+                content += "\n### Preview\n"
+                content += str(obj)[:4000] + ("\n...\n" if len(str(obj)) > 4000 else "\n")
+        except Exception as e:
+            content = "\n## Content Overview\n"
+            content += f"- failed to read json: {repr(e)}\n"
+        return JJ_TPL.render(
+            file_name=p.name,
+            type_desc="JSON Data File",
+            content=content,
+        )
 
     else:
         raise NotImplementedError(

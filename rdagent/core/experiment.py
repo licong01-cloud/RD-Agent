@@ -210,13 +210,38 @@ class FBWorkspace(Workspace):
         data_path = Path(data_path).absolute()  # in case of relative path that will be invalid when we change cwd.
         workspace_path = Path(workspace_path)
         for data_file_path in data_path.iterdir():
+            # Do not inject output/lock/artifact files into the execution workspace.
+            # The executed factor is expected to write `result.h5` into workspace_path.
+            if data_file_path.name in {"result.h5", "execution.lock"}:
+                continue
             workspace_data_file_path = workspace_path / data_file_path.name
             if workspace_data_file_path.exists():
                 workspace_data_file_path.unlink()
-            if platform.system() in ("Linux", "Darwin"):
-                workspace_data_file_path.symlink_to(data_file_path)
-            if platform.system() == "Windows":
+            try:
                 os.link(data_file_path, workspace_data_file_path)
+                continue
+            except OSError:
+                pass
+
+            if platform.system() in ("Linux", "Darwin"):
+                try:
+                    workspace_data_file_path.symlink_to(data_file_path)
+                    continue
+                except OSError:
+                    pass
+
+            # Last resort: copy small files only.
+            # Copying large H5 files would quickly fill up the disk and is usually unnecessary.
+            try:
+                size = data_file_path.stat().st_size
+            except OSError:
+                size = 0
+            if size > 50 * 1024 * 1024:
+                raise OSError(
+                    f"Failed to link/symlink large file into workspace: {data_file_path} -> {workspace_data_file_path}. "
+                    "Refusing to copy large files. Please check filesystem permissions/symlink settings."
+                )
+            shutil.copy2(data_file_path, workspace_data_file_path)
 
     DEL_KEY = "__DEL__"
 

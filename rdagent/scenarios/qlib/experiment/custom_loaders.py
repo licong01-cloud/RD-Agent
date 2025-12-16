@@ -107,3 +107,143 @@ class CombinedAlpha158StaticLoader:
             merged = merged.sort_index()
 
         return merged
+
+
+class CombinedAlpha158DynamicFactorsLoader:
+    def __init__(
+        self,
+        alpha158_config: dict,
+        dynamic_path: str,
+        join: str = "left",
+        min_dynamic_non_nan_ratio: float = 0.01,
+        min_instrument_overlap_ratio: float = 0.8,
+        enforce_instrument_format: bool = True,
+    ) -> None:
+        self.alpha_loader = Alpha158DL(config=alpha158_config)
+        self.dynamic_loader = StaticDataLoader(config=dynamic_path)
+        self.join = join
+        self.min_dynamic_non_nan_ratio = float(min_dynamic_non_nan_ratio)
+        self.min_instrument_overlap_ratio = float(min_instrument_overlap_ratio)
+        self.enforce_instrument_format = bool(enforce_instrument_format)
+
+    @staticmethod
+    def _ensure_datetime_instrument_index(df: pd.DataFrame) -> pd.DataFrame:
+        if df is None:
+            return df
+
+        if not isinstance(df.index, pd.MultiIndex) or set(df.index.names) != {"datetime", "instrument"}:
+            if {"datetime", "instrument"}.issubset(df.columns):
+                df = df.copy()
+                df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
+                df = df.set_index(["datetime", "instrument"])
+
+        if isinstance(df.index, pd.MultiIndex):
+            names = list(df.index.names)
+            if set(names) == {"datetime", "instrument"} and names != ["datetime", "instrument"]:
+                df = df.swaplevel("datetime", "instrument")
+            df = df.sort_index()
+
+        return df
+
+    @staticmethod
+    def _ensure_feature_columns(df: pd.DataFrame) -> pd.DataFrame:
+        if df is None:
+            return df
+
+        if not isinstance(df.columns, pd.MultiIndex):
+            df = df.copy()
+            df.columns = pd.MultiIndex.from_product([["feature"], df.columns.astype(str)])
+            return df
+
+        if df.columns.nlevels == 1:
+            df = df.copy()
+            df.columns = pd.MultiIndex.from_product([["feature"], df.columns.astype(str)])
+            return df
+
+        level0 = df.columns.get_level_values(0).astype(str)
+        if not level0.isin(["feature", "label"]).all():
+            df = df.copy()
+            df.columns = pd.MultiIndex.from_product([["feature"], df.columns.get_level_values(-1).astype(str)])
+        return df
+
+    @staticmethod
+    def _validate_instrument_format(instruments: pd.Index) -> None:
+        if instruments is None:
+            return
+        s = pd.Index(instruments.astype(str))
+        ok = s.str.match(r"^\d{6}\.(SZ|SH)$")
+        if not bool(ok.all()):
+            bad = s[~ok][:20].tolist()
+            raise ValueError(
+                "Invalid instrument format detected in dynamic factors. "
+                "Expected like '000001.SZ' or '600000.SH'. "
+                f"Examples: {bad}"
+            )
+
+    def load(  # type: ignore[override]
+        self,
+        instruments: Optional[object] = None,
+        start_time: Optional[object] = None,
+        end_time: Optional[object] = None,
+    ) -> pd.DataFrame:
+        df_alpha = self.alpha_loader.load(
+            instruments=instruments, start_time=start_time, end_time=end_time
+        )
+        df_alpha = self._ensure_datetime_instrument_index(df_alpha)
+        df_alpha = self._ensure_feature_columns(df_alpha)
+
+        df_dynamic = self.dynamic_loader.load(instruments=None, start_time=start_time, end_time=end_time)
+        df_dynamic = self._ensure_datetime_instrument_index(df_dynamic)
+        df_dynamic = self._ensure_feature_columns(df_dynamic)
+
+        if df_dynamic is None or df_dynamic.empty:
+            raise ValueError(
+                "Dynamic factors parquet is empty after loading/time slicing. "
+                "Refusing to run backtest with only Alpha158 factors."
+            )
+
+        if not isinstance(df_dynamic.index, pd.MultiIndex) or set(df_dynamic.index.names) != {"datetime", "instrument"}:
+            raise ValueError(
+                "Dynamic factors parquet must be indexed by MultiIndex(datetime, instrument). "
+                "Either write parquet with the correct MultiIndex, or include 'datetime' and 'instrument' columns."
+            )
+
+        dyn_instruments = df_dynamic.index.get_level_values("instrument")
+        if self.enforce_instrument_format:
+            self._validate_instrument_format(dyn_instruments)
+
+        if df_alpha is not None and isinstance(df_alpha.index, pd.MultiIndex) and set(df_alpha.index.names) == {"datetime", "instrument"}:
+            alpha_instruments = pd.Index(df_alpha.index.get_level_values("instrument").astype(str).unique())
+            dyn_unique = pd.Index(dyn_instruments.astype(str).unique())
+            if len(dyn_unique) > 0:
+                overlap_ratio = float(dyn_unique.isin(alpha_instruments).mean())
+                if overlap_ratio < self.min_instrument_overlap_ratio:
+                    raise ValueError(
+                        "Dynamic factors instruments have low overlap with provider/Alpha158 instruments. "
+                        f"overlap_ratio={overlap_ratio:.4f} < min_instrument_overlap_ratio={self.min_instrument_overlap_ratio:.4f}. "
+                        f"dyn_examples={dyn_unique[:10].tolist()} alpha_examples={alpha_instruments[:10].tolist()}"
+                    )
+
+        if df_alpha is None:
+            merged = df_dynamic
+        elif df_dynamic is None:
+            merged = df_alpha
+        else:
+            if self.join in {"left", "right"}:
+                merged = df_alpha.join(df_dynamic, how=self.join)
+            else:
+                # pandas.concat only supports join={'inner','outer'}
+                merged = pd.concat([df_alpha, df_dynamic], axis=1, join=self.join)
+        merged = merged.sort_index()
+
+        dyn_cols = df_dynamic.columns
+        if dyn_cols is not None and len(dyn_cols) > 0:
+            dyn_non_nan_ratio = float(merged.loc[:, dyn_cols].notna().any(axis=1).mean())
+            if dyn_non_nan_ratio < self.min_dynamic_non_nan_ratio:
+                raise ValueError(
+                    "Dynamic factors become nearly all-NaN after alignment with Alpha158 index. "
+                    f"non_nan_row_ratio={dyn_non_nan_ratio:.6f} < min_dynamic_non_nan_ratio={self.min_dynamic_non_nan_ratio:.6f}. "
+                    "This usually indicates index/instrument mismatch between parquet and provider."
+                )
+
+        return merged

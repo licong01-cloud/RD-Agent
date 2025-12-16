@@ -409,9 +409,13 @@ def load_times_info(log_path: Path) -> dict[int, dict[str, dict[Literal["start_t
     times_info = defaultdict(dict)
     for msg in time_msgs:
         li, fn = extract_loopid_func_name(msg.tag)
+        if li is None or fn is None:
+            continue
         times_info[int(li)][fn] = msg.content
     for msg in exp_gen_time_msgs:
         li, fn = extract_loopid_func_name(msg.tag)
+        if li is None:
+            continue
         times_info[int(li)]["exp_gen"] = msg.content
     return times_info
 
