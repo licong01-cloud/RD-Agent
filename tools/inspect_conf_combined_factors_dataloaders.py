@@ -13,7 +13,7 @@ def main() -> None:
 
     使用方式（在 WSL 中）：
 
-        cd /mnt/c/Users/lc999/RD-Agent-main/git_ignore_folder/RD-Agent_workspace/5223c0ad21f442ddb64c887b2c0a9d09
+        cd /mnt/f/dev/RD-Agent-main/git_ignore_folder/RD-Agent_workspace/5223c0ad21f442ddb64c887b2c0a9d09
         conda activate rdagent-gpu
         python ../../tools/inspect_conf_combined_factors_dataloaders.py
     """

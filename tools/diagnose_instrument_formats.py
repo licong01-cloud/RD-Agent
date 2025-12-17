@@ -107,15 +107,15 @@ def _print_one(path: Path, *, focus_col: str | None = None, topn: int = 10) -> N
 def main() -> None:
     snapshot_root = _to_unix_path(Path(os.environ.get(
         "AISTOCK_SNAPSHOT_ROOT",
-        r"C:/Users/lc999/NewAIstock/AIstock/qlib_snapshots/qlib_export_20251209",
+        r"F:/Dev/AIstock/qlib_snapshots/qlib_export_20251209",
     )))
     factors_root = _to_unix_path(Path(os.environ.get(
         "AISTOCK_FACTORS_ROOT",
-        r"C:/Users/lc999/NewAIstock/AIstock/factors",
+        r"F:/Dev/AIstock/factors",
     )))
     repo_root = _to_unix_path(Path(os.environ.get(
         "RDAGENT_REPO_ROOT",
-        r"C:/Users/lc999/RD-Agent-main",
+        r"F:/dev/RD-Agent-main",
     )))
 
     targets: list[Path] = [

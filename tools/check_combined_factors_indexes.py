@@ -6,14 +6,14 @@ from pathlib import Path
 
 使用方式（在 WSL 中示例）：
 
-    cd /mnt/c/Users/lc999/RD-Agent-main
+    cd /mnt/f/dev/RD-Agent-main
     conda activate rdagent-gpu  # 按你的环境名调整
     python tools/check_combined_factors_indexes.py
 
 脚本行为：
 - 在以下目录下递归搜索名为 combined_factors_df.parquet 的文件：
-  * /mnt/c/Users/lc999/NewAIstock/AIstock
-  * /mnt/c/Users/lc999/RD-Agent-main
+  * /mnt/f/Dev/AIstock
+  * /mnt/f/dev/RD-Agent-main
 - 对每个找到的文件：
   * 打印路径
   * 加载 DataFrame
@@ -23,8 +23,8 @@ from pathlib import Path
 
 
 SEARCH_ROOTS = [
-    Path("/mnt/c/Users/lc999/NewAIstock/AIstock"),
-    Path("/mnt/c/Users/lc999/RD-Agent-main"),
+    Path("/mnt/f/Dev/AIstock"),
+    Path("/mnt/f/dev/RD-Agent-main"),
 ]
 
 

@@ -1,5 +1,5 @@
 qlib_init:
-    provider_uri: "/mnt/c/Users/lc999/NewAIstock/AIstock/qlib_bin/qlib_bin_20251209"
+    provider_uri: "/mnt/f/Dev/AIstock/qlib_bin/qlib_bin_20251209"
     region: cn
 
 market: &market all
@@ -29,7 +29,7 @@ data_handler_config: &data_handler_config
                     - ["RESI5", "WVMA5", "RSQR5", "KLEN", "RSQR10", "CORR5", "CORD5", "CORR10", 
                        "ROC60", "RESI10", "VSTD5", "RSQR60", "CORR60", "WVMA60", "STD5", 
                        "RSQR20", "CORD60", "CORD10", "CORR20", "KLOW"]
-            static_path: "/mnt/c/Users/lc999/NewAIstock/AIstock/factors/combined_static_factors.parquet"
+            static_path: "/mnt/f/Dev/AIstock/factors/combined_static_factors.parquet"
             join: "outer"
 
     learn_processors:

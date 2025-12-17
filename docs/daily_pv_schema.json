@@ -1,0 +1,106 @@
+{
+  "dataset": "daily_pv",
+  "h5_key": "data",
+  "index": {
+    "type": "MultiIndex",
+    "names": [
+      "datetime",
+      "instrument"
+    ]
+  },
+  "governance": {
+    "amount": {
+      "should_exist": true,
+      "preferred_source": "db_real_amount",
+      "adjustment": "none",
+      "unit": "元",
+      "missing_policy": "H5: NaN preferred; bin/CSV: if forced by schema, 0 is allowed ONLY as placeholder and must be documented",
+      "notes": "amount=0 is ambiguous and can silently corrupt amount-based features; prefer NaN when missing."
+    }
+  },
+  "assumptions": [
+    "instrument 使用 Tushare ts_code 格式，如 000001.SZ",
+    "数据库价格单位为厘（元*1000），导出时除以1000换算为元",
+    "价格字段为前复权（导出时已处理）",
+    "当前 H5 不包含单独的复权因子列 factor；若需要还原未复权价格/成交量，需要依赖外部 adj_factor 数据"
+  ],
+  "columns": [
+    {
+      "name": "open",
+      "dtype": "float32",
+      "meaning": "当日开盘价（前复权）",
+      "unit": "元",
+      "adjustment": "qfq",
+      "missing_policy": "NaN",
+      "quality": "authoritative",
+      "source_table": "market.kline_daily_raw + market.adj_factor",
+      "formula": "导出后价格字段为前复权（已处理）"
+    },
+    {
+      "name": "high",
+      "dtype": "float32",
+      "meaning": "当日最高价（前复权）",
+      "unit": "元",
+      "adjustment": "qfq",
+      "missing_policy": "NaN",
+      "quality": "authoritative",
+      "source_table": "market.kline_daily_raw + market.adj_factor",
+      "formula": "导出后价格字段为前复权（已处理）"
+    },
+    {
+      "name": "low",
+      "dtype": "float32",
+      "meaning": "当日最低价（前复权）",
+      "unit": "元",
+      "adjustment": "qfq",
+      "missing_policy": "NaN",
+      "quality": "authoritative",
+      "source_table": "market.kline_daily_raw + market.adj_factor",
+      "formula": "导出后价格字段为前复权（已处理）"
+    },
+    {
+      "name": "close",
+      "dtype": "float32",
+      "meaning": "当日收盘价（前复权）",
+      "unit": "元",
+      "adjustment": "qfq",
+      "missing_policy": "NaN",
+      "quality": "authoritative",
+      "source_table": "market.kline_daily_raw + market.adj_factor",
+      "formula": "导出后价格字段为前复权（已处理）"
+    },
+    {
+      "name": "volume",
+      "dtype": "float32",
+      "meaning": "当日成交量（复权调整后）",
+      "unit": "股",
+      "adjustment": "qfq_inverse",
+      "missing_policy": "NaN",
+      "quality": "authoritative",
+      "source_table": "market.kline_daily_raw + market.adj_factor",
+      "formula": "导出后 volume 已按复权口径调整（无单独 factor 列）"
+    },
+    {
+      "name": "amount",
+      "dtype": "float32",
+      "meaning": "当日成交额（现金成交金额；不复权）",
+      "unit": "元",
+      "adjustment": "none",
+      "missing_policy": "NaN_preferred_over_zero",
+      "quality": "unknown_or_placeholder",
+      "source_table": "market.kline_daily_raw",
+      "formula": "建议导出真实成交额；若上游无法提供，H5 侧应使用 NaN 表示缺失（不建议用 0 伪装真实值）"
+    }
+  ],
+  "columns_in_h5": [
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "amount"
+  ],
+  "notes": [
+    "factor not present in this H5; cannot directly restore unadjusted price/volume without external adj_factor."
+  ]
+}

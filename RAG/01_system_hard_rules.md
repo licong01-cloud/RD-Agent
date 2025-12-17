@@ -11,6 +11,24 @@
   - Factor scripts read `daily_pv.h5` from the current working directory.
   - Static/fund-flow/basic panels should be provided via `static_factors.parquet` (+ schema) in the factor runtime folder.
 
+## Factor Runtime Allowed Assets (Whitelist)
+- Factor implementation scripts are only allowed to read the following local assets from the factor runtime folder:
+  - `daily_pv.h5`
+  - `daily_basic.h5`
+  - `moneyflow.h5`
+  - `static_factors.parquet`
+  - `static_factors_schema.csv` / `static_factors_schema.json`
+- Prefer reading `db_*`/`mf_*` fields from `static_factors.parquet` (+ schema) when possible for easier auditing and stable joins, but it is not mandatory.
+
+## Future-Row / Future-Operation Ban (Look-ahead)
+- Factor implementations must not use future rows or future outcomes as inputs.
+- Forbidden descriptions include any phrasing like:
+  - "use next day"
+  - "tomorrow's price/close"
+  - "future return"
+  - "future price"
+  - "t+1" as a feature input
+
 ## Market / Universe
 - Use `market: all` as the unified universe.
 - Universe is exported with filters already applied:

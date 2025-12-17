@@ -10,7 +10,7 @@ if [[ -z "$LOG_DIR" ]]; then
   echo "  bash scripts/qlib_ws_compare.sh <LOG_DIR> [WS_A] [WS_B]"
   echo ""
   echo "Examples:"
-  echo "  bash scripts/qlib_ws_compare.sh /mnt/c/Users/lc999/RD-Agent-main/log/2025-12-15_07-50-56-750327"
+  echo "  bash scripts/qlib_ws_compare.sh /mnt/f/dev/RD-Agent-main/log/2025-12-15_07-50-56-750327"
   echo "  bash scripts/qlib_ws_compare.sh /mnt/c/.../log/... /mnt/c/.../RD-Agent_workspace/xxx /mnt/c/.../RD-Agent_workspace/yyy"
   exit 1
 fi

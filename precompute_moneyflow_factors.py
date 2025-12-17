@@ -9,7 +9,7 @@ def main():
     """Pre-compute moneyflow-based capital flow factors into a standard HDF5 table.
 
     - Input  H5:  <snapshot_root>/moneyflow.h5, <snapshot_root>/daily_pv.h5, optional <snapshot_root>/daily_basic.h5
-    - Output H5:  C:/Users/lc999/NewAIstock/AIstock/factors/capital_flow_daily/result.h5
+    - Output H5:  F:/Dev/AIstock/factors/capital_flow_daily/result.h5
 
     Index: MultiIndex(datetime, instrument)
     Columns (examples):
@@ -23,12 +23,13 @@ def main():
     # 默认 snapshot 根目录，可通过环境变量覆盖
     snapshot_root = os.environ.get(
         "AIstock_SNAPSHOT_ROOT",
-        r"C:/Users/lc999/NewAIstock/AIstock/qlib_snapshots/qlib_export_20251209",
+        r"F:/Dev/AIstock/qlib_snapshots/qlib_export_20251209",
     )
 
-    # 在 Windows 下直接使用 C:/... 路径；在 WSL/Linux 下，将 C:/ 前缀转换为 /mnt/c/
-    if os.name != "nt" and (snapshot_root.startswith("C:/") or snapshot_root.startswith("c:/")):
-        snapshot_root_path = Path("/mnt/c") / Path(snapshot_root[3:])
+    # 在 Windows 下直接使用 <Drive>:/... 路径；在 WSL/Linux 下，将 <Drive>:/ 前缀转换为 /mnt/<drive>/
+    if os.name != "nt" and len(snapshot_root) >= 3 and snapshot_root[1:3] == ":/":
+        drive = snapshot_root[0].lower()
+        snapshot_root_path = Path("/mnt") / drive / snapshot_root[3:]
     else:
         snapshot_root_path = Path(snapshot_root)
 
@@ -113,10 +114,11 @@ def main():
     else:
         print(f"[INFO] daily_basic.h5 not found at {daily_basic_path}, skip relative-to-MV factors")
 
-    # 输出路径：在 Windows 下直接写入 C:/，在 WSL/Linux 下映射到 /mnt/c/
-    output_root_str = r"C:/Users/lc999/NewAIstock/AIstock/factors/capital_flow_daily"
-    if os.name != "nt" and (output_root_str.startswith("C:/") or output_root_str.startswith("c:/")):
-        output_root = Path("/mnt/c") / Path(output_root_str[3:])
+    # 输出路径：在 Windows 下直接写入 <Drive>:/，在 WSL/Linux 下映射到 /mnt/<drive>/
+    output_root_str = r"F:/Dev/AIstock/factors/capital_flow_daily"
+    if os.name != "nt" and len(output_root_str) >= 3 and output_root_str[1:3] == ":/":
+        drive = output_root_str[0].lower()
+        output_root = Path("/mnt") / drive / output_root_str[3:]
     else:
         output_root = Path(output_root_str)
     output_root.mkdir(parents=True, exist_ok=True)

@@ -2,14 +2,14 @@
 
 Usage (WSL):
 
-    cd /mnt/c/Users/lc999/RD-Agent-main
+    cd /mnt/f/dev/RD-Agent-main
     python tools/check_index_000300.py
 """
 
 import qlib
 from qlib.data import D
 
-PROVIDER_URI = "/mnt/c/Users/lc999/NewAIstock/AIstock/qlib_bin/qlib_bin_20251209"
+PROVIDER_URI = "/mnt/f/Dev/AIstock/qlib_bin/qlib_bin_20251209"
 REGION = "cn"
 INDEX_CODE = "000300.SH"  # 按导出规范使用的指数代码
 

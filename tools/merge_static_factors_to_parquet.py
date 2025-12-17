@@ -6,15 +6,15 @@ from pathlib import Path
 
 当前合并来源：
 - workspace 下的 combined_factors_df.parquet（如果存在）
-- AE 因子：/mnt/c/Users/lc999/NewAIstock/AIstock/factors/ae_recon_error_10d/result.pkl
-- daily_basic 因子：/mnt/c/Users/lc999/NewAIstock/AIstock/factors/daily_basic_factors/result.pkl
+- AE 因子：/mnt/f/Dev/AIstock/factors/ae_recon_error_10d/result.pkl
+- daily_basic 因子：/mnt/f/Dev/AIstock/factors/daily_basic_factors/result.pkl
 
 输出：
-- /mnt/c/Users/lc999/NewAIstock/AIstock/factors/combined_static_factors.parquet
+- /mnt/f/Dev/AIstock/factors/combined_static_factors.parquet
 
 使用方式（在 WSL 中）：
 
-    cd /mnt/c/Users/lc999/RD-Agent-main
+    cd /mnt/f/dev/RD-Agent-main
     conda activate rdagent-gpu  # 按你的环境名调整
     python tools/merge_static_factors_to_parquet.py
 
@@ -25,13 +25,13 @@ from pathlib import Path
 
 # 可以根据需要修改：用于抓一个“代表性” workspace 里的 combined_factors_df.parquet
 REP_WORKSPACE_DIRS = [
-    Path("/mnt/c/Users/lc999/RD-Agent-main/git_ignore_folder/RD-Agent_workspace/5223c0ad21f442ddb64c887b2c0a9d09"),
+    Path("/mnt/f/dev/RD-Agent-main/git_ignore_folder/RD-Agent_workspace/5223c0ad21f442ddb64c887b2c0a9d09"),
 ]
 
-AE_PATH = Path("/mnt/c/Users/lc999/NewAIstock/AIstock/factors/ae_recon_error_10d/result.pkl")
-DAILY_BASIC_PATH = Path("/mnt/c/Users/lc999/NewAIstock/AIstock/factors/daily_basic_factors/result.pkl")
-MONEYFLOW_FACTORS_PATH = Path("/mnt/c/Users/lc999/NewAIstock/AIstock/factors/moneyflow_factors/result.pkl")
-OUTPUT_PATH = Path("/mnt/c/Users/lc999/NewAIstock/AIstock/factors/combined_static_factors.parquet")
+AE_PATH = Path("/mnt/f/Dev/AIstock/factors/ae_recon_error_10d/result.pkl")
+DAILY_BASIC_PATH = Path("/mnt/f/Dev/AIstock/factors/daily_basic_factors/result.pkl")
+MONEYFLOW_FACTORS_PATH = Path("/mnt/f/Dev/AIstock/factors/moneyflow_factors/result.pkl")
+OUTPUT_PATH = Path("/mnt/f/Dev/AIstock/factors/combined_static_factors.parquet")
 
 
 def find_workspace_combined() -> Path | None:

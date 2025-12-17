@@ -1,7 +1,7 @@
 import qlib
 from qlib.data import D
 
-PROVIDER_URI = "/mnt/c/Users/lc999/NewAIstock/AIstock/qlib_snapshots/qlib_export_20251206"
+PROVIDER_URI = "/mnt/f/Dev/AIstock/qlib_snapshots/qlib_export_20251206"
 
 
 def main() -> None:

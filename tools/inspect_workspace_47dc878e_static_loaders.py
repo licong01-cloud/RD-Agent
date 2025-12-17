@@ -10,13 +10,13 @@ qrun 使用的 YAML 里所有 StaticDataLoader 的因子表索引结构。
 
 使用方式（在 WSL 中示例）：
 
-    cd /mnt/c/Users/lc999/RD-Agent-main
+    cd /mnt/f/dev/RD-Agent-main
     conda activate rdagent-gpu  # 按你的环境名调整
     python tools/inspect_workspace_47dc878e_static_loaders.py
 
 脚本行为：
 1. 使用固定 workspace 路径：
-   /mnt/c/Users/lc999/RD-Agent-main/git_ignore_folder/RD-Agent_workspace/47dc878efd6f40b89b7a32cd25755bbb
+   /mnt/f/dev/RD-Agent-main/git_ignore_folder/RD-Agent_workspace/47dc878efd6f40b89b7a32cd25755bbb
 2. 在该目录下搜索所有 .yaml 文件；
 3. 解析 YAML，找到 data_loader.kwargs.dataloader_l 中
    所有 class 为 qlib.data.dataset.loader.StaticDataLoader 的条目，读取其 kwargs.config 路径；
@@ -30,7 +30,7 @@ qrun 使用的 YAML 里所有 StaticDataLoader 的因子表索引结构。
 
 
 WORKSPACE_PATH = Path(
-    "/mnt/c/Users/lc999/RD-Agent-main/git_ignore_folder/RD-Agent_workspace/47dc878efd6f40b89b7a32cd25755bbb"
+    "/mnt/f/dev/RD-Agent-main/git_ignore_folder/RD-Agent_workspace/47dc878efd6f40b89b7a32cd25755bbb"
 )
 
 

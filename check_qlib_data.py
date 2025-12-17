@@ -12,10 +12,10 @@ def main() -> None:
     """
 
     qlib.init(
-        provider_uri="/mnt/c/Users/lc999/NewAIstock/AIstock/qlib_bin/qlib_bin_20251209",
+        provider_uri="/mnt/f/Dev/AIstock/qlib_bin/qlib_bin_20251209",
         region="cn",
     )
-    print("Qlib initialized with provider_uri=/mnt/c/Users/lc999/NewAIstock/AIstock/qlib_bin/qlib_bin_20251209")
+    print("Qlib initialized with provider_uri=/mnt/f/Dev/AIstock/qlib_bin/qlib_bin_20251209")
 
     # 使用 Qlib 提供的 instruments 定义
     instruments = D.instruments("all")

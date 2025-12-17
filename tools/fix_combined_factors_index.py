@@ -6,7 +6,7 @@ from pathlib import Path
 
 使用方式（在 WSL 中示例）：
 
-    cd /mnt/c/Users/lc999/RD-Agent-main
+    cd /mnt/f/dev/RD-Agent-main
     conda activate rdagent-gpu  # 按你的环境名调整
     python tools/fix_combined_factors_index.py
 
@@ -24,7 +24,7 @@ from pathlib import Path
 
 
 def main() -> None:
-    path = Path("/mnt/c/Users/lc999/NewAIstock/AIstock/qlib_rd_workspace/combined_factors_df.parquet")
+    path = Path("/mnt/f/Dev/AIstock/qlib_rd_workspace/combined_factors_df.parquet")
 
     if not path.exists():
         print("[错误] 找不到文件:", path)

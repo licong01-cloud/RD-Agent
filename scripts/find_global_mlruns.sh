@@ -10,9 +10,9 @@ set -euo pipefail
 #   SEARCH_ROOTS="/mnt/c/... /mnt/d/..." bash scripts/find_global_mlruns.sh
 
 DEFAULT_ROOTS=(
-  "/mnt/c/Users/lc999/RD-Agent-main"
-  "/mnt/c/Users/lc999/RD-Agent-main/git_ignore_folder/RD-Agent_workspace"
-  "/mnt/c/Users/lc999/NewAIstock"
+  "/mnt/f/dev/RD-Agent-main"
+  "/mnt/f/dev/RD-Agent-main/git_ignore_folder/RD-Agent_workspace"
+  "/mnt/f/Dev/AIstock"
 )
 
 if [ -n "${SEARCH_ROOTS:-}" ]; then

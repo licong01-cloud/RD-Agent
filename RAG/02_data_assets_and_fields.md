@@ -23,10 +23,12 @@ This document summarizes the *actual* data assets and the naming conventions tha
 ### static_factors.parquet
 - A unified table used by factor scripts at runtime.
 - It is expected to include `db_*` and `mf_*` columns and optional derived rolling columns (e.g., `*_5d`, `*_20d`).
+- Prefer reading `db_*`/`mf_*` fields from this panel when possible for easier auditing and stable joins, but it is not mandatory.
 
 ### static_factors_schema.csv / static_factors_schema.json
 - Schema/whitelist of available fields.
-- Factor generation should treat the schema as the authoritative field list.
+- Factor generation should treat the schema as the authoritative field list and field meanings.
+- If a field is not listed in the schema, do not use it.
 
 ## Field Meaning Map (AIstock → RD-Agent)
 ### aistock_field_map.csv

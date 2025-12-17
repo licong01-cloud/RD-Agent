@@ -7,10 +7,13 @@ from pydantic_settings import (
     BaseSettings,
     EnvSettingsSource,
     PydanticBaseSettingsSource,
+    SettingsConfigDict,
 )
 
 
 class ExtendedBaseSettings(BaseSettings):
+
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
     @classmethod
     def settings_customise_sources(

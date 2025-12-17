@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import re
 import subprocess
 import uuid
 from pathlib import Path
@@ -149,6 +151,17 @@ class FactorFBWorkspace(FBWorkspace):
 
             self.link_all_files_in_folder_to_workspace(source_data_path, self.workspace_path)
 
+            factor_src = self.file_dict.get("factor.py", "")
+            if isinstance(factor_src, str) and factor_src:
+                if re.search(r"\bshift\s*\(\s*-\s*\d+\s*\)", factor_src):
+                    execution_feedback = (
+                        "Refusing to run factor.py because it contains look-ahead usage 'shift(-k)' (k>0). "
+                        "This is forbidden for factor features to avoid future-data leakage."
+                    )
+                    if self.raise_exception:
+                        raise CustomRuntimeError(execution_feedback)
+                    return execution_feedback, None
+
             execution_feedback = self.FB_EXECUTION_SUCCEEDED
             execution_success = False
             execution_error = None
@@ -206,6 +219,66 @@ class FactorFBWorkspace(FBWorkspace):
                     raise NoOutputError(execution_feedback)
                 else:
                     execution_error = NoOutputError(execution_feedback)
+
+            if executed_factor_value_dataframe is not None:
+                df = executed_factor_value_dataframe
+                try:
+                    if df.empty:
+                        raise ValueError("Empty DataFrame")
+
+                    if not isinstance(df.index, pd.MultiIndex):
+                        raise ValueError(f"Index must be MultiIndex(datetime, instrument); got {type(df.index)}")
+
+                    idx_names = list(df.index.names)
+                    if "datetime" not in idx_names or "instrument" not in idx_names:
+                        raise ValueError(f"Index names must include ['datetime','instrument']; got {idx_names}")
+
+                    df = df.sort_index()
+
+                    dt = df.index.get_level_values("datetime")
+                    dt_parsed = pd.to_datetime(dt, errors="coerce")
+                    if getattr(dt_parsed, "isna", None) is not None and dt_parsed.isna().any():
+                        raise ValueError("Index level 'datetime' contains invalid timestamps")
+
+                    max_allowed_dt = pd.Timestamp.now().normalize()
+                    try:
+                        daily_pv_path = self.workspace_path / "daily_pv.h5"
+                        if daily_pv_path.exists():
+                            with pd.HDFStore(daily_pv_path, mode="r") as store:
+                                if "data" in store:
+                                    st = store.get_storer("data")
+                                    if getattr(st, "is_table", False) and getattr(st, "nrows", 0) > 0:
+                                        last = store.select("data", start=int(st.nrows) - 1, stop=int(st.nrows))
+                                        if isinstance(last, pd.DataFrame) and not last.empty:
+                                            max_allowed_dt = pd.to_datetime(
+                                                last.index.get_level_values("datetime")
+                                            ).max()
+                    except Exception:
+                        pass
+
+                    max_dt = dt_parsed.max()
+                    if max_dt > max_allowed_dt:
+                        raise ValueError(f"Output datetime exceeds allowed max datetime: {max_dt} > {max_allowed_dt}")
+
+                    non_nan_row_ratio = float(df.notna().any(axis=1).mean())
+                    raw_thr = os.getenv("QLIB_FACTOR_MIN_NON_NAN_ROW_RATIO", "0.10")
+                    try:
+                        thr = float(raw_thr)
+                    except Exception:
+                        thr = 0.10
+                    if thr < 0.0:
+                        thr = 0.0
+                    if thr > 1.0:
+                        thr = 1.0
+                    if non_nan_row_ratio < thr:
+                        raise ValueError(
+                            f"Too sparse factor output: non_nan_row_ratio={non_nan_row_ratio:.6f} < {thr:.6f}"
+                        )
+
+                    executed_factor_value_dataframe = df
+                except Exception as e:
+                    execution_feedback += f"\n[HardValidationFailed] {e}"[:1000]
+                    executed_factor_value_dataframe = None
 
         return execution_feedback, executed_factor_value_dataframe
 

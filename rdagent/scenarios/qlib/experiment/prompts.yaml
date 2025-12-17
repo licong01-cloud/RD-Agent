@@ -124,7 +124,26 @@ qlib_factor_interface: |-
     - 如果你的因子定义确实依赖这些字段（例如流通市值、流通股本、换手率、资金净流入等），你 **必须** 显式读取并 join：
       ```python
       static_df = pd.read_parquet("static_factors.parquet").sort_index()
-      df = df.join(static_df, how="left")
+      # 注意：部分数据源的 instrument 可能是 AIstock 风格（SH600000/SZ000001），而 static_factors.parquet 是 Qlib 风格（600000.SH/000001.SZ）。
+      # join 前必须先把 daily_pv 的 instrument 统一规范化到 Qlib 风格，否则会 100% join miss 导致全 NaN。
+      inst = df.index.get_level_values("instrument").astype(str)
+      m = inst.str.match(r"^(SH|SZ)(\d{6})$")
+      if bool(m.any()):
+          exch = inst.str.slice(0, 2)
+          code = inst.str.slice(2, 8)
+          inst_norm = inst.where(~m, code + "." + exch)
+          df = df.copy()
+          df.index = pd.MultiIndex.from_arrays(
+              [
+                  df.index.get_level_values("datetime"),
+                  pd.Index(inst_norm, name="instrument"),
+              ],
+              names=["datetime", "instrument"],
+          )
+          if not df.index.is_unique:
+              df = df[~df.index.duplicated(keep="last")]
+
+      df = df.sort_index().join(static_df, how="left")
       ```
     - **资金净流入等派生量（推荐做法）**：如果你需要“资金净流入/净流入占比/5日净流入”等字段，但 schema 中没有直接提供，请基于 `mf_*_buy_amt` / `mf_*_sell_amt` 组合自行派生（例如把 `sm/md/lg/elg` 四档买入金额相加减去卖出金额），并可进一步除以 `amount` 或 `db_circ_mv` 做归一化，再做 rolling 聚合。
     - 若 `static_factors.parquet` 不存在或缺少所需列，请直接报错并在下一轮改写因子定义（见下文约束），严禁用硬编码常数“拍脑袋补齐”。

@@ -1,4 +1,5 @@
 import argparse
+import csv
 import json
 import os
 from pathlib import Path
@@ -285,6 +286,42 @@ def _build_schema(df: pd.DataFrame) -> list[dict[str, Any]]:
     return schema
 
 
+def _schema_cols_from_parquet_metadata(path: Path) -> list[dict[str, Any]] | None:
+    try:
+        import pyarrow.parquet as pq  # type: ignore
+    except Exception:
+        return None
+
+    try:
+        pf = pq.ParquetFile(path)
+        arrow_schema = pf.schema_arrow
+    except Exception:
+        return None
+
+    schema_cols: list[dict[str, Any]] = []
+    for field in arrow_schema:
+        name = str(field.name)
+        dtype = str(field.type)
+        if name.startswith("db_"):
+            source = "daily_basic_raw"
+        elif name.startswith("mf_"):
+            source = "moneyflow_raw_or_factor"
+        elif name.startswith("ae_"):
+            source = "ae_factor"
+        else:
+            source = "precomputed_or_other"
+
+        schema_cols.append(
+            {
+                "name": name,
+                "dtype": dtype,
+                "meaning": "",
+                "source": source,
+            }
+        )
+    return schema_cols
+
+
 def _load_field_map(path: Path) -> dict[str, dict[str, Any]]:
     """Load external field mapping exported from AIstock metadata.
 
@@ -299,7 +336,76 @@ def _load_field_map(path: Path) -> dict[str, dict[str, Any]]:
         raise FileNotFoundError(f"field-map not found: {path}")
 
     if path.suffix.lower() in {".csv"}:
-        df = pd.read_csv(path)
+        # Some exports may omit optional columns (e.g. unit) by writing fewer separators,
+        # which shifts later columns left. We normalize rows to the header length.
+        df = None
+        last_err = None
+
+        def _norm_col(x: Any) -> str:
+            s = str(x).replace("\ufeff", "").strip()
+            # Some exporters wrap headers in quotes, e.g. '"name"'.
+            if len(s) >= 2 and ((s[0] == s[-1] == '"') or (s[0] == s[-1] == "'")):
+                s = s[1:-1].strip()
+            return s
+
+        for enc in ("utf-8", "utf-8-sig", "gbk"):
+            try:
+                with open(path, "r", encoding=enc, newline="") as f:
+                    reader = csv.reader(f)
+                    header = next(reader, None)
+                    if not header:
+                        raise ValueError("field-map csv is empty")
+
+                    # Normalize header names: trim whitespace and remove UTF-8 BOM if present.
+                    header = [_norm_col(h) for h in header]
+                    expected_n = len(header)
+                    header_idx = {h: i for i, h in enumerate(header)}
+
+                    allowed_source_table = {"daily_basic", "moneyflow"}
+                    rows: list[list[str]] = []
+                    for row in reader:
+                        if row is None:
+                            continue
+                        if len(row) == 0:
+                            continue
+
+                        # Trim whitespace but keep empty strings.
+                        row = [str(x).strip() for x in row]
+
+                        # Heuristic fix: if 'unit' is omitted (missing comma), then
+                        # row length is expected_n-1 and the would-be unit cell is actually source_table.
+                        # Example (bad): name,meaning_cn,daily_basic,comment
+                        # Expected:      name,meaning_cn,,daily_basic,comment
+                        if (
+                            "unit" in header_idx
+                            and "source_table" in header_idx
+                            and len(row) == expected_n - 1
+                        ):
+                            unit_i = header_idx["unit"]
+                            source_i = header_idx["source_table"]
+                            if unit_i < len(row) and row[unit_i] in allowed_source_table:
+                                row.insert(unit_i, "")
+
+                        # If still shorter, pad to length.
+                        if len(row) < expected_n:
+                            row = row + [""] * (expected_n - len(row))
+                        # If longer, merge extras into the last column.
+                        elif len(row) > expected_n:
+                            row = row[: expected_n - 1] + [",".join(row[expected_n - 1 :])]
+
+                        rows.append(row)
+
+                df = pd.DataFrame(rows, columns=header)
+                # Extra safety: some CSV exports may still retain BOM on the first column.
+                df.columns = [_norm_col(c) for c in df.columns]
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                df = None
+
+        if df is None:
+            raise last_err
         if "name" not in df.columns:
             raise ValueError(f"field-map csv must contain 'name' column, got columns={list(df.columns)}")
         out: dict[str, dict[str, Any]] = {}
@@ -377,7 +483,7 @@ def main() -> None:
         "--snapshot-root",
         default=os.environ.get(
             "AIstock_SNAPSHOT_ROOT",
-            r"C:/Users/lc999/NewAIstock/AIstock/qlib_snapshots/qlib_export_20251209",
+            r"F:/Dev/AIstock/qlib_snapshots/qlib_export_20251209",
         ),
         help="Snapshot root containing daily_basic.h5 and moneyflow.h5 (Windows or WSL path).",
     )
@@ -386,7 +492,7 @@ def main() -> None:
         "--aistock-factors-root",
         default=os.environ.get(
             "AIstock_FACTORS_ROOT",
-            r"C:/Users/lc999/NewAIstock/AIstock/factors",
+            r"F:/Dev/AIstock/factors",
         ),
         help="AIstock factors root containing precomputed factor outputs (daily_basic_factors, moneyflow_factors, ae_recon_error_10d...).",
     )
@@ -415,9 +521,78 @@ def main() -> None:
         help="Debug output parquet relative to repo_root.",
     )
 
+    parser.add_argument(
+        "--schema-only",
+        action="store_true",
+        help="Only (re)generate static_factors_schema.json/csv in the output folder. If the parquet already exists, try to read column metadata from parquet without rewriting it.",
+    )
+
     args = parser.parse_args()
 
     repo_root = Path(args.repo_root).resolve()
+
+    out_path = repo_root / args.out_rel
+    out_debug_path = repo_root / args.out_rel_debug
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_debug_path.parent.mkdir(parents=True, exist_ok=True)
+
+    same_out = False
+    try:
+        same_out = out_path.resolve() == out_debug_path.resolve()
+    except Exception:
+        same_out = str(out_path) == str(out_debug_path)
+
+    # Fast path: when schema-only is enabled and the parquet already exists, avoid reading
+    # any upstream H5/PKL/parquet factor tables. Just read parquet schema metadata and
+    # enrich with field-map.
+    if args.schema_only and out_path.exists():
+        print("[INFO] schema-only enabled; reading parquet metadata from:", out_path)
+        schema_cols = _schema_cols_from_parquet_metadata(out_path)
+        if not schema_cols:
+            raise RuntimeError(
+                "schema-only requires reading parquet metadata. "
+                "Failed to read schema from parquet. Please ensure pyarrow is installed, "
+                "or re-run without --schema-only to rebuild parquet and schema."
+            )
+
+        if args.field_map:
+            fm_path = _to_unix_path(Path(args.field_map))
+            print("[INFO] Loading field-map:", fm_path)
+            field_map = _load_field_map(fm_path)
+            schema_cols = _apply_field_map(schema_cols, field_map)
+
+        schema = {
+            "index": {
+                "type": "MultiIndex",
+                "names": ["datetime", "instrument"],
+            },
+            "columns": schema_cols,
+        }
+
+        schema_json_path = out_path.parent / "static_factors_schema.json"
+        schema_csv_path = out_path.parent / "static_factors_schema.csv"
+
+        schema_json_debug_path = out_debug_path.parent / "static_factors_schema.json"
+        schema_csv_debug_path = out_debug_path.parent / "static_factors_schema.csv"
+
+        print("[INFO] Writing schema:", schema_json_path)
+        schema_json_path.write_text(json.dumps(schema, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        if not same_out:
+            print("[INFO] Writing schema:", schema_json_debug_path)
+            schema_json_debug_path.write_text(json.dumps(schema, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        print("[INFO] Writing schema:", schema_csv_path)
+        pd.DataFrame(schema["columns"]).to_csv(schema_csv_path, index=False, encoding="utf-8")
+
+        if not same_out:
+            print("[INFO] Writing schema:", schema_csv_debug_path)
+            pd.DataFrame(schema["columns"]).to_csv(schema_csv_debug_path, index=False, encoding="utf-8")
+
+        print("[SUCCESS] schema generated (schema-only).")
+        return
+
     snapshot_root = _to_unix_path(Path(args.snapshot_root))
     aistock_factors_root = _to_unix_path(Path(args.aistock_factors_root))
 
@@ -479,20 +654,20 @@ def main() -> None:
     df_merged = df_merged.sort_index()
     df_merged = df_merged.loc[:, ~df_merged.columns.duplicated(keep="last")]
 
-    out_path = repo_root / args.out_rel
-    out_debug_path = repo_root / args.out_rel_debug
+    schema_cols: list[dict[str, Any]]
+    if args.schema_only and out_path.exists():
+        print("[INFO] schema-only enabled; reading parquet metadata from:", out_path)
+        schema_cols = _schema_cols_from_parquet_metadata(out_path) or _build_schema(df_merged)
+    else:
+        schema_cols = _build_schema(df_merged)
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_debug_path.parent.mkdir(parents=True, exist_ok=True)
+    if not args.schema_only:
+        print("[INFO] Writing:", out_path)
+        df_merged.to_parquet(out_path)
 
-    print("[INFO] Writing:", out_path)
-    df_merged.to_parquet(out_path)
-
-    print("[INFO] Writing:", out_debug_path)
-    df_merged.to_parquet(out_debug_path)
-
-    # Schema
-    schema_cols = _build_schema(df_merged)
+        if not same_out:
+            print("[INFO] Writing:", out_debug_path)
+            df_merged.to_parquet(out_debug_path)
 
     if args.field_map:
         fm_path = _to_unix_path(Path(args.field_map))
@@ -517,16 +692,21 @@ def main() -> None:
     print("[INFO] Writing schema:", schema_json_path)
     schema_json_path.write_text(json.dumps(schema, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    print("[INFO] Writing schema:", schema_json_debug_path)
-    schema_json_debug_path.write_text(json.dumps(schema, ensure_ascii=False, indent=2), encoding="utf-8")
+    if not same_out:
+        print("[INFO] Writing schema:", schema_json_debug_path)
+        schema_json_debug_path.write_text(json.dumps(schema, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print("[INFO] Writing schema:", schema_csv_path)
     pd.DataFrame(schema["columns"]).to_csv(schema_csv_path, index=False, encoding="utf-8")
 
-    print("[INFO] Writing schema:", schema_csv_debug_path)
-    pd.DataFrame(schema["columns"]).to_csv(schema_csv_debug_path, index=False, encoding="utf-8")
+    if not same_out:
+        print("[INFO] Writing schema:", schema_csv_debug_path)
+        pd.DataFrame(schema["columns"]).to_csv(schema_csv_debug_path, index=False, encoding="utf-8")
 
-    print("[SUCCESS] static_factors.parquet + schema generated.")
+    if args.schema_only:
+        print("[SUCCESS] schema generated (schema-only).")
+    else:
+        print("[SUCCESS] static_factors.parquet + schema generated.")
 
 
 if __name__ == "__main__":

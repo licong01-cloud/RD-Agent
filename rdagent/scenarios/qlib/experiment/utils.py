@@ -50,7 +50,7 @@ def generate_data_folder_from_qlib():
     repo_static_schema_csv = repo_static_parquet.with_name("static_factors_schema.csv")
     repo_static_schema_json = repo_static_parquet.with_name("static_factors_schema.json")
 
-    aistock_static_parquet = Path("/mnt/c/Users/lc999/NewAIstock/AIstock/factors/combined_static_factors.parquet")
+    aistock_static_parquet = Path("/mnt/f/Dev/AIstock/factors/combined_static_factors.parquet")
 
     if repo_static_parquet.exists():
         shutil.copy(

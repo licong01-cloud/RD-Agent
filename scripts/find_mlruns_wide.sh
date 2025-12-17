@@ -6,7 +6,7 @@ set -euo pipefail
 #   Useful when workspace mlruns is empty and project-local scan finds nothing.
 #
 # Usage:
-#   bash /mnt/c/Users/lc999/RD-Agent-main/scripts/find_mlruns_wide.sh
+#   bash /mnt/f/dev/RD-Agent-main/scripts/find_mlruns_wide.sh
 #   SEARCH_ROOTS="/some/path /other/path" bash .../find_mlruns_wide.sh
 
 DEFAULT_ROOTS=(
@@ -17,9 +17,9 @@ DEFAULT_ROOTS=(
   "$HOME/tmp"
   "/tmp"
   "/mnt/c/Users/lc999"
-  "/mnt/c/Users/lc999/RD-Agent-main"
-  "/mnt/c/Users/lc999/RD-Agent-main/git_ignore_folder/RD-Agent_workspace"
-  "/mnt/c/Users/lc999/NewAIstock"
+  "/mnt/f/dev/RD-Agent-main"
+  "/mnt/f/dev/RD-Agent-main/git_ignore_folder/RD-Agent_workspace"
+  "/mnt/f/Dev/AIstock"
 )
 
 if [ -n "${SEARCH_ROOTS:-}" ]; then

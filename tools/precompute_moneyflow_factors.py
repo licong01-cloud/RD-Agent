@@ -30,12 +30,12 @@ def main() -> None:
     """
 
     # 默认使用 20251209 这期 snapshot，可按需调整
-    snapshot_root = Path("C:/Users/lc999/NewAIstock/AIstock/qlib_snapshots/qlib_export_20251209")
+    snapshot_root = Path("F:/Dev/AIstock/qlib_snapshots/qlib_export_20251209")
     moneyflow_path = snapshot_root / "moneyflow.h5"
     daily_pv_path = snapshot_root / "daily_pv.h5"
 
     # 因子输出目录
-    factors_root = Path("C:/Users/lc999/NewAIstock/AIstock/factors/moneyflow_factors")
+    factors_root = Path("F:/Dev/AIstock/factors/moneyflow_factors")
     output_path = factors_root / "result.pkl"
 
     moneyflow_path = _to_unix_path(moneyflow_path)

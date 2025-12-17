@@ -1,5 +1,5 @@
 qlib_init:
-    provider_uri: "/mnt/c/Users/lc999/NewAIstock/AIstock/qlib_bin/qlib_bin_20251209"
+    provider_uri: "/mnt/f/Dev/AIstock/qlib_bin/qlib_bin_20251209"
     region: cn
 market: &market all
 benchmark: &benchmark 000300.SH

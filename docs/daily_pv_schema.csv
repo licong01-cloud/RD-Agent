@@ -1,0 +1,7 @@
+name,dtype,meaning,unit,adjustment,missing_policy,quality,source_table,formula
+open,float32,当日开盘价（前复权）,元,qfq,NaN,authoritative,market.kline_daily_raw + market.adj_factor,导出后价格字段为前复权（已处理）
+high,float32,当日最高价（前复权）,元,qfq,NaN,authoritative,market.kline_daily_raw + market.adj_factor,导出后价格字段为前复权（已处理）
+low,float32,当日最低价（前复权）,元,qfq,NaN,authoritative,market.kline_daily_raw + market.adj_factor,导出后价格字段为前复权（已处理）
+close,float32,当日收盘价（前复权）,元,qfq,NaN,authoritative,market.kline_daily_raw + market.adj_factor,导出后价格字段为前复权（已处理）
+volume,float32,当日成交量（复权调整后）,股,qfq_inverse,NaN,authoritative,market.kline_daily_raw + market.adj_factor,导出后 volume 已按复权口径调整（无单独 factor 列）
+amount,float32,当日成交额（现金成交金额；不复权）,元,none,NaN_preferred_over_zero,unknown_or_placeholder,market.kline_daily_raw,建议导出真实成交额；若上游无法提供，H5 侧应使用 NaN 表示缺失（不建议用 0 伪装真实值）

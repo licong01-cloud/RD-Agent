@@ -1,7 +1,7 @@
 import qlib
 from qlib.data import D
 
-PROVIDER_URI = "/mnt/c/Users/lc999/NewAIstock/AIstock/qlib_bin/qlib_bin_20251209"
+PROVIDER_URI = "/mnt/f/Dev/AIstock/qlib_bin/qlib_bin_20251209"
 REGION = "cn"
 
 

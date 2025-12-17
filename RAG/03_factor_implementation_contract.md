@@ -23,6 +23,13 @@
 - Avoid look-ahead bias:
   - do not use `shift(-k)` for factor features
   - when computing rolling stats over returns, prefer `ret.shift(1).rolling(window=n)`
+- Do not use any future rows or future outcomes as feature inputs.
+- Forbidden descriptions include any phrasing like:
+  - "use next day"
+  - "tomorrow's price/close"
+  - "future return"
+  - "future price"
+  - "t+1" as a feature input
 
 ## Numerical Safety
 - For divisions, guard denominator with small epsilon.

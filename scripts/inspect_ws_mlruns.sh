@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DEFAULT="/mnt/c/Users/lc999/RD-Agent-main/git_ignore_folder/RD-Agent_workspace"
+ROOT_DEFAULT="/mnt/f/dev/RD-Agent-main/git_ignore_folder/RD-Agent_workspace"
 ROOT="${ROOT:-$ROOT_DEFAULT}"
 
 if [ "$#" -lt 1 ]; then
