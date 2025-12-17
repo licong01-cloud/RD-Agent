@@ -179,6 +179,8 @@ rdagent/app/benchmark/factor/example.json
 videos/
 static/
 
+qlib-main/
+
 # AI assistant
 .cursor/
 .claude/
