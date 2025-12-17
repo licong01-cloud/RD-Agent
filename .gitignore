@@ -183,3 +183,4 @@ static/
 .cursor/
 .claude/
 AGENTS.md
+/qlib/
