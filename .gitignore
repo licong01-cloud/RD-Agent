@@ -153,6 +153,9 @@ reports/
 # git_ignore_folder
 git_ignore_folder/
 
+# debug_tools
+debug_tools/
+
 #cache
 *cache*/
 *cache.json
@@ -179,7 +182,10 @@ rdagent/app/benchmark/factor/example.json
 videos/
 static/
 
+qlib-main/
+
 # AI assistant
 .cursor/
 .claude/
 AGENTS.md
+/qlib/

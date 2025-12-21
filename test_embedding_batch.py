@@ -7,7 +7,7 @@ This script intentionally复用 RD-Agent 内部的 LiteLLMAPIBackend，
 
 使用方法（在 WSL 中）：
 
-    cd /mnt/c/Users/lc999/RD-Agent-main
+    cd /mnt/f/dev/RD-Agent-main
     conda activate rdagent
     set -a; source .env; set +a
     python test_embedding_batch.py

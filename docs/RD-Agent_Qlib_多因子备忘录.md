@@ -30,7 +30,7 @@
 
 ### 2.1 测试脚本说明
 
-脚本：`llm_speed_compare.py`（已创建在 RD-Agent 项目根目录）
+脚本：`tools/llm_speed_compare.py`（根目录 `llm_speed_compare.py` 为兼容入口）
 
 - 功能：
   - 对同一 prompt 调用多个 LLM 若干次，统计：

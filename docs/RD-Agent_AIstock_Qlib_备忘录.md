@@ -1123,3 +1123,28 @@
 
     python tools/merge_static_factors_to_parquet.py
     ```
+
+---
+
+## 2025-12-14 更新：因子演进（static_factors.parquet + schema + rolling moneyflow + 重试修复）
+
+1. **统一静态因子表产出与字段白名单**：
+   - 在 repo 内生成/维护：
+     - `git_ignore_folder/factor_implementation_source_data/static_factors.parquet`
+     - `git_ignore_folder/factor_implementation_source_data/static_factors_schema.csv`
+     - `git_ignore_folder/factor_implementation_source_data/static_factors_schema.json`
+   - 目的：让因子脚本（`factor.py`）在运行时可以通过 `read_parquet + join` 使用 `daily_basic.h5`（`db_*`）与 `moneyflow.h5`（`mf_*`）相关字段，并且通过 schema 文件实现“字段白名单约束”，减少 LLM 编造字段名导致的 KeyError。
+
+2. **资金流 rolling 派生特征纳入静态因子表**：
+   - 将资金流相关的 rolling 聚合与派生列（例如 `*_5d` / `*_20d`）一并写入 `static_factors.parquet`，并同步反映在 schema 中，方便 LLM 在可用列集合内做选择。
+
+3. **因子执行数据目录同步与 schema 注入**：
+   - 在 RD-Agent 生成因子执行数据目录时，优先同步 repo 生成的 `static_factors.parquet` 及 schema（csv/json）到运行目录（含 debug 目录）。
+   - 同时补齐了数据文件描述能力：schema 文件（`.csv`/`.json`）能被正确读取并注入到 prompt 中（避免“文件类型不支持”的异常）。
+
+4. **FactorAutoRepair（失败自动修复）触发范围扩展**：
+   - 扩展了失败签名匹配范围，覆盖更常见的失败类型（例如缺列、空结果、全 NaN 等），以便在演进轮次中实际触发重试修复。
+
+5. **关联备忘录与提示词归档**：
+   - 备忘录：`docs/20251214_因子演进_debug_static_factors_rolling_retry备忘录.md`
+   - 提示词全量 dump 与诊断：`docs/20251214_QLib因子全量提示词_dump与诊断.md`

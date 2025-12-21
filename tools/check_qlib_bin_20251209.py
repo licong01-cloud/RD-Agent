@@ -4,7 +4,7 @@ This script is **read-only**: it will not modify any files under the bin directo
 
 Usage (WSL):
 
-    cd /mnt/c/Users/lc999/RD-Agent-main
+    cd /mnt/f/dev/RD-Agent-main
     python tools/check_qlib_bin_20251209.py
 """
 
@@ -13,7 +13,7 @@ import pprint
 import qlib
 from qlib.data import D
 
-PROVIDER_URI = "/mnt/c/Users/lc999/NewAIstock/AIstock/qlib_bin/qlib_bin_20251209"
+PROVIDER_URI = "/mnt/f/Dev/AIstock/qlib_bin/qlib_bin_20251209"
 REGION = "cn"
 
 

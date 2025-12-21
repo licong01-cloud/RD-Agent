@@ -23,6 +23,8 @@ langchain
 langchain-community
 tiktoken
 pymupdf  # Extract shotsreens from pdf
+llama-index
+chromadb
 
 # PDF related
 pypdf

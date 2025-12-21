@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import cast
 
@@ -7,10 +8,18 @@ from pydantic_settings import (
     BaseSettings,
     EnvSettingsSource,
     PydanticBaseSettingsSource,
+    SettingsConfigDict,
 )
 
 
 class ExtendedBaseSettings(BaseSettings):
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        env_nested_delimiter="__",
+        extra="ignore",
+    )
 
     @classmethod
     def settings_customise_sources(
@@ -45,6 +54,18 @@ class ExtendedBaseSettings(BaseSettings):
 
 class RDAgentSettings(ExtendedBaseSettings):
 
+    # IMPORTANT: keep ExtendedBaseSettings settings (env_file/env_nested_delimiter/etc.)
+    # so that nested env overrides like RD_AGENT_SETTINGS__PICKLE_CACHE_FOLDER_PATH_STR work.
+    _base_model_config = dict(ExtendedBaseSettings.model_config)
+    # NOTE: RDAgentSettings uses a strict env_prefix (RD_AGENT_SETTINGS__).
+    # To avoid parsing unrelated keys from the shared `.env` file (e.g. LLM settings like BACKEND/CHAT_MODEL),
+    # disable direct env_file reading here and rely on `load_dotenv()` (cli entrance) + environment variables.
+    _base_model_config["env_file"] = None
+    _base_model_config["extra"] = "ignore"
+    # Allow prefixed env overrides for this settings class.
+    _base_model_config["env_prefix"] = "RD_AGENT_SETTINGS__"
+    model_config = SettingsConfigDict(**_base_model_config)
+
     # azure document intelligence configs
     azure_document_intelligence_key: str = ""
     azure_document_intelligence_endpoint: str = ""
@@ -68,7 +89,9 @@ class RDAgentSettings(ExtendedBaseSettings):
     # pickle cache conf
     cache_with_pickle: bool = True  # whether to use pickle cache
     pickle_cache_folder_path_str: str = str(
-        Path.cwd() / "pickle_cache/",
+        (Path.home() / ".cache" / "rdagent" / "pickle_cache")
+        if os.name != "nt"
+        else (Path.cwd() / "pickle_cache")
     )  # the path of the folder to store the pickle cache
     use_file_lock: bool = (
         True  # when calling the function with same parameters, whether to use file lock to avoid

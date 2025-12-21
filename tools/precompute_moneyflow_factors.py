@@ -5,6 +5,15 @@ import numpy as np
 import pandas as pd
 
 
+def _load_dotenv_if_available() -> None:
+    try:
+        from dotenv import load_dotenv  # type: ignore
+
+        load_dotenv(".env", override=True)
+    except Exception:
+        return
+
+
 def _to_unix_path(p: Path) -> Path:
     # 简单的 Windows → WSL 路径转换，避免在 WSL 内写到本地 C:\ 根目录
     s = str(p)
@@ -29,13 +38,24 @@ def main() -> None:
     默认路径可以按需修改，也可以在后续任务中参数化.
     """
 
-    # 默认使用 20251209 这期 snapshot，可按需调整
-    snapshot_root = Path("C:/Users/lc999/NewAIstock/AIstock/qlib_snapshots/qlib_export_20251209")
+    _load_dotenv_if_available()
+
+    # 默认使用 20251209 这期 snapshot，可通过 AIstock_SNAPSHOT_ROOT 覆盖
+    snapshot_root = Path(
+        os.environ.get("AIstock_SNAPSHOT_ROOT", "")
+        or os.environ.get("AISTOCK_SNAPSHOT_ROOT", "")
+        or "F:/Dev/AIstock/qlib_snapshots/qlib_export_20251209"
+    )
     moneyflow_path = snapshot_root / "moneyflow.h5"
     daily_pv_path = snapshot_root / "daily_pv.h5"
 
-    # 因子输出目录
-    factors_root = Path("C:/Users/lc999/NewAIstock/AIstock/factors/moneyflow_factors")
+    # 因子输出根目录，可通过 AISTOCK_FACTORS_ROOT 覆盖
+    factors_root = Path(
+        os.environ.get("AISTOCK_FACTORS_ROOT", "")
+        or os.environ.get("AIstock_FACTORS_ROOT", "")
+        or "F:/Dev/AIstock/factors"
+    )
+    factors_root = factors_root / "moneyflow_factors"
     output_path = factors_root / "result.pkl"
 
     moneyflow_path = _to_unix_path(moneyflow_path)

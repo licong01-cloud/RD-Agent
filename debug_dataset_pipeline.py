@@ -4,7 +4,7 @@ from qlib.data.dataset.handler import DataHandlerLP
 from qlib.contrib.data.handler import Alpha158
 
 
-PROVIDER_URI = "/mnt/c/Users/lc999/NewAIstock/AIstock/qlib_bin/qlib_bin_20251209"
+PROVIDER_URI = "/mnt/f/Dev/AIstock/qlib_bin/qlib_bin_20251209"
 
 
 def build_handler(learn_processors):

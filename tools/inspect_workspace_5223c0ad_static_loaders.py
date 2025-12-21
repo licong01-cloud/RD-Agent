@@ -10,13 +10,13 @@ conf_combined_factors.yaml 里的 StaticDataLoader 因子表索引结构。
 
 使用方式（在 WSL 中示例）：
 
-    cd /mnt/c/Users/lc999/RD-Agent-main
+    cd /mnt/f/dev/RD-Agent-main
     conda activate rdagent-gpu  # 按你的环境名调整
     python tools/inspect_workspace_5223c0ad_static_loaders.py
 
 脚本行为：
 1. 使用固定 workspace 路径：
-   /mnt/c/Users/lc999/RD-Agent-main/git_ignore_folder/RD-Agent_workspace/5223c0ad21f442ddb64c887b2c0a9d09
+   /mnt/f/dev/RD-Agent-main/git_ignore_folder/RD-Agent_workspace/5223c0ad21f442ddb64c887b2c0a9d09
 2. 在该目录下查找 conf_combined_factors.yaml（或其它 *.yaml/*.yml）；
 3. 解析 YAML，找到 data_loader.kwargs.dataloader_l 中
    所有 class 为 qlib.data.dataset.loader.StaticDataLoader 的条目，读取其 kwargs.config 路径；
@@ -30,7 +30,7 @@ conf_combined_factors.yaml 里的 StaticDataLoader 因子表索引结构。
 
 
 WORKSPACE_PATH = Path(
-    "/mnt/c/Users/lc999/RD-Agent-main/git_ignore_folder/RD-Agent_workspace/5223c0ad21f442ddb64c887b2c0a9d09"
+    "/mnt/f/dev/RD-Agent-main/git_ignore_folder/RD-Agent_workspace/5223c0ad21f442ddb64c887b2c0a9d09"
 )
 
 

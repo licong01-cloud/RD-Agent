@@ -7,7 +7,7 @@ from qlib.data import D
 
 运行方式（在 WSL 中示例）：
 
-    cd /mnt/c/Users/lc999/RD-Agent-main
+    cd /mnt/f/dev/RD-Agent-main
     conda activate rdagent-gpu  # 按你的环境名调整
     python tools/check_qlib_calendar_vs_factors.py
 
@@ -21,7 +21,7 @@ from qlib.data import D
 def init_qlib():
     """根据当前 RD-Agent Qlib 场景的配置初始化 Qlib。"""
     qlib.init(
-        provider_uri="/mnt/c/Users/lc999/NewAIstock/AIstock/qlib_bin/qlib_bin_20251209",
+        provider_uri="/mnt/f/Dev/AIstock/qlib_bin/qlib_bin_20251209",
         region="cn",
     )
 
@@ -85,14 +85,14 @@ def main() -> None:
 
     # 1) AE 10 日重构误差因子
     check_factor_dates(
-        "/mnt/c/Users/lc999/NewAIstock/AIstock/factors/ae_recon_error_10d/result.pkl",
+        "/mnt/f/Dev/AIstock/factors/ae_recon_error_10d/result.pkl",
         qlib_days,
         name="AE 10d 重构误差",
     )
 
     # 2) daily_basic 因子表
     check_factor_dates(
-        "/mnt/c/Users/lc999/NewAIstock/AIstock/factors/daily_basic_factors/result.pkl",
+        "/mnt/f/Dev/AIstock/factors/daily_basic_factors/result.pkl",
         qlib_days,
         name="daily_basic 因子表",
     )
@@ -100,7 +100,7 @@ def main() -> None:
     # 3) 若存在 combined_factors_df.parquet，可一并检查
     try:
         check_factor_dates(
-            "/mnt/c/Users/lc999/NewAIstock/AIstock/qlib_rd_workspace/combined_factors_df.parquet",
+            "/mnt/f/Dev/AIstock/qlib_rd_workspace/combined_factors_df.parquet",
             qlib_days,
             name="combined_factors_df.parquet",
         )

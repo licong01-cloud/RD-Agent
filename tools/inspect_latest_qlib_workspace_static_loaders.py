@@ -10,7 +10,7 @@ import yaml
 
 使用方式（在 WSL 中示例）：
 
-    cd /mnt/c/Users/lc999/RD-Agent-main
+    cd /mnt/f/dev/RD-Agent-main
     conda activate rdagent-gpu  # 按你的环境名调整
     python tools/inspect_latest_qlib_workspace_static_loaders.py
 

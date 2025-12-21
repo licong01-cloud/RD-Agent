@@ -4,6 +4,7 @@ import functools
 import importlib
 import json
 import multiprocessing as mp
+import os
 import pickle
 import random
 from collections.abc import Callable
@@ -186,13 +187,25 @@ def cache_with_pickle(hash_func: Callable, post_process_func: Callable | None = 
             if hash_key is None:
                 return func(*args, **kwargs)
 
+            cache_debug = os.getenv("QLIB_QUANT_CACHE_DEBUG", "0") == "1"
+
+            # Lazy import to avoid circular dependency: rdagent.log.logger imports rdagent.core.utils.
+            logger = None
+            if cache_debug:
+                from rdagent.log import rdagent_logger as logger  # type: ignore[redefined-outer-name]
+
             cache_file = target_folder / f"{hash_key}.pkl"
             lock_file = target_folder / f"{hash_key}.lock"
 
             if cache_file.exists():
+                if cache_debug:
+                    logger.info(f"[cache_with_pickle] HIT {func.__module__}.{func.__name__} key={hash_key}")
                 with cache_file.open("rb") as f:
                     cached_res = pickle.load(f)
                 return post_process_func(*args, cached_res=cached_res, **kwargs) if post_process_func else cached_res
+
+            if cache_debug:
+                logger.info(f"[cache_with_pickle] MISS {func.__module__}.{func.__name__} key={hash_key}")
 
             if RD_AGENT_SETTINGS.use_file_lock:
                 with FileLock(lock_file):

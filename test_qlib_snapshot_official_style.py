@@ -14,7 +14,7 @@ import os
 import qlib
 from qlib.data import D
 
-PROVIDER_URI = "/mnt/c/Users/lc999/NewAIstock/AIstock/qlib_snapshots/qlib_export_20251206"
+PROVIDER_URI = "/mnt/f/Dev/AIstock/qlib_snapshots/qlib_export_20251206"
 REGION = "cn"
 DAY_START = "2020-01-01"
 DAY_END = "2020-01-10"

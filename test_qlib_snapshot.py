@@ -18,8 +18,8 @@ import traceback
 import qlib
 from qlib.data import D
 
-# WSL can access the Windows path via /mnt/c/...
-PROVIDER_URI = "/mnt/c/Users/lc999/NewAIstock/AIstock/qlib_snapshots/qlib_export_20251206"
+# WSL can access the Windows path via /mnt/<drive>/...
+PROVIDER_URI = "/mnt/f/Dev/AIstock/qlib_snapshots/qlib_export_20251206"
 REGION = "cn"
 
 DAY_START = "2025-06-01"

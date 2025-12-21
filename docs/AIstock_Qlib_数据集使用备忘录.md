@@ -238,3 +238,26 @@ AIstock 的 Qlib Snapshot 目前主要落在：
 6. 推荐的策略演进方向。
 
 - 这样可以让未来的你（以及 LLM）在扩展策略与因子时，始终围绕“已有数据资产”来设计，避免重复建设与无效计算。
+
+---
+
+## 2025-12-14 更新：static_factors.parquet/schema 与资金流 rolling 特征接入（RD-Agent/Qlib 因子演进）
+
+1. **统一静态因子表（repo 侧产出）**：
+   - 新增/更新 repo 内的 `git_ignore_folder/factor_implementation_source_data/static_factors.parquet`，并配套输出：
+     - `static_factors_schema.csv`
+     - `static_factors_schema.json`
+   - 该表用于把 `daily_basic.h5`（`db_*`）与 `moneyflow.h5`（`mf_*`）等字段以统一方式提供给因子脚本（`factor.py`）在运行时可选 join。
+
+2. **资金流 rolling 派生特征**：
+   - 在静态因子表中补齐了资金流相关的派生列（例如 `*_5d` / `*_20d` 这类 rolling 聚合列），并通过 schema 文件显式列出字段白名单，避免 LLM 继续编造字段名。
+
+3. **因子运行目录的数据拷贝与 schema 注入**：
+   - RD-Agent 在准备因子执行数据目录时，会优先拷贝 repo 生成的 `static_factors.parquet` 与 schema（csv/json）到因子运行目录（包含 debug 目录），确保 LLM 能在 prompt 中看到 schema 描述，并在 `factor.py` 中按需读取 join。
+
+4. **失败重试（FactorAutoRepair）与典型失败类型**：
+   - 扩展了自动修复触发的失败签名覆盖面，便于在“缺列 / 全 NaN / 空结果”等场景触发修复重试。
+
+5. **关联备忘录与提示词全量打印**：
+   - 备忘录：`docs/20251214_因子演进_debug_static_factors_rolling_retry备忘录.md`
+   - 提示词 dump 与诊断：`docs/20251214_QLib因子全量提示词_dump与诊断.md`
