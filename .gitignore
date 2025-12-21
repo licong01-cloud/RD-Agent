@@ -153,6 +153,9 @@ reports/
 # git_ignore_folder
 git_ignore_folder/
 
+# debug_tools
+debug_tools/
+
 #cache
 *cache*/
 *cache.json
