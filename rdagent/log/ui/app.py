@@ -1,4 +1,5 @@
 import argparse
+import sys
 import re
 import textwrap
 from collections import defaultdict
@@ -7,6 +8,8 @@ from importlib.resources import files as rfiles
 from pathlib import Path
 from typing import Callable, Type
 
+from dotenv import load_dotenv
+
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -14,6 +17,11 @@ import streamlit as st
 from plotly.subplots import make_subplots
 from streamlit import session_state as state
 from streamlit_theme import st_theme
+
+_repo_root = str(Path(__file__).resolve().parents[3])
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+load_dotenv(str(Path(_repo_root) / ".env"), override=True)
 
 from rdagent.components.coder.factor_coder.evaluators import FactorSingleFeedback
 from rdagent.components.coder.factor_coder.factor import FactorFBWorkspace, FactorTask
@@ -657,6 +665,20 @@ def feedback_window():
                     st.markdown("**Returns📈**")
                     fig = report_figure(fbr[0].content)
                     st.plotly_chart(fig)
+                    with st.expander("**图例缩写说明（Legend）**", expanded=False):
+                        st.markdown(
+                            """
+| 缩写 | 含义 |
+|---|---|
+| cum | 累计（cumulative） |
+| bench | 基准（benchmark） |
+| w / wo | with / without（考虑 / 不考虑） |
+| cost | 交易成本（transaction cost） |
+| ex | 超额（excess，相对基准） |
+| mdd | 最大回撤（max drawdown；图中对应回撤序列） |
+| turnover | 换手率 |
+                            """
+                        )
                 st.markdown("**Hypothesis Feedback🔍**")
                 h: HypothesisFeedback = fb[0].content
                 st.markdown(

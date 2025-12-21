@@ -16,9 +16,9 @@ NOTE: **key is always "data" for all hdf5 files **.
 # For different data, We have some basic knowledge for them
 
 ## Daily price and volume data
-$open: open price of the stock on that day.
-$close: close price of the stock on that day.
-$high: high price of the stock on that day.
-$low: low price of the stock on that day.
-$volume: volume of the stock on that day.
-$factor: factor value of the stock on that day.
+open: open price of the stock on that day.
+close: close price of the stock on that day.
+high: high price of the stock on that day.
+low: low price of the stock on that day.
+volume: volume of the stock on that day.
+factor: factor value of the stock on that day.

@@ -110,7 +110,20 @@ def _rolling_sum_by_instrument(s: pd.Series, window: int) -> pd.Series:
     return out.astype("float64")
 
 
-def _derive_moneyflow_features(df_mf_raw: pd.DataFrame) -> pd.DataFrame:
+def _pick_amount_volume(df_pv: pd.DataFrame) -> tuple[pd.Series, pd.Series] | None:
+    if df_pv is None or df_pv.empty:
+        return None
+
+    for amt_col, vol_col in (("amount", "volume"), ("$amount", "$volume")):
+        if amt_col in df_pv.columns and vol_col in df_pv.columns:
+            amount = df_pv[amt_col].astype("float64").mask(df_pv[amt_col].astype("float64") == 0, np.nan)
+            volume = df_pv[vol_col].astype("float64").mask(df_pv[vol_col].astype("float64") == 0, np.nan)
+            return amount, volume
+
+    return None
+
+
+def _derive_moneyflow_features(df_mf_raw: pd.DataFrame, df_pv: pd.DataFrame | None) -> pd.DataFrame:
     """Derive stable, schema-friendly moneyflow features from raw buy/sell columns.
 
     This makes factor generation more robust by providing commonly-needed
@@ -118,6 +131,12 @@ def _derive_moneyflow_features(df_mf_raw: pd.DataFrame) -> pd.DataFrame:
     """
 
     df = df_mf_raw.sort_index()
+
+    picked = _pick_amount_volume(df_pv) if df_pv is not None else None
+    if picked is None:
+        return pd.DataFrame(index=df.index)
+
+    amount, volume = picked
 
     required = [
         "mf_sm_buy_amt",
@@ -152,11 +171,6 @@ def _derive_moneyflow_features(df_mf_raw: pd.DataFrame) -> pd.DataFrame:
     main_buy_vol = df["mf_lg_buy_vol"] + df["mf_elg_buy_vol"]
     main_sell_vol = df["mf_lg_sell_vol"] + df["mf_elg_sell_vol"]
 
-    total_turnover_amt = buy_amt_total + sell_amt_total
-    total_turnover_vol = buy_vol_total + sell_vol_total
-    main_turnover_amt = main_buy_amt + main_sell_amt
-    main_turnover_vol = main_buy_vol + main_sell_vol
-
     total_net_amt = (buy_amt_total - sell_amt_total).astype("float64")
     total_net_vol = (buy_vol_total - sell_vol_total).astype("float64")
     main_net_amt = (main_buy_amt - main_sell_amt).astype("float64")
@@ -167,18 +181,18 @@ def _derive_moneyflow_features(df_mf_raw: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(index=df.index)
     out["mf_total_net_amt"] = total_net_amt
     out["mf_total_net_vol"] = total_net_vol
-    out["mf_total_net_amt_ratio"] = _safe_div(total_net_amt, total_turnover_amt)
-    out["mf_total_net_vol_ratio"] = _safe_div(total_net_vol, total_turnover_vol)
+    out["mf_total_net_amt_ratio"] = _safe_div(total_net_amt, amount)
+    out["mf_total_net_vol_ratio"] = _safe_div(total_net_vol, volume)
 
     out["mf_main_net_amt"] = main_net_amt
     out["mf_main_net_vol"] = main_net_vol
-    out["mf_main_net_amt_ratio"] = _safe_div(main_net_amt, main_turnover_amt)
-    out["mf_main_net_vol_ratio"] = _safe_div(main_net_vol, main_turnover_vol)
+    out["mf_main_net_amt_ratio"] = _safe_div(main_net_amt, amount)
+    out["mf_main_net_vol_ratio"] = _safe_div(main_net_vol, volume)
 
     out["mf_elg_net_amt"] = elg_net_amt
     out["mf_elg_net_vol"] = elg_net_vol
-    out["mf_elg_net_amt_ratio"] = _safe_div(elg_net_amt, (df["mf_elg_buy_amt"] + df["mf_elg_sell_amt"]))
-    out["mf_elg_net_vol_ratio"] = _safe_div(elg_net_vol, (df["mf_elg_buy_vol"] + df["mf_elg_sell_vol"]))
+    out["mf_elg_net_amt_ratio"] = _safe_div(elg_net_amt, amount)
+    out["mf_elg_net_vol_ratio"] = _safe_div(elg_net_vol, volume)
 
     out["mf_elg_share_in_main_amt"] = _safe_div(df["mf_elg_buy_amt"], (df["mf_lg_buy_amt"] + df["mf_elg_buy_amt"]))
     out["mf_elg_share_in_main_vol"] = _safe_div(df["mf_elg_buy_vol"], (df["mf_lg_buy_vol"] + df["mf_elg_buy_vol"]))
@@ -188,13 +202,10 @@ def _derive_moneyflow_features(df_mf_raw: pd.DataFrame) -> pd.DataFrame:
         out[f"mf_main_net_amt_{w}d"] = _rolling_sum_by_instrument(main_net_amt, w)
         out[f"mf_elg_net_amt_{w}d"] = _rolling_sum_by_instrument(elg_net_amt, w)
 
-        total_turnover_amt_w = _rolling_sum_by_instrument(total_turnover_amt.astype("float64"), w)
-        main_turnover_amt_w = _rolling_sum_by_instrument(main_turnover_amt.astype("float64"), w)
-        elg_turnover_amt_w = _rolling_sum_by_instrument((df["mf_elg_buy_amt"] + df["mf_elg_sell_amt"]).astype("float64"), w)
-
-        out[f"mf_total_net_amt_ratio_{w}d"] = _safe_div(out[f"mf_total_net_amt_{w}d"], total_turnover_amt_w)
-        out[f"mf_main_net_amt_ratio_{w}d"] = _safe_div(out[f"mf_main_net_amt_{w}d"], main_turnover_amt_w)
-        out[f"mf_elg_net_amt_ratio_{w}d"] = _safe_div(out[f"mf_elg_net_amt_{w}d"], elg_turnover_amt_w)
+        amount_w = _rolling_sum_by_instrument(amount, w)
+        out[f"mf_total_net_amt_ratio_{w}d"] = _safe_div(out[f"mf_total_net_amt_{w}d"], amount_w)
+        out[f"mf_main_net_amt_ratio_{w}d"] = _safe_div(out[f"mf_main_net_amt_{w}d"], amount_w)
+        out[f"mf_elg_net_amt_ratio_{w}d"] = _safe_div(out[f"mf_elg_net_amt_{w}d"], amount_w)
 
     return out
 
@@ -218,8 +229,8 @@ def _build_schema(df: pd.DataFrame) -> list[dict[str, Any]]:
         "db_turnover_rate": "换手率",
         "db_volume_ratio": "量比",
         # moneyflow common (raw)
-        "mf_net_amt": "资金净流入金额（买入-卖出）",
-        "mf_net_vol": "资金净流入量（买入-卖出）",
+        "mf_net_amt": "资金净流入金额（买入-卖出）。别名/等价口径：≈ mf_total_net_amt（当 mf_total_net_amt 按全档买卖额重算时）。",
+        "mf_net_vol": "资金净流入量（买入-卖出）。别名/等价口径：≈ mf_total_net_vol（当 mf_total_net_vol 按全档买卖量重算时）。",
         "mf_lg_buy_amt": "大单买入金额",
         "mf_lg_sell_amt": "大单卖出金额",
         "mf_elg_buy_amt": "超大单买入金额",
@@ -228,38 +239,39 @@ def _build_schema(df: pd.DataFrame) -> list[dict[str, Any]]:
         "mf_lg_sell_vol": "大单卖出量",
         "mf_elg_buy_vol": "超大单买入量",
         "mf_elg_sell_vol": "超大单卖出量",
-        "mf_total_net_amt": "全档净流入金额（全买入-全卖出）",
-        "mf_total_net_vol": "全档净流入量（全买入-全卖出）",
-        "mf_total_net_amt_ratio": "全档净流入强度（净流入/成交额，分母为买卖额之和）",
-        "mf_total_net_vol_ratio": "全档净流入强度（净流入/成交量，分母为买卖量之和）",
+        "mf_total_net_amt": "全档净流入金额（全买入-全卖出）。别名/等价口径：≈ mf_net_amt（上游直接提供净流入时）。",
+        "mf_total_net_vol": "全档净流入量（全买入-全卖出）。别名/等价口径：≈ mf_net_vol（上游直接提供净流入时）。",
+        "mf_total_net_amt_ratio": "全档净流入强度（净流入/成交额）",
+        "mf_total_net_vol_ratio": "全档净流入强度（净流入/成交量）",
         "mf_main_net_amt": "主力净流入金额（大单+特大单）",
         "mf_main_net_vol": "主力净流入量（大单+特大单）",
-        "mf_main_net_amt_ratio": "主力净流入强度（主力净流入/主力买卖额之和）",
-        "mf_main_net_vol_ratio": "主力净流入强度（主力净流入/主力买卖量之和）",
+        "mf_main_net_amt_ratio": "主力净流入强度（主力净流入/成交额）",
+        "mf_main_net_vol_ratio": "主力净流入强度（主力净流入/成交量）",
         "mf_elg_net_amt": "特大单净流入金额（特大单买入-卖出）",
         "mf_elg_net_vol": "特大单净流入量（特大单买入-卖出）",
-        "mf_elg_net_amt_ratio": "特大单净流入强度（特大单净流入/特大单买卖额之和）",
-        "mf_elg_net_vol_ratio": "特大单净流入强度（特大单净流入/特大单买卖量之和）",
-        "mf_elg_share_in_main_amt": "特大单买入占主力买入比（特大单买入/(大单+特大单买入)）",
-        "mf_elg_share_in_main_vol": "特大单买入量占主力买入量比（特大单买入/(大单+特大单买入)）",
-        "mf_total_net_amt_5d": "全档净流入金额5日滚动和",
-        "mf_total_net_amt_20d": "全档净流入金额20日滚动和",
-        "mf_main_net_amt_5d": "主力净流入金额5日滚动和",
-        "mf_main_net_amt_20d": "主力净流入金额20日滚动和",
-        "mf_elg_net_amt_5d": "特大单净流入金额5日滚动和",
-        "mf_elg_net_amt_20d": "特大单净流入金额20日滚动和",
-        "mf_total_net_amt_ratio_5d": "全档净流入强度5日（5日净流入/5日买卖额之和）",
-        "mf_total_net_amt_ratio_20d": "全档净流入强度20日（20日净流入/20日买卖额之和）",
-        "mf_main_net_amt_ratio_5d": "主力净流入强度5日（5日主力净流入/5日主力买卖额之和）",
-        "mf_main_net_amt_ratio_20d": "主力净流入强度20日（20日主力净流入/20日主力买卖额之和）",
-        "mf_elg_net_amt_ratio_5d": "特大单净流入强度5日（5日特大单净流入/5日特大单买卖额之和）",
-        "mf_elg_net_amt_ratio_20d": "特大单净流入强度20日（20日特大单净流入/20日特大单买卖额之和）",
-        # precomputed examples
-        "value_pe_inv": "估值因子：1/PE，越大代表越便宜",
-        "value_pb_inv": "估值因子：1/PB，越大代表越便宜",
-        "size_log_mv": "规模因子：log(市值)",
-        "liquidity_turnover": "流动性因子：换手率",
-        "liquidity_vol_ratio": "流动性因子：量比",
+        "mf_elg_net_amt_ratio": "特大单净流入强度（特大单净流入/成交额）：(mf_elg_buy_amt-mf_elg_sell_amt)/amount；amount=0或缺失=>NaN",
+        "mf_elg_net_vol_ratio": "特大单净流入强度（特大单净流入/成交量）：(mf_elg_buy_vol-mf_elg_sell_vol)/volume；volume=0或缺失=>NaN",
+        "mf_elg_share_in_main_amt": "特大单净流入占主力净流入比：(mf_elg_buy_amt-mf_elg_sell_amt)/((mf_lg_buy_amt+mf_elg_buy_amt)-(mf_lg_sell_amt+mf_elg_sell_amt))；分母为0或缺失=>NaN",
+        "mf_elg_share_in_main_vol": "特大单净流入占主力净流入比：(mf_elg_buy_vol-mf_elg_sell_vol)/((mf_lg_buy_vol+mf_elg_buy_vol)-(mf_lg_sell_vol+mf_elg_sell_vol))；分母为0或缺失=>NaN",
+        "mf_total_net_amt_5d": "sum_5d(mf_total_net_amt)，全档净流入金额5日滚动和",
+        "mf_total_net_amt_20d": "sum_20d(mf_total_net_amt)，全档净流入金额20日滚动和",
+        "mf_main_net_amt_5d": "sum_5d(mf_main_net_amt)，主力净流入金额5日滚动和",
+        "mf_main_net_amt_20d": "sum_20d(mf_main_net_amt)，主力净流入金额20日滚动和",
+        "mf_elg_net_amt_5d": "sum_5d(mf_elg_net_amt)，特大单净流入金额5日滚动和",
+        "mf_elg_net_amt_20d": "sum_20d(mf_elg_net_amt)，特大单净流入金额20日滚动和",
+        "mf_total_net_amt_ratio_5d": "sum_5d(mf_total_net_amt)/sum_5d(amount)，全档净流入强度5日滚动；分母为0或缺失=>NaN",
+        "mf_total_net_amt_ratio_20d": "sum_20d(mf_total_net_amt)/sum_20d(amount)，全档净流入强度20日滚动；分母为0或缺失=>NaN",
+        "mf_main_net_amt_ratio_5d": "sum_5d(mf_main_net_amt)/sum_5d(amount)，主力净流入强度5日滚动；分母为0或缺失=>NaN",
+        "mf_main_net_amt_ratio_20d": "sum_20d(mf_main_net_amt)/sum_20d(amount)，主力净流入强度20日滚动；分母为0或缺失=>NaN",
+        "mf_elg_net_amt_ratio_5d": "sum_5d(mf_elg_net_amt)/sum_5d(amount)，特大单净流入强度5日滚动；分母为0或缺失=>NaN",
+        "mf_elg_net_amt_ratio_20d": "sum_20d(mf_elg_net_amt)/sum_20d(amount)，特大单净流入强度20日滚动；分母为0或缺失=>NaN",
+        # precomputed (traceable via precompute_daily_basic_factors.py)
+        "value_pe_inv": "倒数市盈率（估值因子）：1/db_pe_ttm（优先）或 1/db_pe；分母为0或缺失=>NaN",
+        "value_pb_inv": "倒数市净率（估值因子）：1/db_pb；分母为0或缺失=>NaN",
+        "size_log_mv": "市值对数（规模因子）：log(db_circ_mv 优先，否则 db_total_mv)；仅对>0取对数，否则=>NaN",
+        "liquidity_turnover": "换手率（流动性因子）：db_turnover_rate（缺失=>NaN）。别名/等价口径：liquidity_turnover ≈ db_turnover_rate",
+        "liquidity_vol_ratio": "量比（流动性因子）：db_volume_ratio（缺失=>NaN）。别名/等价口径：liquidity_vol_ratio ≈ db_volume_ratio",
+        "ae_recon_error_10d": "10日自编码器重构误差（异常度）：依赖预训练模型 AE10D_MODEL_PATH=models/ae_10d.pth（payload 含 window/features/mean/std）；对每个(股票,日期)取过去window天、features列拼接成向量x，归一化后输入AE，误差=mean((x-recon(x))^2)；仅对窗口内全为有限值的样本计算，否则缺失",
     }
 
     schema: list[dict[str, Any]] = []
@@ -282,6 +294,96 @@ def _build_schema(df: pd.DataFrame) -> list[dict[str, Any]]:
                 "source": source,
             }
         )
+
+    return schema
+
+
+def _print_untraceable_schema_fields(schema_cols: list[dict[str, Any]], title: str) -> None:
+    missing: list[tuple[str, str, str]] = []
+    for item in schema_cols:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "") or "")
+        dtype = str(item.get("dtype", "") or "")
+        source = str(item.get("source", "") or "")
+        meaning = item.get("meaning")
+        meaning_s = "" if meaning is None else str(meaning).strip()
+        if not meaning_s or meaning_s.lower() == "nan":
+            if name:
+                missing.append((name, dtype, source))
+
+    if not missing:
+        print(f"[INFO] {title}: none")
+        return
+
+    print(f"[WARN] {title}: {len(missing)} fields")
+    # Group by source for readability.
+    by_source: dict[str, list[tuple[str, str]]] = {}
+    for name, dtype, source in missing:
+        by_source.setdefault(source or "(unknown)", []).append((name, dtype))
+
+    for src in sorted(by_source.keys()):
+        items = by_source[src]
+        print(f"  - source={src}: {len(items)}")
+        for name, dtype in items:
+            print(f"    - {name} ({dtype})")
+
+
+def _fill_derived_meanings(schema: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Fill meanings for derived/precomputed fields by naming conventions.
+
+    This is a fallback when neither the hardcoded meaning_map nor external field-map
+    provides meanings (e.g., rolling windows like *_5d/_20d).
+    """
+
+    for entry in schema:
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        if isinstance(entry.get("meaning"), str) and entry["meaning"].strip():
+            continue
+
+        # PriceStrength_10D -> 10日价格强度
+        if name.startswith("PriceStrength_") and name.endswith("D"):
+            w = name[len("PriceStrength_") : -1]
+            if w.isdigit():
+                entry["meaning"] = f"{w}日价格强度"
+                continue
+
+        # Moneyflow rolling sum fields
+        if name.startswith("mf_") and (name.endswith("_5d") or name.endswith("_20d")):
+            if name.endswith("_5d"):
+                w = "5"
+                base = name[: -len("_5d")]
+            else:
+                w = "20"
+                base = name[: -len("_20d")]
+
+            # Ratio rolling fields
+            if base.endswith("_ratio"):
+                base2 = base[: -len("_ratio")]
+                if base2 == "mf_total_net_amt":
+                    entry["meaning"] = f"全档净流入强度{w}日（{w}日净流入/{w}日成交额）"
+                    continue
+                if base2 == "mf_main_net_amt":
+                    entry["meaning"] = f"主力净流入强度{w}日（{w}日主力净流入/{w}日成交额）"
+                    continue
+                if base2 == "mf_elg_net_amt":
+                    entry["meaning"] = f"特大单净流入强度{w}日（{w}日特大单净流入/{w}日成交额）"
+                    continue
+                entry["meaning"] = f"{w}日滚动强度指标"
+                continue
+
+            # Non-ratio rolling sums
+            if base == "mf_total_net_amt":
+                entry["meaning"] = f"全档净流入金额{w}日滚动和"
+                continue
+            if base == "mf_main_net_amt":
+                entry["meaning"] = f"主力净流入金额{w}日滚动和"
+                continue
+            if base == "mf_elg_net_amt":
+                entry["meaning"] = f"特大单净流入金额{w}日滚动和"
+                continue
 
     return schema
 
@@ -556,11 +658,14 @@ def main() -> None:
                 "or re-run without --schema-only to rebuild parquet and schema."
             )
 
-        if args.field_map:
-            fm_path = _to_unix_path(Path(args.field_map))
-            print("[INFO] Loading field-map:", fm_path)
-            field_map = _load_field_map(fm_path)
+        snapshot_root = _to_unix_path(Path(args.snapshot_root))
+        auto_field_map = snapshot_root / "metadata" / "aistock_field_map.csv"
+        fm_candidate = _to_unix_path(Path(args.field_map)) if args.field_map else auto_field_map
+        if fm_candidate and fm_candidate.exists():
+            print("[INFO] Loading field-map:", fm_candidate)
+            field_map = _load_field_map(fm_candidate)
             schema_cols = _apply_field_map(schema_cols, field_map)
+        schema_cols = _fill_derived_meanings(schema_cols)
 
         schema = {
             "index": {
@@ -598,6 +703,7 @@ def main() -> None:
 
     daily_basic_path = snapshot_root / "daily_basic.h5"
     moneyflow_path = snapshot_root / "moneyflow.h5"
+    daily_pv_path = snapshot_root / "daily_pv.h5"
 
     print("[INFO] snapshot_root:", snapshot_root)
     print("[INFO] factors_root :", aistock_factors_root)
@@ -608,6 +714,13 @@ def main() -> None:
 
     print("[INFO] Loading raw moneyflow.h5 ...")
     df_mf_raw = _read_table(moneyflow_path, "moneyflow_raw")
+
+    df_pv = None
+    if daily_pv_path.exists():
+        print("[INFO] Loading raw daily_pv.h5 ...")
+        df_pv = _read_table(daily_pv_path, "daily_pv")
+    else:
+        print(f"[WARN] daily_pv.h5 not found: {daily_pv_path} (mf_*_ratio derived features will be skipped)")
 
     # Optional precomputed factor tables
     dfs: list[pd.DataFrame] = []
@@ -634,7 +747,7 @@ def main() -> None:
             print(f"[INFO] Optional table not found: {name} ({p})")
 
     print("[INFO] Deriving common moneyflow features ...")
-    df_mf_derived = _derive_moneyflow_features(df_mf_raw)
+    df_mf_derived = _derive_moneyflow_features(df_mf_raw, df_pv)
     if df_mf_derived.empty:
         for df_opt in dfs[2:]:
             if not isinstance(df_opt, pd.DataFrame) or df_opt.empty:
@@ -642,7 +755,7 @@ def main() -> None:
             df_try = df_opt[[c for c in df_opt.columns if str(c).startswith("mf_")]]
             if df_try.empty:
                 continue
-            df_mf_derived = _derive_moneyflow_features(df_try)
+            df_mf_derived = _derive_moneyflow_features(df_try, df_pv)
             if not df_mf_derived.empty:
                 break
 
@@ -669,11 +782,16 @@ def main() -> None:
             print("[INFO] Writing:", out_debug_path)
             df_merged.to_parquet(out_debug_path)
 
-    if args.field_map:
-        fm_path = _to_unix_path(Path(args.field_map))
-        print("[INFO] Loading field-map:", fm_path)
-        field_map = _load_field_map(fm_path)
+    auto_field_map = snapshot_root / "metadata" / "aistock_field_map.csv"
+    fm_candidate = _to_unix_path(Path(args.field_map)) if args.field_map else auto_field_map
+    if fm_candidate and fm_candidate.exists():
+        print("[INFO] Loading field-map:", fm_candidate)
+        field_map = _load_field_map(fm_candidate)
         schema_cols = _apply_field_map(schema_cols, field_map)
+
+    schema_cols = _fill_derived_meanings(schema_cols)
+
+    _print_untraceable_schema_fields(schema_cols, title="Untraceable schema fields (meaning missing)")
 
     schema = {
         "index": {

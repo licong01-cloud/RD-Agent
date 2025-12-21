@@ -324,7 +324,7 @@ qlib_factor_from_report_rich_style_description : |-
 qlib_factor_experiment_setting: |-
   | Dataset 📊 | Model 🤖    | Factors 🌟       | Data Split  🧮                                   |
   |---------|----------|---------------|-------------------------------------------------|
-  | AIstock A-share (non-ST, non-delisted)  | GRU_TimeSeries_Model | Alpha158 Plus + AIstock factors | Train: 2016-01-01 to 2018-12-31 <br> Valid: 2019-01-01 to 2020-12-31 <br> Test &nbsp;: 2021-01-01 to 2025-12-31 |
+  | AIstock A-share (non-ST, non-delisted)  | GRU_TimeSeries_Model | Alpha158 Plus + AIstock factors | Train: 2010-01-07 to 2018-12-31 <br> Valid: 2019-01-01 to 2020-12-31 <br> Test &nbsp;: 2021-01-01 to 2025-12-01 |
   
   #### 计算资源与训练负载建议（请优先满足以下要求，以充分利用本机 12 核 24 线程 + GPU）
   - **训练轮数与 batch 大小**：
@@ -450,7 +450,7 @@ qlib_model_rich_style_description: |-
 qlib_model_experiment_setting: |-
   | Dataset 📊 | Model 🤖    | Factors 🌟       | Data Split  🧮                                   |
   |---------|----------|---------------|-------------------------------------------------|
-  | AIstock A-share (non-ST, non-delisted)  | 例如 GRU_TimeSeries_Model（也可替换为 LGB/MLP/Transformer 等其它模型） | 20 factors (Alpha158)  | Train: 2016-01-01 to 2018-12-31 <br> Valid: 2019-01-01 to 2020-12-31 <br> Test &nbsp;: 2021-01-01 to 2025-12-31 |
+  | AIstock A-share (non-ST, non-delisted)  | 例如 GRU_TimeSeries_Model（也可替换为 LGB/MLP/Transformer 等其它模型） | 20 factors (Alpha158)  | Train: 2010-01-07 to 2018-12-31 <br> Valid: 2019-01-01 to 2020-12-31 <br> Test &nbsp;: 2021-01-01 to 2025-12-01 |
 
 transformer_volume_price_strategy: |-
   本段落描述的是一套 **示例型** 策略设想，主要用于展示如何将量价特征与时间序列模型（例如 Transformer）结合，用于多股票组合的研究与回测。

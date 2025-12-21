@@ -1,6 +1,15 @@
 import pandas as pd
 from pathlib import Path
 
+
+def _load_dotenv_if_available() -> None:
+    try:
+        from dotenv import load_dotenv  # type: ignore
+
+        load_dotenv(".env", override=True)
+    except Exception:
+        return
+
 """
 线下合并静态因子表为一个统一的 parquet，供 Qlib 的 StaticDataLoader 使用。
 
@@ -23,15 +32,42 @@ from pathlib import Path
 """
 
 
-# 可以根据需要修改：用于抓一个“代表性” workspace 里的 combined_factors_df.parquet
-REP_WORKSPACE_DIRS = [
-    Path("/mnt/f/dev/RD-Agent-main/git_ignore_folder/RD-Agent_workspace/5223c0ad21f442ddb64c887b2c0a9d09"),
-]
+_load_dotenv_if_available()
 
-AE_PATH = Path("/mnt/f/Dev/AIstock/factors/ae_recon_error_10d/result.pkl")
-DAILY_BASIC_PATH = Path("/mnt/f/Dev/AIstock/factors/daily_basic_factors/result.pkl")
-MONEYFLOW_FACTORS_PATH = Path("/mnt/f/Dev/AIstock/factors/moneyflow_factors/result.pkl")
-OUTPUT_PATH = Path("/mnt/f/Dev/AIstock/factors/combined_static_factors.parquet")
+
+def _get_factors_root() -> Path:
+    import os
+
+    root = (
+        os.environ.get("AISTOCK_FACTORS_ROOT", "")
+        or os.environ.get("AIstock_FACTORS_ROOT", "")
+        or "/mnt/f/Dev/AIstock/factors"
+    )
+    return Path(root)
+
+
+def _get_rep_workspace_dirs() -> list[Path]:
+    import os
+
+    raw = os.environ.get("MERGE_STATIC_FACTORS_REP_WORKSPACE_DIRS", "").strip()
+    if raw:
+        parts = [p.strip() for p in raw.split(":") if p.strip()]
+        return [Path(p) for p in parts]
+
+    # Fallback: keep previous default (may not exist on every machine)
+    return [
+        Path("/mnt/f/dev/RD-Agent-main/git_ignore_folder/RD-Agent_workspace/5223c0ad21f442ddb64c887b2c0a9d09"),
+    ]
+
+
+# 可以通过 env 覆盖：MERGE_STATIC_FACTORS_REP_WORKSPACE_DIRS=/path/ws1:/path/ws2
+REP_WORKSPACE_DIRS = _get_rep_workspace_dirs()
+
+FACTORS_ROOT = _get_factors_root()
+AE_PATH = FACTORS_ROOT / "ae_recon_error_10d" / "result.pkl"
+DAILY_BASIC_PATH = FACTORS_ROOT / "daily_basic_factors" / "result.pkl"
+MONEYFLOW_FACTORS_PATH = FACTORS_ROOT / "moneyflow_factors" / "result.pkl"
+OUTPUT_PATH = FACTORS_ROOT / "combined_static_factors.parquet"
 
 
 def find_workspace_combined() -> Path | None:
