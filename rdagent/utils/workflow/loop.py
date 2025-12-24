@@ -11,8 +11,11 @@ Postscripts:
 import asyncio
 import concurrent.futures
 import copy
+import json
 import os
 import pickle
+import traceback
+import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -27,6 +30,15 @@ from rdagent.log import rdagent_logger as logger
 from rdagent.log.conf import LOG_SETTINGS
 from rdagent.log.timer import RD_Agent_TIMER_wrapper, RDAgentTimer
 from rdagent.utils.workflow.tracking import WorkflowTracker
+
+
+def _write_abort_reason(path: Path, payload: dict[str, Any]) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
+    except Exception:
+        pass
 
 
 class LoopMeta(type):
@@ -116,6 +128,12 @@ class LoopBase:
         self.loop_idx: int = 0  # current loop index / next loop index to kickoff
         self.step_idx: defaultdict[int, int] = defaultdict(int)  # dict from loop index to next step index
         self.queue: asyncio.Queue[Any] = asyncio.Queue()
+
+        # A stable id for the current task run. It will be pickled with the session and reused on resume.
+        self.task_run_id: str = uuid.uuid4().hex
+
+        # Guard to avoid repeatedly writing identical task_run metadata on every step.
+        self._registry_task_run_written: bool = False
 
         # Store step results for all loops in a nested dictionary, following information will be stored:
         # - loop_prev_out[loop_index][step_name]: the output of the step function
@@ -217,6 +235,94 @@ class LoopBase:
                 start = datetime.now(timezone.utc)
                 func: Callable[..., Any] = cast(Callable[..., Any], getattr(self, name))
 
+                def _safe_get_action(loop_prev_out: dict[str, Any]) -> str | None:
+                    try:
+                        deg = loop_prev_out.get("direct_exp_gen")
+                        if isinstance(deg, dict):
+                            propose = deg.get("propose")
+                            return getattr(propose, "action", None)
+                    except Exception:
+                        return None
+
+                def _safe_get_workspace_id_from_path(p: Any) -> str | None:
+                    try:
+                        pp = Path(str(p))
+                        return pp.name or None
+                    except Exception:
+                        return None
+
+                def _best_effort_upsert_workspaces(reg, *, exp: Any, status: str) -> None:
+                    try:
+                        ew = getattr(exp, "experiment_workspace", None)
+                        if ew is not None:
+                            ew_path = getattr(ew, "workspace_path", None)
+                            ws_id = _safe_get_workspace_id_from_path(ew_path)
+                            if ws_id and ew_path is not None:
+                                reg.upsert_workspace(
+                                    workspace_id=ws_id,
+                                    task_run_id=getattr(self, "task_run_id", ""),
+                                    loop_id=li,
+                                    workspace_role="experiment_workspace",
+                                    experiment_type=_safe_get_action(self.loop_prev_out.get(li, {})),
+                                    step_name=name,
+                                    status=status,
+                                    workspace_path=str(ew_path),
+                                )
+                    except Exception:
+                        pass
+
+                    try:
+                        sws = getattr(exp, "sub_workspace_list", None)
+                        if isinstance(sws, list):
+                            for sw in sws:
+                                if sw is None:
+                                    continue
+                                sw_path = getattr(sw, "workspace_path", None)
+                                ws_id = _safe_get_workspace_id_from_path(sw_path)
+                                if ws_id and sw_path is not None:
+                                    reg.upsert_workspace(
+                                        workspace_id=ws_id,
+                                        task_run_id=getattr(self, "task_run_id", ""),
+                                        loop_id=li,
+                                        workspace_role="sub_workspace",
+                                        experiment_type=_safe_get_action(self.loop_prev_out.get(li, {})),
+                                        step_name=name,
+                                        status=status,
+                                        workspace_path=str(sw_path),
+                                    )
+                    except Exception:
+                        pass
+
+                # Best-effort registry hook at step start (must never break main workflow).
+                try:
+                    from rdagent.utils.registry.sqlite_registry import get_registry, should_enable_registry
+                    from rdagent.log.conf import LOG_SETTINGS
+
+                    if should_enable_registry():
+                        reg = get_registry()
+                        if not getattr(self, "_registry_task_run_written", False):
+                            reg.upsert_task_run(
+                                task_run_id=getattr(self, "task_run_id", ""),
+                                scenario=type(self).__name__,
+                                status="running",
+                                log_trace_path=str(getattr(LOG_SETTINGS, "trace_path", "")),
+                                params={
+                                    "step_semaphore": RD_AGENT_SETTINGS.step_semaphore,
+                                    "workspace_path": str(getattr(RD_AGENT_SETTINGS, "workspace_path", "")),
+                                    "max_parallel": RD_AGENT_SETTINGS.get_max_parallel(),
+                                    "force_subproc": RD_AGENT_SETTINGS.is_force_subproc(),
+                                },
+                            )
+                            self._registry_task_run_written = True
+                        reg.upsert_loop(
+                            task_run_id=getattr(self, "task_run_id", ""),
+                            loop_id=li,
+                            action=_safe_get_action(self.loop_prev_out.get(li, {})),
+                            status="running",
+                        )
+                except Exception:
+                    pass
+
                 next_step_idx = si + 1
                 step_forward = True
                 # NOTE: each step are aware are of current loop index
@@ -261,6 +367,661 @@ class LoopBase:
                         raise  # re-raise unhandled exceptions
                 finally:
                     # No matter the execution succeed or not, we have to finish the following steps
+
+                    # Best-effort registry hook at step end.
+                    try:
+                        from rdagent.utils.registry.sqlite_registry import get_registry, should_enable_registry
+
+                        if should_enable_registry():
+                            reg = get_registry()
+                            is_failed = self.EXCEPTION_KEY in self.loop_prev_out.get(li, {})
+                            is_final_step = si == (len(self.steps) - 1)
+                            status = "failed" if is_failed else ("success" if is_final_step else "running")
+                            err = self.loop_prev_out.get(li, {}).get(self.EXCEPTION_KEY)
+                            reg.upsert_loop(
+                                task_run_id=getattr(self, "task_run_id", ""),
+                                loop_id=li,
+                                action=_safe_get_action(self.loop_prev_out.get(li, {})),
+                                status=status,
+                                error_type=type(err).__name__ if err is not None else None,
+                                error_message=str(err) if err is not None else None,
+                            )
+
+                            exp_obj = self.loop_prev_out.get(li, {}).get(name)
+                            if exp_obj is None:
+                                try:
+                                    li_state = self.loop_prev_out.get(li, {})
+                                    if isinstance(li_state, dict):
+                                        for _k in reversed(list(li_state.keys())):
+                                            if _k in {self.EXCEPTION_KEY}:
+                                                continue
+                                            v = li_state.get(_k)
+                                            if v is None:
+                                                continue
+                                            if hasattr(v, "experiment_workspace") or hasattr(v, "result"):
+                                                exp_obj = v
+                                                break
+                                except Exception:
+                                    exp_obj = exp_obj
+                            if exp_obj is not None:
+                                _best_effort_upsert_workspaces(reg, exp=exp_obj, status=status)
+
+                            if is_final_step and (not is_failed):
+                                try:
+                                    exp_for_metrics = exp_obj
+                                    metrics_series = getattr(exp_for_metrics, "result", None)
+                                    metrics: dict[str, Any] | None = None
+                                    if metrics_series is not None:
+                                        try:
+                                            metrics = dict(metrics_series)
+                                        except Exception:
+                                            metrics = None
+
+                                    ew = getattr(exp_for_metrics, "experiment_workspace", None)
+                                    ew_path = getattr(ew, "workspace_path", None) if ew is not None else None
+                                    ws_id = _safe_get_workspace_id_from_path(ew_path)
+                                    if ws_id and ew_path is not None:
+                                        ws_root = Path(str(ew_path))
+                                        qlib_res = ws_root / "qlib_res.csv"
+                                        ret_pkl = ws_root / "ret.pkl"
+                                        ret_schema_parquet = ws_root / "ret_schema.parquet"
+                                        ret_schema_json = ws_root / "ret_schema.json"
+                                        signals_parquet = ws_root / "signals.parquet"
+                                        signals_json = ws_root / "signals.json"
+                                        mlruns = ws_root / "mlruns"
+
+                                        combined_factors = ws_root / "combined_factors_df.parquet"
+                                        yaml_confs = list(ws_root.glob("*.yaml")) + list(ws_root.glob("*.yml"))
+
+                                        action = _safe_get_action(self.loop_prev_out.get(li, {}))
+                                        has_result = False
+                                        if action == "model":
+                                            has_result = qlib_res.exists() and ret_pkl.exists()
+                                        elif action == "factor":
+                                            has_result = combined_factors.exists()
+
+                                        if has_result:
+                                            reg.update_loop_metrics(
+                                                task_run_id=getattr(self, "task_run_id", ""),
+                                                loop_id=li,
+                                                metrics=metrics,
+                                                best_workspace_id=ws_id,
+                                                has_result=True,
+                                            )
+
+                                        def _rel(p: Path) -> str:
+                                            try:
+                                                return str(p.relative_to(ws_root))
+                                            except Exception:
+                                                return str(p)
+
+                                        def _write_json(path: Path, payload: dict[str, Any]) -> None:
+                                            try:
+                                                with path.open("w", encoding="utf-8") as f:
+                                                    json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
+                                            except Exception:
+                                                pass
+
+                                        meta_path = ws_root / "workspace_meta.json"
+                                        summary_path = ws_root / "experiment_summary.json"
+                                        manifest_path = ws_root / "manifest.json"
+
+                                        now_utc = datetime.now(timezone.utc).isoformat()
+
+                                        def _metrics_summary(m: dict[str, Any] | None) -> dict[str, Any]:
+                                            if not m:
+                                                return {}
+                                            out: dict[str, Any] = {}
+                                            key_map = {
+                                                "ic_mean": ["IC", "ic_mean", "ic"],
+                                                "rank_ic_mean": ["Rank IC", "rank_ic_mean", "rank_ic"],
+                                                "ann_return": ["annualized_return", "ann_return"],
+                                                "mdd": ["max_drawdown", "mdd"],
+                                                "turnover": ["turnover"],
+                                                "multi_score": ["multi_score", "sharpe"],
+                                            }
+                                            for k, cands in key_map.items():
+                                                for cand in cands:
+                                                    if cand in m and m[cand] is not None:
+                                                        out[k] = m[cand]
+                                                        break
+                                            return out
+
+                                        if action == "model":
+                                            result_criteria = {
+                                                "required_files": ["qlib_res.csv", "ret.pkl"],
+                                                "has_result": bool(qlib_res.exists() and ret_pkl.exists()),
+                                            }
+                                        elif action == "factor":
+                                            result_criteria = {
+                                                "required_files": ["combined_factors_df.parquet"],
+                                                "has_result": bool(combined_factors.exists()),
+                                            }
+                                        else:
+                                            result_criteria = {"required_files": [], "has_result": bool(has_result)}
+
+                                        reg_db_path = None
+                                        try:
+                                            reg_db_path = str(getattr(reg, "config", None).db_path)
+                                        except Exception:
+                                            reg_db_path = None
+
+                                        workspace_row = {
+                                            "workspace_id": ws_id,
+                                            "task_run_id": getattr(self, "task_run_id", ""),
+                                            "loop_id": li,
+                                            "workspace_role": "experiment_workspace",
+                                            "experiment_type": action,
+                                            "step_name": name,
+                                            "status": status,
+                                            "workspace_path": str(ws_root),
+                                            "meta_path": _rel(meta_path),
+                                            "summary_path": _rel(summary_path),
+                                            "manifest_path": _rel(manifest_path),
+                                        }
+
+                                        task_run_snapshot = {
+                                            "task_run_id": getattr(self, "task_run_id", ""),
+                                            "scenario": type(self).__name__,
+                                            "log_trace_path": str(getattr(LOG_SETTINGS, "trace_path", "")),
+                                        }
+
+                                        loop_snapshot = {
+                                            "task_run_id": getattr(self, "task_run_id", ""),
+                                            "loop_id": li,
+                                            "action": action,
+                                            "status": status,
+                                            "has_result": has_result,
+                                            "best_workspace_id": ws_id,
+                                            "key_metrics": _metrics_summary(metrics),
+                                        }
+
+                                        meta_payload = {
+                                            "task_run_id": getattr(self, "task_run_id", ""),
+                                            "loop_id": li,
+                                            "step_name": name,
+                                            "action": action,
+                                            "workspace_id": ws_id,
+                                            "best_workspace_id": ws_id,
+                                            "workspace_role": "experiment_workspace",
+                                            "experiment_type": action,
+                                            "workspace_path": str(ws_root),
+                                            "status": status,
+                                            "has_result": has_result,
+                                            "generated_at_utc": now_utc,
+                                            "result_criteria": result_criteria,
+                                            "registry": {
+                                                "db_path": reg_db_path,
+                                            },
+                                            "task_run": task_run_snapshot,
+                                            "loop": loop_snapshot,
+                                            "workspace_row": workspace_row,
+                                            "pointers": {
+                                                "meta_path": _rel(meta_path),
+                                                "summary_path": _rel(summary_path),
+                                                "manifest_path": _rel(manifest_path),
+                                            },
+                                        }
+                                        _write_json(meta_path, meta_payload)
+
+                                        summary_payload: dict[str, Any] = {
+                                            "task_run_id": getattr(self, "task_run_id", ""),
+                                            "loop_id": li,
+                                            "step_name": name,
+                                            "action": action,
+                                            "workspace_id": ws_id,
+                                            "best_workspace_id": ws_id,
+                                            "workspace_role": "experiment_workspace",
+                                            "experiment_type": action,
+                                            "workspace_path": str(ws_root),
+                                            "status": status,
+                                            "has_result": has_result,
+                                            "generated_at_utc": now_utc,
+                                            "result_criteria": result_criteria,
+                                            "key_metrics": _metrics_summary(metrics),
+                                            "registry": {
+                                                "db_path": reg_db_path,
+                                            },
+                                            "task_run": task_run_snapshot,
+                                            "loop": loop_snapshot,
+                                            "workspace_row": workspace_row,
+                                            "pointers": {
+                                                "meta_path": _rel(meta_path),
+                                                "summary_path": _rel(summary_path),
+                                                "manifest_path": _rel(manifest_path),
+                                            },
+                                            "metrics": metrics or {},
+                                            "files": {
+                                                "qlib_res.csv": _rel(qlib_res) if qlib_res.exists() else None,
+                                                "ret.pkl": _rel(ret_pkl) if ret_pkl.exists() else None,
+                                                "ret_schema.parquet": _rel(ret_schema_parquet)
+                                                if ret_schema_parquet.exists()
+                                                else None,
+                                                "ret_schema.json": _rel(ret_schema_json)
+                                                if ret_schema_json.exists()
+                                                else None,
+                                                "signals.parquet": _rel(signals_parquet)
+                                                if signals_parquet.exists()
+                                                else None,
+                                                "signals.json": _rel(signals_json) if signals_json.exists() else None,
+                                                "combined_factors_df.parquet": _rel(combined_factors)
+                                                if combined_factors.exists()
+                                                else None,
+                                                "mlruns": _rel(mlruns) if mlruns.exists() else None,
+                                            },
+                                            "artifacts": [],
+                                        }
+                                        _write_json(summary_path, summary_payload)
+
+                                        manifest_payload: dict[str, Any] = {
+                                            "task_run_id": getattr(self, "task_run_id", ""),
+                                            "loop_id": li,
+                                            "action": action,
+                                            "workspace_id": ws_id,
+                                            "best_workspace_id": ws_id,
+                                            "workspace_role": "experiment_workspace",
+                                            "experiment_type": action,
+                                            "workspace_path": str(ws_root),
+                                            "status": status,
+                                            "has_result": has_result,
+                                            "generated_at_utc": now_utc,
+                                            "result_criteria": result_criteria,
+                                            "key_metrics": _metrics_summary(metrics),
+                                            "registry": {
+                                                "db_path": reg_db_path,
+                                            },
+                                            "task_run": task_run_snapshot,
+                                            "loop": loop_snapshot,
+                                            "workspace_row": workspace_row,
+                                            "pointers": {
+                                                "meta_path": _rel(meta_path),
+                                                "summary_path": _rel(summary_path),
+                                                "manifest_path": _rel(manifest_path),
+                                            },
+                                            "artifacts": [],
+                                        }
+                                        _write_json(manifest_path, manifest_payload)
+
+                                        try:
+                                            reg.upsert_workspace(
+                                                workspace_id=ws_id,
+                                                task_run_id=getattr(self, "task_run_id", ""),
+                                                loop_id=li,
+                                                workspace_role="experiment_workspace",
+                                                experiment_type=action,
+                                                step_name=name,
+                                                status=status,
+                                                workspace_path=str(ws_root),
+                                                meta_path=_rel(meta_path),
+                                                summary_path=_rel(summary_path),
+                                                manifest_path=_rel(manifest_path),
+                                            )
+                                        except Exception:
+                                            pass
+
+                                        if action == "model":
+                                            report_artifact_id = uuid.uuid4().hex
+                                            reg.upsert_artifact(
+                                                artifact_id=report_artifact_id,
+                                                task_run_id=getattr(self, "task_run_id", ""),
+                                                loop_id=li,
+                                                workspace_id=ws_id,
+                                                artifact_type="report",
+                                                name="qlib_report",
+                                                status="present" if (qlib_res.exists() and ret_pkl.exists()) else "missing",
+                                                primary_flag=True,
+                                                summary={
+                                                    "files": [
+                                                        "qlib_res.csv",
+                                                        "ret.pkl",
+                                                        "ret_schema.parquet",
+                                                        "ret_schema.json",
+                                                        "signals.parquet",
+                                                        "signals.json",
+                                                    ]
+                                                },
+                                                entry_path=_rel(qlib_res),
+                                            )
+
+                                            summary_payload["artifacts"].append(
+                                                {
+                                                    "artifact_id": report_artifact_id,
+                                                    "artifact_type": "report",
+                                                    "name": "qlib_report",
+                                                    "status": "present"
+                                                    if (qlib_res.exists() and ret_pkl.exists())
+                                                    else "missing",
+                                                    "entry_path": _rel(qlib_res),
+                                                    "files": [
+                                                        _rel(qlib_res) if qlib_res.exists() else None,
+                                                        _rel(ret_pkl) if ret_pkl.exists() else None,
+                                                        _rel(ret_schema_parquet)
+                                                        if ret_schema_parquet.exists()
+                                                        else None,
+                                                        _rel(ret_schema_json) if ret_schema_json.exists() else None,
+                                                        _rel(signals_parquet)
+                                                        if signals_parquet.exists()
+                                                        else None,
+                                                        _rel(signals_json) if signals_json.exists() else None,
+                                                    ],
+                                                }
+                                            )
+                                            manifest_payload["artifacts"].append(
+                                                {
+                                                    "artifact_id": report_artifact_id,
+                                                    "artifact_type": "report",
+                                                    "name": "qlib_report",
+                                                    "status": "present"
+                                                    if (qlib_res.exists() and ret_pkl.exists())
+                                                    else "missing",
+                                                    "entry_path": _rel(qlib_res),
+                                                    "files": [
+                                                        _rel(qlib_res) if qlib_res.exists() else None,
+                                                        _rel(ret_pkl) if ret_pkl.exists() else None,
+                                                        _rel(ret_schema_parquet)
+                                                        if ret_schema_parquet.exists()
+                                                        else None,
+                                                        _rel(ret_schema_json) if ret_schema_json.exists() else None,
+                                                        _rel(signals_parquet)
+                                                        if signals_parquet.exists()
+                                                        else None,
+                                                        _rel(signals_json) if signals_json.exists() else None,
+                                                    ],
+                                                }
+                                            )
+
+                                            for p in [
+                                                qlib_res,
+                                                ret_pkl,
+                                                ret_schema_parquet,
+                                                ret_schema_json,
+                                                signals_parquet,
+                                                signals_json,
+                                            ]:
+                                                try:
+                                                    if not p.exists():
+                                                        continue
+                                                    size_bytes, mtime_utc = reg._best_effort_file_meta(p)
+                                                    sha256 = reg._best_effort_sha256(p) if p.is_file() else None
+                                                    reg.upsert_artifact_file(
+                                                        file_id=uuid.uuid4().hex,
+                                                        artifact_id=report_artifact_id,
+                                                        workspace_id=ws_id,
+                                                        path=_rel(p),
+                                                        sha256=sha256,
+                                                        size_bytes=size_bytes,
+                                                        mtime_utc=mtime_utc,
+                                                        kind="report",
+                                                    )
+                                                except Exception:
+                                                    pass
+
+                                            model_artifact_id = uuid.uuid4().hex
+                                            reg.upsert_artifact(
+                                                artifact_id=model_artifact_id,
+                                                task_run_id=getattr(self, "task_run_id", ""),
+                                                loop_id=li,
+                                                workspace_id=ws_id,
+                                                artifact_type="model",
+                                                name="mlruns",
+                                                status="present" if mlruns.exists() else "missing",
+                                                primary_flag=False,
+                                                summary={"path": "mlruns"},
+                                                entry_path=_rel(mlruns),
+                                            )
+
+                                            summary_payload["artifacts"].append(
+                                                {
+                                                    "artifact_id": model_artifact_id,
+                                                    "artifact_type": "model",
+                                                    "name": "mlruns",
+                                                    "status": "present" if mlruns.exists() else "missing",
+                                                    "entry_path": _rel(mlruns),
+                                                    "files": [_rel(mlruns) if mlruns.exists() else None],
+                                                }
+                                            )
+                                            manifest_payload["artifacts"].append(
+                                                {
+                                                    "artifact_id": model_artifact_id,
+                                                    "artifact_type": "model",
+                                                    "name": "mlruns",
+                                                    "status": "present" if mlruns.exists() else "missing",
+                                                    "entry_path": _rel(mlruns),
+                                                    "files": [_rel(mlruns) if mlruns.exists() else None],
+                                                }
+                                            )
+                                            if mlruns.exists():
+                                                try:
+                                                    size_bytes, mtime_utc = reg._best_effort_file_meta(mlruns)
+                                                    reg.upsert_artifact_file(
+                                                        file_id=uuid.uuid4().hex,
+                                                        artifact_id=model_artifact_id,
+                                                        workspace_id=ws_id,
+                                                        path=_rel(mlruns),
+                                                        sha256=None,
+                                                        size_bytes=size_bytes,
+                                                        mtime_utc=mtime_utc,
+                                                        kind="model",
+                                                    )
+                                                except Exception:
+                                                    pass
+
+                                                try:
+                                                    root_parts_len = len(mlruns.resolve().parts)
+                                                    max_depth = 6
+                                                    max_files = 60
+                                                    picked = 0
+                                                    key_names = {
+                                                        "mlmodel",
+                                                        "conda.yaml",
+                                                        "requirements.txt",
+                                                        "python_env.yaml",
+                                                        "model.pkl",
+                                                    }
+                                                    for fp in mlruns.rglob("*"):
+                                                        try:
+                                                            if picked >= max_files:
+                                                                break
+                                                            if not fp.is_file():
+                                                                continue
+                                                            depth = len(fp.resolve().parts) - root_parts_len
+                                                            if depth > max_depth:
+                                                                continue
+                                                            nm = fp.name.lower()
+                                                            if (nm not in key_names) and (not nm.endswith(".pkl")):
+                                                                continue
+
+                                                            size_bytes, mtime_utc = reg._best_effort_file_meta(fp)
+                                                            sha256 = reg._best_effort_sha256(fp)
+                                                            reg.upsert_artifact_file(
+                                                                file_id=uuid.uuid4().hex,
+                                                                artifact_id=model_artifact_id,
+                                                                workspace_id=ws_id,
+                                                                path=_rel(fp),
+                                                                sha256=sha256,
+                                                                size_bytes=size_bytes,
+                                                                mtime_utc=mtime_utc,
+                                                                kind="model",
+                                                            )
+                                                            picked += 1
+                                                        except Exception:
+                                                            continue
+                                                except Exception:
+                                                    pass
+
+                                            cfg_artifact_id = uuid.uuid4().hex
+                                            reg.upsert_artifact(
+                                                artifact_id=cfg_artifact_id,
+                                                task_run_id=getattr(self, "task_run_id", ""),
+                                                loop_id=li,
+                                                workspace_id=ws_id,
+                                                artifact_type="config_snapshot",
+                                                name="workspace_configs",
+                                                status="present" if len(yaml_confs) > 0 else "missing",
+                                                primary_flag=False,
+                                                summary={"count": len(yaml_confs)},
+                                                entry_path=str(ws_root),
+                                            )
+
+                                            summary_payload["artifacts"].append(
+                                                {
+                                                    "artifact_id": cfg_artifact_id,
+                                                    "artifact_type": "config_snapshot",
+                                                    "name": "workspace_configs",
+                                                    "status": "present" if len(yaml_confs) > 0 else "missing",
+                                                    "entry_path": ".",
+                                                    "files": [
+                                                        _rel(p)
+                                                        for p in (yaml_confs[:50] if len(yaml_confs) > 0 else [])
+                                                        if p.exists()
+                                                    ],
+                                                }
+                                            )
+                                            manifest_payload["artifacts"].append(
+                                                {
+                                                    "artifact_id": cfg_artifact_id,
+                                                    "artifact_type": "config_snapshot",
+                                                    "name": "workspace_configs",
+                                                    "status": "present" if len(yaml_confs) > 0 else "missing",
+                                                    "entry_path": ".",
+                                                    "files": [
+                                                        _rel(p)
+                                                        for p in (yaml_confs[:50] if len(yaml_confs) > 0 else [])
+                                                        if p.exists()
+                                                    ],
+                                                }
+                                            )
+                                            for yp in yaml_confs:
+                                                try:
+                                                    if not yp.exists() or not yp.is_file():
+                                                        continue
+                                                    size_bytes, mtime_utc = reg._best_effort_file_meta(yp)
+                                                    sha256 = reg._best_effort_sha256(yp)
+                                                    reg.upsert_artifact_file(
+                                                        file_id=uuid.uuid4().hex,
+                                                        artifact_id=cfg_artifact_id,
+                                                        workspace_id=ws_id,
+                                                        path=_rel(yp),
+                                                        sha256=sha256,
+                                                        size_bytes=size_bytes,
+                                                        mtime_utc=mtime_utc,
+                                                        kind="config",
+                                                    )
+                                                except Exception:
+                                                    pass
+
+                                            _write_json(summary_path, summary_payload)
+                                            _write_json(manifest_path, manifest_payload)
+                                        elif action == "factor":
+                                            fs_artifact_id = uuid.uuid4().hex
+                                            reg.upsert_artifact(
+                                                artifact_id=fs_artifact_id,
+                                                task_run_id=getattr(self, "task_run_id", ""),
+                                                loop_id=li,
+                                                workspace_id=ws_id,
+                                                artifact_type="feature_set",
+                                                name="combined_factors_df",
+                                                status="present" if combined_factors.exists() else "missing",
+                                                primary_flag=True,
+                                                summary={"file": "combined_factors_df.parquet"},
+                                                entry_path=_rel(combined_factors),
+                                            )
+
+                                            summary_payload["artifacts"].append(
+                                                {
+                                                    "artifact_id": fs_artifact_id,
+                                                    "artifact_type": "feature_set",
+                                                    "name": "combined_factors_df",
+                                                    "status": "present" if combined_factors.exists() else "missing",
+                                                    "entry_path": _rel(combined_factors),
+                                                    "files": [_rel(combined_factors) if combined_factors.exists() else None],
+                                                }
+                                            )
+                                            manifest_payload["artifacts"].append(
+                                                {
+                                                    "artifact_id": fs_artifact_id,
+                                                    "artifact_type": "feature_set",
+                                                    "name": "combined_factors_df",
+                                                    "status": "present" if combined_factors.exists() else "missing",
+                                                    "entry_path": _rel(combined_factors),
+                                                    "files": [_rel(combined_factors) if combined_factors.exists() else None],
+                                                }
+                                            )
+                                            if combined_factors.exists():
+                                                try:
+                                                    size_bytes, mtime_utc = reg._best_effort_file_meta(combined_factors)
+                                                    sha256 = reg._best_effort_sha256(combined_factors)
+                                                    reg.upsert_artifact_file(
+                                                        file_id=uuid.uuid4().hex,
+                                                        artifact_id=fs_artifact_id,
+                                                        workspace_id=ws_id,
+                                                        path=_rel(combined_factors),
+                                                        sha256=sha256,
+                                                        size_bytes=size_bytes,
+                                                        mtime_utc=mtime_utc,
+                                                        kind="data",
+                                                    )
+                                                except Exception:
+                                                    pass
+
+                                            cfg_artifact_id = uuid.uuid4().hex
+                                            reg.upsert_artifact(
+                                                artifact_id=cfg_artifact_id,
+                                                task_run_id=getattr(self, "task_run_id", ""),
+                                                loop_id=li,
+                                                workspace_id=ws_id,
+                                                artifact_type="config_snapshot",
+                                                name="workspace_configs",
+                                                status="present" if len(yaml_confs) > 0 else "missing",
+                                                primary_flag=False,
+                                                summary={"count": len(yaml_confs)},
+                                                entry_path=str(ws_root),
+                                            )
+
+                                            summary_payload["artifacts"].append(
+                                                {
+                                                    "artifact_id": cfg_artifact_id,
+                                                    "artifact_type": "config_snapshot",
+                                                    "name": "workspace_configs",
+                                                    "status": "present" if len(yaml_confs) > 0 else "missing",
+                                                    "entry_path": ".",
+                                                }
+                                            )
+                                            manifest_payload["artifacts"].append(
+                                                {
+                                                    "artifact_id": cfg_artifact_id,
+                                                    "artifact_type": "config_snapshot",
+                                                    "name": "workspace_configs",
+                                                    "status": "present" if len(yaml_confs) > 0 else "missing",
+                                                    "entry_path": ".",
+                                                }
+                                            )
+
+                                            for yp in yaml_confs:
+                                                try:
+                                                    if not yp.exists() or not yp.is_file():
+                                                        continue
+                                                    size_bytes, mtime_utc = reg._best_effort_file_meta(yp)
+                                                    sha256 = reg._best_effort_sha256(yp)
+                                                    reg.upsert_artifact_file(
+                                                        file_id=uuid.uuid4().hex,
+                                                        artifact_id=cfg_artifact_id,
+                                                        workspace_id=ws_id,
+                                                        path=_rel(yp),
+                                                        sha256=sha256,
+                                                        size_bytes=size_bytes,
+                                                        mtime_utc=mtime_utc,
+                                                        kind="config",
+                                                    )
+                                                except Exception:
+                                                    pass
+
+                                            _write_json(summary_path, summary_payload)
+                                            _write_json(manifest_path, manifest_payload)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
 
                     # Record the trace
                     end = datetime.now(timezone.utc)
@@ -377,14 +1138,97 @@ class LoopBase:
                     ]
                 ]
                 await asyncio.gather(*tasks)
+
+                # Best-effort task_run final status update.
+                try:
+                    from rdagent.utils.registry.sqlite_registry import get_registry, should_enable_registry
+
+                    if should_enable_registry():
+                        get_registry().upsert_task_run(
+                            task_run_id=getattr(self, "task_run_id", ""),
+                            scenario=type(self).__name__,
+                            status="success",
+                            log_trace_path=str(getattr(LOG_SETTINGS, "trace_path", "")),
+                        )
+                except Exception:
+                    pass
                 break
             except self.LoopResumeError as e:
                 logger.warning(f"Stop all the routines and resume loop: {e}")
                 self.loop_idx = 0
             except self.LoopTerminationError as e:
+                _write_abort_reason(
+                    Path(LOG_SETTINGS.trace_path) / "abort_reason.json",
+                    {
+                        "time_utc": datetime.now(timezone.utc).isoformat(),
+                        "reason": str(e),
+                        "exception_type": type(e).__name__,
+                        "loop_idx": self.loop_idx,
+                        "step_idx": getattr(self, "step_idx", None),
+                        "max_parallel": RD_AGENT_SETTINGS.get_max_parallel(),
+                        "traceback": traceback.format_exc(),
+                    },
+                )
                 logger.warning(f"Reach stop criterion and stop loop: {e}")
                 kill_subprocesses()  # NOTE: coroutine-based workflow can't automatically stop subprocesses.
+
+                # Best-effort task_run abort status update.
+                try:
+                    from rdagent.utils.registry.sqlite_registry import get_registry, should_enable_registry
+
+                    if should_enable_registry():
+                        get_registry().upsert_task_run(
+                            task_run_id=getattr(self, "task_run_id", ""),
+                            scenario=type(self).__name__,
+                            status="aborted",
+                            log_trace_path=str(getattr(LOG_SETTINGS, "trace_path", "")),
+                        )
+                except Exception:
+                    pass
                 break
+            except (KeyboardInterrupt, asyncio.CancelledError) as e:
+                _write_abort_reason(
+                    Path(LOG_SETTINGS.trace_path) / "abort_reason.json",
+                    {
+                        "time_utc": datetime.now(timezone.utc).isoformat(),
+                        "reason": "KeyboardInterrupt" if isinstance(e, KeyboardInterrupt) else "CancelledError",
+                        "exception_type": type(e).__name__,
+                        "loop_idx": self.loop_idx,
+                        "step_idx": getattr(self, "step_idx", None),
+                        "max_parallel": RD_AGENT_SETTINGS.get_max_parallel(),
+                        "traceback": traceback.format_exc(),
+                    },
+                )
+
+                # Best-effort task_run abort status update.
+                try:
+                    from rdagent.utils.registry.sqlite_registry import get_registry, should_enable_registry
+
+                    if should_enable_registry():
+                        get_registry().upsert_task_run(
+                            task_run_id=getattr(self, "task_run_id", ""),
+                            scenario=type(self).__name__,
+                            status="aborted",
+                            log_trace_path=str(getattr(LOG_SETTINGS, "trace_path", "")),
+                        )
+                except Exception:
+                    pass
+                raise
+            except Exception:
+                # Best-effort task_run failure status update.
+                try:
+                    from rdagent.utils.registry.sqlite_registry import get_registry, should_enable_registry
+
+                    if should_enable_registry():
+                        get_registry().upsert_task_run(
+                            task_run_id=getattr(self, "task_run_id", ""),
+                            scenario=type(self).__name__,
+                            status="failed",
+                            log_trace_path=str(getattr(LOG_SETTINGS, "trace_path", "")),
+                        )
+                except Exception:
+                    pass
+                raise
             finally:
                 # cancel all previous tasks before resuming all loops or exit
                 for t in tasks:
