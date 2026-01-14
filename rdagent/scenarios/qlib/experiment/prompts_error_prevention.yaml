@@ -1,0 +1,89 @@
+qlib_factor_interface_error_prevention: |-
+  【严禁硬编码替代变量（必须严格遵守）】
+  - 如果核心价量字段（例如 `close/open/high/low/volume/amount`）缺失：
+    - **必须** `raise ValueError` 明确指出缺失字段；
+  - 如果你希望使用 `static_factors.parquet` 中的可选静态字段（例如 `db_*`/`mf_*`），但实际不存在或 join 后全为空：
+    - 优先改写因子定义为仅依赖当前可获得字段；
+    - 或在不破坏输出 contract 的前提下采用"降级版本"（例如退回到纯价量信号），但严禁用常数/拍脑袋值把公式凑出来.
+  - **总原则**：严禁为缺失字段"编造/猜测/假设"一个固定值或常数分母来把公式凑出来.
+  - 在实现依赖特定字段的因子前，必须先做列存在性检查：
+    ```python
+    required_cols = ["close", "volume", "db_circ_mv"]
+    missing = [c for c in required_cols if c not in df.columns]
+
+    if missing:
+        raise ValueError(f"Missing columns: {missing}. Please redesign factor using available fields.")
+    ```
+
+  【常见错误预防】
+  - **错误1：groupby+rolling 后忘记 reset_index**
+    - 错误代码：
+      ```python
+      # 错误：rolling 后索引变成了 (datetime, instrument, instrument)，导致后续操作失败
+      s = df["close"].groupby(level="instrument").rolling(window=10).mean()
+      # s 的索引是 (datetime, instrument, instrument)，与 df.index 不对齐
+      ```
+    - 正确代码：
+      ```python
+      # 正确：使用 reset_index(level=0, drop=True) 恢复为与 df.index 对齐
+      s = df["close"].groupby(level="instrument").rolling(window=10, min_periods=10).mean()
+      s = s.reset_index(level=0, drop=True)  # 恢复为 (datetime, instrument)
+      ```
+
+  - **错误2：使用不存在的字段名**
+    - 错误代码：
+      ```python
+      # 错误：使用了不存在的字段名
+      series = df["non_existent_field"] / df["close"]  # KeyError: 'non_existent_field'
+      ```
+    - 正确代码：
+      ```python
+      # 正确：只使用实际存在的字段名
+      required_cols = ["close", "volume"]
+      missing = [c for c in required_cols if c not in df.columns]
+      if missing:
+          raise ValueError(f"缺少必要字段: {missing}")
+      series = df["close"] / df["close"].shift(1)
+      ```
+
+  - **错误3：修改 df.index 结构**
+    - 错误代码：
+      ```python
+      # 错误：修改了 df.index 结构
+      df = df.reset_index()  # 索引变成了列
+      # 后续操作会失败
+      ```
+    - 正确代码：
+      ```python
+      # 正确：不要修改 df.index 结构
+      # 如果需要访问索引值，使用 df.index.get_level_values()
+      datetime_values = df.index.get_level_values('datetime')
+      ```
+
+  - **错误4：手工写索引名称**
+    - 错误代码：
+      ```python
+      # 错误：手工写索引名称
+      result_df = pd.DataFrame(index=df.index)
+      result_df.index.names = ["datetime", "instrument"]  # 可能与实际的 df.index.names 不一致
+      ```
+    - 正确代码：
+      ```python
+      # 正确：直接继承 df.index.names
+      result_df = pd.DataFrame(index=df.index)
+      result_df.index.names = df.index.names
+      ```
+
+  - **错误5：对结果进行 reset_index 或 droplevel**
+    - 错误代码：
+      ```python
+      # 错误：改变了索引结构
+      result_df = result_df.reset_index(drop=True)  # 索引丢失
+      result_df.to_hdf("result.h5", key="data", mode="w")  # 输出格式错误
+      ```
+    - 正确代码：
+      ```python
+      # 正确：保持索引结构不变
+      result_df = result_df.sort_index()
+      result_df.to_hdf("result.h5", key="data", mode="w")
+      ```

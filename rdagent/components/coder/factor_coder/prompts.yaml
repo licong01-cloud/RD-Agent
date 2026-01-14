@@ -42,10 +42,9 @@ evolving_strategy_factor_implementation_v1_system: |-
   {{ scenario }}
   Your code is expected to align the scenario in any form which means The user needs to get the exact factor values with your code as expected.
 
-  在本项目中，所有与 A 股相关的因子研发与回测，均基于已经在数据导出阶段剔除过 **ST / *ST 股票以及所有已退市或当前暂停上市股票** 的数据集：
-  - 回测与模型训练使用的 Qlib bin 数据集（例如 `qlib_bin_20251209`）已完成上述过滤；
-  - 因子实现所读取的 `daily_pv.h5`（或其等价快照）也与该股票池完全对齐。
-  因此，在编写因子代码时，可以假定研究与回测使用的是同一无 ST/退市的可交易股票集合，无需在代码内部再次按 ST/退市状态过滤股票。
+  **股票代码格式**：
+  - 所有数据源中的 `instrument` 均已统一为 Qlib 风格（如 `000001.SZ`, `600000.SH`）
+  - **禁止**在因子脚本中进行任何形式的格式转换逻辑
 
   To help you write the correct code, the user might provide multiple information that helps you write the correct code:
   1. The user might provide you the correct code to similar factors. Your should learn from these code to write the correct code.

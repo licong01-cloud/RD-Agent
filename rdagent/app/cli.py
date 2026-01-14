@@ -6,8 +6,8 @@ This will
 - autoamtically load dotenv
 """
 
+import os
 import sys
-
 from dotenv import load_dotenv
 
 load_dotenv(".env", override=True)
@@ -40,11 +40,11 @@ def ui(port=19899, log_dir="", debug: bool = False, data_science: bool = False):
     """
     if data_science:
         with rpath("rdagent.log.ui", "dsapp.py") as app_path:
-            cmds = ["streamlit", "run", app_path, f"--server.port={port}"]
+            cmds = ["streamlit", "run", str(app_path), f"--server.port={port}"]
             subprocess.run(cmds)
         return
     with rpath("rdagent.log.ui", "app.py") as app_path:
-        cmds = ["streamlit", "run", app_path, f"--server.port={port}"]
+        cmds = ["streamlit", "run", str(app_path), f"--server.port={port}"]
         if log_dir or debug:
             cmds.append("--")
         if log_dir:
@@ -58,7 +58,8 @@ def server_ui(port=19899):
     """
     start web app to show the log traces in real time
     """
-    subprocess.run(["python", "rdagent/log/server/app.py", f"--port={port}"])
+    commands = ["streamlit", "run", "rdagent/log/ui/ds_user_interact.py", f"--server.port={port}"]
+    subprocess.run(commands)
 
 
 def ds_user_interact(port=19900):
@@ -67,6 +68,17 @@ def ds_user_interact(port=19900):
     """
     commands = ["streamlit", "run", "rdagent/log/ui/ds_user_interact.py", f"--server.port={port}"]
     subprocess.run(commands)
+
+
+def results_api(host: str = "127.0.0.1", port: int = 9000):
+    """Start read-only results API server for AIstock integration."""
+    cmds = [
+        "uvicorn",
+        "rdagent.app.results_api_server:create_app",
+        f"--host={host}",
+        f"--port={port}",
+    ]
+    subprocess.run(cmds)
 
 
 app.command(name="fin_factor")(fin_factor)
@@ -81,6 +93,7 @@ app.command(name="server_ui")(server_ui)
 app.command(name="health_check")(health_check)
 app.command(name="collect_info")(collect_info)
 app.command(name="ds_user_interact")(ds_user_interact)
+app.command(name="results_api")(results_api)
 
 
 if __name__ == "__main__":

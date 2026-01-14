@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"path": "../.."
+		},
+		{
+			"path": "../../../RD-Agent-main-git"
+		}
+	],
+	"settings": {
+		"git.ignoreLimitWarning": true
+	}
+}

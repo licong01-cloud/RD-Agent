@@ -1,5 +1,11 @@
 # RD-Agent → AIstock：SQLite Registry + Workspace Meta/Artifacts 设计方案（v1）
 
+> **重要说明（2025-12-29）：**
+> 本文档的设计内容已完整并入 Phase 2 最终版设计文档：
+> - `2025-12-29_Phase2_Detail_Design_RD-Agent_AIstock_Final.md` 的 **附录 A：SQLite Registry 设计**
+>
+> 自本日期起，本文件仅作为历史溯源材料保留，不再单独维护或作为设计入口。所有与 Registry 相关的最新需求与字段合同，以 Phase2 最终版文档为准。
+
 ## 0. 背景与目标
 RD-Agent 负责策略研发与演进，AIstock 负责回测/模拟盘/实盘。为了让 AIstock **无需遍历扫描全部 workspace**，且能按 **任务（task）→ loop → workspace → artifact** 追溯与拉取成果，需要 RD-Agent 输出：
 

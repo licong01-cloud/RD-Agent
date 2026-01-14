@@ -180,10 +180,11 @@ factor_feedback_generation:
 
     In this test scenario, the user is mainly interested in improving an **A-share long-only stock selection strategy** on **daily data over a multi-year backtest window**, with the following requirements:
       - Investment universe: all A-share stocks listed on the Shanghai Stock Exchange (SSE) and Shenzhen Stock Exchange (SZSE), **excluding all ST and *ST stocks，以及所有已退市或当前暂停上市的股票**。当前回测所使用的 Qlib bin 数据集和 HDF5 日线行情快照，均已在数据导出阶段完成上述过滤，确保研究与回测在同一可交易股票池上进行。
-      - Portfolio construction: on each rebalancing date, **select exactly 30 stocks** from the eligible universe and build an **equal-weighted long-only portfolio** (no short selling, no leverage).
-      - Holding period: a medium-term horizon of **5–20 trading days** for each position on a **daily trading frequency**; in practice, if a single position reaches **+10% profit** before 5 trading days, it can be taken profit and closed early, and if the unrealized loss reaches **-10%**, a stop-loss should be triggered and the position should be closed immediately.
-      - Performance target: over the backtest period, the typical 5–20 day holding-period return should be **around 5%–10%**, while the **maximum portfolio drawdown should be no greater than 10%** (the smaller, the better).
+      - Portfolio construction: on each rebalancing date, **select up to 50 stocks** from the eligible universe and build a **dynamic-weighted long-only portfolio** (no short selling, no leverage). Weights are assigned based on stock scores using squared weighting (score²), with higher scores receiving larger allocations.
+      - Holding period: **daily rebalancing** with dynamic position management. For each individual stock position, if it reaches a profit of **+15%**, 30% of the position is sold; at **+25%** profit, another 30% is sold (cumulative 60%); at **+35%** profit, the entire position is sold. If the unrealized loss reaches **-10%**, a stop-loss is triggered and the entire position is closed immediately.
+      - Performance target: over the backtest period, the typical holding-period return should be positive while the **maximum portfolio drawdown should be controlled**. The strategy includes comprehensive risk management through stop-loss, staged take-profit, and low-score clearing mechanisms.
       - The strategy should primarily rely on cross-sectional and time-series information from price, volume and volatility, and may combine multiple factors (multi-factor stock selection).
+      - Risk controls: maximum position ratio of 90%, minimum score threshold of 0.2 for stock selection, and automatic clearing of stocks with scores below 0.2.
     When giving feedback and summarizing results in this scenario, please pay special attention to these constraints and explicitly comment on how the current experiment moves the strategy closer to or away from these goals.
     All final textual explanations and natural-language summaries in your feedback should be written in **Chinese** (use concise professional Chinese), while keeping JSON keys and numeric values unchanged.
 
@@ -273,10 +274,11 @@ model_feedback_generation:
 
     In this test scenario, the user is mainly interested in improving an **A-share long-only stock selection strategy** on **daily data over a multi-year backtest window**, with the following requirements:
       - Investment universe: all A-share stocks listed on the Shanghai Stock Exchange (SSE) and Shenzhen Stock Exchange (SZSE), **excluding all ST and *ST stocks**.
-      - Portfolio construction: on each rebalancing date, **select exactly 30 stocks** from the eligible universe and build an **equal-weighted long-only portfolio** (no short selling, no leverage).
-      - Holding period: a medium-term horizon of **5–20 trading days** for each position (for implementation, you can adopt a fixed holding period such as 10 or 20 days in the backtest framework).
-      - Performance target: over the backtest period, the typical 5–20 day holding-period return should be **around 5%–10%**, while the **maximum portfolio drawdown should be no greater than 10%** (the smaller, the better).
+      - Portfolio construction: on each rebalancing date, **select up to 50 stocks** from the eligible universe and build a **dynamic-weighted long-only portfolio** (no short selling, no leverage). Weights are assigned based on stock scores using squared weighting (score²), with higher scores receiving larger allocations.
+      - Holding period: **daily rebalancing** with dynamic position management. For each individual stock position, if it reaches a profit of **+15%**, 30% of the position is sold; at **+25%** profit, another 30% is sold (cumulative 60%); at **+35%** profit, the entire position is sold. If the unrealized loss reaches **-10%**, a stop-loss is triggered and the entire position is closed immediately.
+      - Performance target: over the backtest period, the typical holding-period return should be positive while the **maximum portfolio drawdown should be controlled**. The strategy includes comprehensive risk management through stop-loss, staged take-profit, and low-score clearing mechanisms.
       - The strategy should primarily rely on cross-sectional and time-series information from price, volume and volatility, and may combine multiple factors (multi-factor stock selection).
+      - Risk controls: maximum position ratio of 90%, minimum score threshold of 0.2 for stock selection, and automatic clearing of stocks with scores below 0.2.
     When analyzing model performance, explicitly evaluate whether these objectives are being met or approached.
     All narrative parts of your feedback and final summary should be written in **Chinese** (concise professional Chinese), while JSON structure and field names must remain in English.
 
@@ -345,11 +347,12 @@ action_gen:
 
     In the current testing scenario, the user is mainly interested in improving an **A-share long-only stock selection strategy** on **daily data over a multi-year backtest window**, with the following requirements:
       - Investment universe: all A-share stocks listed on the Shanghai Stock Exchange (SSE) and Shenzhen Stock Exchange (SZSE), **excluding all ST and *ST stocks，以及所有已退市或当前暂停上市的股票**。研究因子所用的 HDF5 日线数据与回测所用的 Qlib bin 数据集在股票池上已经对齐，均只包含上述过滤后的可交易股票。
-      - Portfolio construction: on each rebalancing date, **select exactly 30 stocks** from the eligible universe and build an **equal-weighted long-only portfolio** (no short selling, no leverage).
-      - Holding period: a medium-term horizon of **5–20 trading days** for each position on a **daily trading frequency**; in practice, if a single position reaches **+10% profit** before 5 trading days, it can be taken profit and closed early, and if the unrealized loss reaches **-10%**, a stop-loss should be triggered and the position should be closed immediately.
-      - Performance target: over the backtest period, the typical 5–20 day holding-period return should be **around 5%–10%**, while the **maximum portfolio drawdown should be no greater than 10%** (the smaller, the better).
+      - Portfolio construction: on each rebalancing date, **select up to 50 stocks** from the eligible universe and build a **dynamic-weighted long-only portfolio** (no short selling, no leverage). Weights are assigned based on stock scores using squared weighting (score²), with higher scores receiving larger allocations.
+      - Holding period: **daily rebalancing** with dynamic position management. For each individual stock position, if it reaches a profit of **+15%**, 30% of the position is sold; at **+25%** profit, another 30% is sold (cumulative 60%); at **+35%** profit, the entire position is sold. If the unrealized loss reaches **-10%**, a stop-loss is triggered and the entire position is closed immediately.
+      - Performance target: over the backtest period, the typical holding-period return should be positive while the **maximum portfolio drawdown should be controlled**. The strategy includes comprehensive risk management through stop-loss, staged take-profit, and low-score clearing mechanisms.
       - The strategy should primarily rely on cross-sectional and time-series information from price, volume and volatility, and may combine multiple factors (multi-factor stock selection).
-    When deciding whether the next experiment should focus on factors or models, please consider which action is more likely to move the strategy towards these goals (higher 5–20 day holding-period return under the constraint of max drawdown ≤ 10%, and respecting the **+10% take-profit / -10% stop-loss** rules at the single-position level).
+      - Risk controls: maximum position ratio of 90%, minimum score threshold of 0.2 for stock selection, and automatic clearing of stocks with scores below 0.2.
+    When deciding whether the next experiment should focus on factors or models, please consider which action is more likely to move the strategy towards these goals (positive returns with controlled drawdown, respecting the **staged take-profit / stop-loss** rules at the single-position level).
 
     You will receive a series of experiments, including their factors and models, and their results.
     Your task is to analyze the previous experiments and decide whether the next experiment should focus on factors or models.

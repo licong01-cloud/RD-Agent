@@ -1,8 +1,14 @@
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any
+
+# Add project root to sys.path to allow running as a script
+project_root = str(Path(__file__).resolve().parents[1])
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 import pandas as pd
 

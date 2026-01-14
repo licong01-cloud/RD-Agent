@@ -1,0 +1,305 @@
+{
+  "version": "v1",
+  "generated_at_utc": "2025-12-25T15:08:52.482869+00:00",
+  "source": "rdagent_tools",
+  "factors": [
+    {
+      "name": "CORD10",
+      "expression": "Corr($close/Ref($close,1), Log($volume/Ref($volume, 1)+1), 10)",
+      "source": "qlib_alpha158",
+      "region": "cn",
+      "tags": [
+        "alpha158"
+      ]
+    },
+    {
+      "name": "CORD5",
+      "expression": "Corr($close/Ref($close,1), Log($volume/Ref($volume, 1)+1), 5)",
+      "source": "qlib_alpha158",
+      "region": "cn",
+      "tags": [
+        "alpha158"
+      ]
+    },
+    {
+      "name": "CORD60",
+      "expression": "Corr($close/Ref($close,1), Log($volume/Ref($volume, 1)+1), 60)",
+      "source": "qlib_alpha158",
+      "region": "cn",
+      "tags": [
+        "alpha158"
+      ]
+    },
+    {
+      "name": "CORR10",
+      "expression": "Corr($close, Log($volume+1), 10)",
+      "source": "qlib_alpha158",
+      "region": "cn",
+      "tags": [
+        "alpha158"
+      ]
+    },
+    {
+      "name": "CORR20",
+      "expression": "Corr($close, Log($volume+1), 20)",
+      "source": "qlib_alpha158",
+      "region": "cn",
+      "tags": [
+        "alpha158"
+      ]
+    },
+    {
+      "name": "CORR5",
+      "expression": "Corr($close, Log($volume+1), 5)",
+      "source": "qlib_alpha158",
+      "region": "cn",
+      "tags": [
+        "alpha158"
+      ]
+    },
+    {
+      "name": "CORR60",
+      "expression": "Corr($close, Log($volume+1), 60)",
+      "source": "qlib_alpha158",
+      "region": "cn",
+      "tags": [
+        "alpha158"
+      ]
+    },
+    {
+      "name": "ELG_Share_In_Main_5D",
+      "source": "rdagent_generated",
+      "description_cn": "[资金结构稳定性因子] 5日特大单净流入占主力净流入比例滚动和，衡量资金结构中特大单（机构/超大资金）的贡献稳定性；值越高表示特大单主导性越强，资金结构可能更稳定，有助于降低回撤。",
+      "formula_hint": "\\text{ELG\\_Share\\_In\\_Main\\_5D} = \\sum_{s=t-4}^{t} \\frac{\\text{mf\\_elg\\_net\\_amt}_s}{\\text{mf\\_main\\_net\\_amt}_s}",
+      "created_at_utc": "2025-12-25T15:05:05.553938+00:00",
+      "experiment_id": "d4cda32656714523996dd8489e10e7b1/1",
+      "tags": [],
+      "variables": {
+        "mf_elg_net_amt": "特大单净流入金额（特大单买入金额减去卖出金额）",
+        "mf_main_net_amt": "主力净流入金额（大单+特大单买入金额减去卖出金额）",
+        "window": "滚动窗口长度，5日"
+      }
+    },
+    {
+      "name": "Flow_Price_Consistency_10D",
+      "source": "rdagent_generated",
+      "description_cn": "[资金流价格一致性因子] 10日资金流价格一致性因子，计算主力净流入金额与价格变化的滚动相关系数，捕捉资金流向与价格趋势的同步性；正值表示资金流入伴随价格上涨（可持续趋势），负值表示背离（可能反转）。",
+      "formula_hint": "\\text{Flow\\_Price\\_Consistency\\_10D} = \\text{Corr}_{10D}\\left(\\text{mf\\_main\\_net\\_amt}, \\frac{\\text{close}_s}{\\text{close}_{s-1}} - 1\\right)",
+      "created_at_utc": "2025-12-25T15:05:05.553938+00:00",
+      "experiment_id": "d4cda32656714523996dd8489e10e7b1/1",
+      "tags": [],
+      "variables": {
+        "mf_main_net_amt": "主力净流入金额（大单+特大单买入金额减去卖出金额）",
+        "close": "收盘价",
+        "Corr_10D": "滚动10日的皮尔逊相关系数",
+        "window": "滚动窗口长度，10日"
+      }
+    },
+    {
+      "name": "KLEN",
+      "expression": "($high-$low)/$open",
+      "source": "qlib_alpha158",
+      "region": "cn",
+      "tags": [
+        "alpha158"
+      ]
+    },
+    {
+      "name": "KLOW",
+      "expression": "(Less($open, $close)-$low)/$open",
+      "source": "qlib_alpha158",
+      "region": "cn",
+      "tags": [
+        "alpha158"
+      ]
+    },
+    {
+      "name": "MF_Main_Net_Amt_Ratio_5D",
+      "source": "rdagent_generated",
+      "description_cn": "[资金流因子] 主力资金净流入强度5日滚动，衡量大单和特大单资金净流入相对于成交额的累积强度，反映机构或大户资金的持续流入压力。",
+      "formula_hint": "\\text{MF\\_Main\\_Net\\_Amt\\_Ratio\\_5D} = \\frac{\\sum_{t=0}^{4} (\\text{mf\\_lg\\_buy\\_amt}_t + \\text{mf\\_elg\\_buy\\_amt}_t - \\text{mf\\_lg\\_sell\\_amt}_t - \\text{mf\\_elg\\_sell\\_amt}_t)}{\\sum_{t=0}^{4} \\text{amount}_t}",
+      "created_at_utc": "2025-12-25T15:04:48.793408+00:00",
+      "experiment_id": "d4cda32656714523996dd8489e10e7b1/0",
+      "tags": [],
+      "variables": {
+        "mf_lg_buy_amt": "大单买入金额（元）",
+        "mf_elg_buy_amt": "特大单买入金额（元）",
+        "mf_lg_sell_amt": "大单卖出金额（元）",
+        "mf_elg_sell_amt": "特大单卖出金额（元）",
+        "amount": "成交额（元）",
+        "window": "滚动窗口长度，5日"
+      }
+    },
+    {
+      "name": "Price_Volume_Divergence_10D",
+      "source": "rdagent_generated",
+      "description_cn": "[量价背离因子] 10日价格与成交量变化率的相关系数负值，衡量价量背离程度；负相关越强（值越负）表示价格上涨但成交量下降或价格下跌但成交量上升，可能预示趋势反转。",
+      "formula_hint": "\\text{Price\\_Volume\\_Divergence\\_10D} = -\\text{Corr}_{10D}(\\Delta\\log(\\text{close}), \\Delta\\log(\\text{volume}))",
+      "created_at_utc": "2025-12-25T15:04:48.793408+00:00",
+      "experiment_id": "d4cda32656714523996dd8489e10e7b1/0",
+      "tags": [],
+      "variables": {
+        "close": "收盘价",
+        "volume": "成交量",
+        "Δlog(close)": "日收益率，计算为 log(close_t / close_{t-1})",
+        "Δlog(volume)": "成交量对数变化率，计算为 log(volume_t / volume_{t-1})",
+        "Corr_10D": "滚动10日的皮尔逊相关系数",
+        "window": "滚动窗口长度，10日"
+      }
+    },
+    {
+      "name": "RESI10",
+      "expression": "Resi($close, 10)/$close",
+      "source": "qlib_alpha158",
+      "region": "cn",
+      "tags": [
+        "alpha158"
+      ]
+    },
+    {
+      "name": "RESI5",
+      "expression": "Resi($close, 5)/$close",
+      "source": "qlib_alpha158",
+      "region": "cn",
+      "tags": [
+        "alpha158"
+      ]
+    },
+    {
+      "name": "ROC60",
+      "expression": "Ref($close, 60)/$close",
+      "source": "qlib_alpha158",
+      "region": "cn",
+      "tags": [
+        "alpha158"
+      ]
+    },
+    {
+      "name": "RSQR10",
+      "expression": "Rsquare($close, 10)",
+      "source": "qlib_alpha158",
+      "region": "cn",
+      "tags": [
+        "alpha158"
+      ]
+    },
+    {
+      "name": "RSQR20",
+      "expression": "Rsquare($close, 20)",
+      "source": "qlib_alpha158",
+      "region": "cn",
+      "tags": [
+        "alpha158"
+      ]
+    },
+    {
+      "name": "RSQR5",
+      "expression": "Rsquare($close, 5)",
+      "source": "qlib_alpha158",
+      "region": "cn",
+      "tags": [
+        "alpha158"
+      ]
+    },
+    {
+      "name": "RSQR60",
+      "expression": "Rsquare($close, 60)",
+      "source": "qlib_alpha158",
+      "region": "cn",
+      "tags": [
+        "alpha158"
+      ]
+    },
+    {
+      "name": "STD5",
+      "expression": "Std($close, 5)/$close",
+      "source": "qlib_alpha158",
+      "region": "cn",
+      "tags": [
+        "alpha158"
+      ]
+    },
+    {
+      "name": "Size_Log_MV",
+      "source": "rdagent_generated",
+      "description_cn": "[规模因子] 流通市值对数，衡量公司规模大小，常用于捕捉规模效应（如小盘股溢价或大盘股稳定性）。",
+      "formula_hint": "\\text{Size\\_Log\\_MV} = \\log(\\text{db\\_circ\\_mv})",
+      "created_at_utc": "2025-12-25T15:04:48.793408+00:00",
+      "experiment_id": "d4cda32656714523996dd8489e10e7b1/0",
+      "tags": [],
+      "variables": {
+        "db_circ_mv": "流通市值（万元），优先使用；若缺失则使用 db_total_mv",
+        "window": "无滚动窗口，为日频静态值"
+      }
+    },
+    {
+      "name": "Turnover_Stability_20D",
+      "source": "rdagent_generated",
+      "description_cn": "[流动性风险因子] 20日换手率稳定性因子，计算换手率的滚动变异系数（标准差/均值）的倒数，评估流动性风险的波动程度；值越高表示换手率越稳定（流动性风险低），有助于控制回撤。",
+      "formula_hint": "\\text{Turnover\\_Stability\\_20D} = \\frac{1}{\\text{CV}_{20D}(\\text{db\\_turnover\\_rate})} = \\frac{\\text{Mean}_{20D}(\\text{db\\_turnover\\_rate})}{\\text{Std}_{20D}(\\text{db\\_turnover\\_rate})}",
+      "created_at_utc": "2025-12-25T15:05:05.553938+00:00",
+      "experiment_id": "d4cda32656714523996dd8489e10e7b1/1",
+      "tags": [],
+      "variables": {
+        "db_turnover_rate": "换手率(%)",
+        "Mean_20D": "滚动20日的均值",
+        "Std_20D": "滚动20日的标准差",
+        "window": "滚动窗口长度，20日"
+      }
+    },
+    {
+      "name": "VSTD5",
+      "expression": "Std($volume, 5)/($volume+1e-12)",
+      "source": "qlib_alpha158",
+      "region": "cn",
+      "tags": [
+        "alpha158"
+      ]
+    },
+    {
+      "name": "Value_PE_Inv",
+      "source": "rdagent_generated",
+      "description_cn": "[估值因子] 倒数市盈率，衡量公司盈利相对于市值的估值水平，值越高表示估值越低（市盈率越低），常用于价值投资策略。",
+      "formula_hint": "\\text{Value\\_PE\\_Inv} = \\frac{1}{\\text{db\\_pe\\_ttm}}",
+      "created_at_utc": "2025-12-25T15:04:48.793408+00:00",
+      "experiment_id": "d4cda32656714523996dd8489e10e7b1/0",
+      "tags": [],
+      "variables": {
+        "db_pe_ttm": "市盈率（TTM），优先使用；若缺失则使用 db_pe",
+        "window": "无滚动窗口，为日频静态值"
+      }
+    },
+    {
+      "name": "Volatility_Adjusted_Momentum_20D",
+      "source": "rdagent_generated",
+      "description_cn": "[风险调整动量因子] 20日波动率调整动量因子，将传统动量（20日收益率）除以同期收益率波动率进行标准化，旨在提供更稳健的趋势信号，降低高波动时期的虚假动量影响，改善风险收益比。",
+      "formula_hint": "\\text{Volatility\\_Adjusted\\_Momentum\\_20D} = \\frac{\\text{close}_t}{\\text{close}_{t-20}} - 1}{\\text{Std}_{20D}\\left(\\frac{\\text{close}_s}{\\text{close}_{s-1}} - 1\\right)}",
+      "created_at_utc": "2025-12-25T15:05:05.553938+00:00",
+      "experiment_id": "d4cda32656714523996dd8489e10e7b1/1",
+      "tags": [],
+      "variables": {
+        "close": "收盘价",
+        "window": "滚动窗口长度，20日",
+        "Std_20D": "滚动20日的日收益率标准差"
+      }
+    },
+    {
+      "name": "WVMA5",
+      "expression": "Std(Abs($close/Ref($close, 1)-1)*$volume, 5)/(Mean(Abs($close/Ref($close, 1)-1)*$volume, 5)+1e-12)",
+      "source": "qlib_alpha158",
+      "region": "cn",
+      "tags": [
+        "alpha158"
+      ]
+    },
+    {
+      "name": "WVMA60",
+      "expression": "Std(Abs($close/Ref($close, 1)-1)*$volume, 60)/(Mean(Abs($close/Ref($close, 1)-1)*$volume, 60)+1e-12)",
+      "source": "qlib_alpha158",
+      "region": "cn",
+      "tags": [
+        "alpha158"
+      ]
+    }
+  ]
+}

@@ -1,5 +1,11 @@
 # AIstock 对接 RD-Agent 成果 Registry（SQLite + Workspace Manifest）说明
 
+> **重要说明（2025-12-29）：**
+> 本文档的对接流程与文件契约，已完整并入 Phase 2 最终版设计文档：
+> - `2025-12-29_Phase2_Detail_Design_RD-Agent_AIstock_Final.md` 的 **附录 B：AIstock 对接 Registry 指南**
+>
+> 自本日期起，本文件仅作为历史溯源材料保留，不再单独维护或作为设计入口。AIstock 研发与运维在实现或排障 Registry 对接时，请以 Phase2 最终版文档为唯一权威来源。
+
 ## 0. 目的
 
 AIstock 侧**无需扫描 RD-Agent workspace 目录**，仅通过读取 RD-Agent 输出的：

@@ -266,3 +266,23 @@ WHERE a.workspace_id = :workspace_id;
      - 更新 Phase 1 验收步骤与 SQL/Python 示例；
      - 明确 `artifact_type` 约定与 AIstock 消费方式；
    - 本 Phase 1 详细设计文档与顶层设计保持一致，无冲突。
+
+---
+
+## 6. 硬性要求（REQ Checklist，按 2025-12-30 项目规范对齐）
+
+> 本节仅列出与 Phase 1 直接相关的 REQ 条目，完整说明见：
+> `docs/2025-12-30_Project_Development_Spec_RD-Agent_AIstock.md` 与
+> `docs/2025-12-30_Phase1-3_Design_Update_RD-Agent_AIstock.md`。
+
+- **REQ-FACTOR-P1-001：统一离线数据视图**  
+  RD-Agent 在 Phase 1 中使用的行情与因子数据，必须来自 AIstock 侧标准导出的
+  `daily_pv.h5` / `moneyflow.h5` / `qlib_bin` 等文件视图，不得依赖临时/非规范数据源。
+
+- **REQ-MODEL-P1-001：模型接口兼容性**  
+  计划在后续 Phase 中于 AIstock 复用的模型，必须遵守 qlib Model 接口（`fit`/`predict`/`save`/`load`），
+  并在保存时记录 `model_conf` 与 `dataset_conf`，以便后续通过 Catalog 与 registry 迁移。
+
+- **REQ-LOOP-P1-001：实验元数据记录**  
+  每个实验 loop 必须生成包含主要训练/验证信息的 JSON（如 `experiment_summary.json`），
+  至少包括训练/验证时间区间、数据切分、特征列表与关键指标，为 Phase 2/3 的 registry 与 Catalog 链路打基础.

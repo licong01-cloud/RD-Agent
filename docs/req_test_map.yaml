@@ -1,0 +1,137 @@
+# REQ → Implementation & Test Mapping Skeleton for RD-Agent × AIstock
+# 用于在 CI 中检查：每个 REQ 是否有对应的实现与测试覆盖。
+#
+# 字段说明：
+#   desc:    REQ 的简要中文说明（方便 reviewer 阅读）
+#   implemented_by:  主要实现该 REQ 的代码路径列表（可多项）
+#   verified_by:     覆盖该 REQ 的测试用例列表（pytest 路径），后续需要逐步补全
+#
+# 注意：目前只是 skeleton，implemented_by / verified_by 先留空或占位，
+#       后续在具体实现与补齐测试时逐步完善。
+
+REQ-GOV-PX-001:
+  desc: 顶层治理-不得精简原则
+  implemented_by: []
+  verified_by: []
+
+# Phase 1
+REQ-FACTOR-P1-001:
+  desc: Phase1 统一离线数据视图（daily_pv/qlib_bin 等）
+  implemented_by: []
+  verified_by: []
+
+REQ-MODEL-P1-001:
+  desc: Phase1 模型接口兼容 qlib Model（fit/predict/save/load）
+  implemented_by: []
+  verified_by: []
+
+REQ-LOOP-P1-001:
+  desc: Phase1 实验元数据记录（训练区间/特征/指标等 JSON）
+  implemented_by: []
+  verified_by: []
+
+# Phase 2 - Factor / Catalog
+REQ-FACTOR-P2-001:
+  desc: 因子实现指针（impl_module/impl_func/impl_version）
+  implemented_by: []
+  verified_by: []
+
+REQ-FACTOR-P2-002:
+  desc: 因子表达式与公式提示（Alpha158 等）
+  implemented_by: []
+  verified_by: []
+
+REQ-FACTOR-P2-010:
+  desc: 因子共享包结构（rd_factors_lib + VERSION 等）
+  implemented_by: []
+  verified_by: []
+
+REQ-FACTOR-P2-011:
+  desc: loop → 因子共享包写入与版本回写
+  implemented_by: []
+  verified_by: []
+
+# Phase 2 - Loop / Model / Strategy / API / AIstock
+REQ-LOOP-P2-001:
+  desc: 有结果 loop 的状态与指标完整性（status 非 unknown，至少一个关键指标非空）
+  implemented_by: []
+  verified_by: []
+
+REQ-LOOP-P2-002:
+  desc: 历史回测成果统一登记与补录（artifacts/artifact_files 补齐）
+  implemented_by: []
+  verified_by: []
+
+REQ-MODEL-P2-001:
+  desc: 模型 catalog 字段齐全（task_run_id/loop_id/workspace 等完整字段）
+  implemented_by:
+    - rdagent/utils/artifacts_writer.py::write_loop_artifacts
+  verified_by:
+    - tests/contract/test_phase2_model_meta_contract.py::test_model_meta_json_exists_for_model_loops
+    - tests/contract/test_phase2_model_meta_contract.py::test_model_meta_has_required_fields
+
+REQ-STRATEGY-P2-001:
+  desc: 策略 catalog 字段齐全（strategy_id/step_name/action 等完整字段）
+  implemented_by: []
+  verified_by: []
+
+REQ-API-P2-001:
+  desc: 只读成果 API 字段齐全（/catalog/* 与 catalog JSON 字段对齐）
+  implemented_by: []
+  verified_by: []
+
+REQ-AISTOCK-P2-001:
+  desc: AIstock 成果同步任务（定期调用 results-api 并 upsert 落库）
+  implemented_by: []
+  verified_by: []
+
+REQ-AISTOCK-P2-002:
+  desc: 因子共享包版本对齐（记录并对齐 rd_factors_lib 版本）
+  implemented_by: []
+  verified_by: []
+
+REQ-AISTOCK-P2-003:
+  desc: 本地 Schema 扩展（impl_module/impl_func/impl_version 字段完整落库）
+  implemented_by: []
+  verified_by: []
+
+# Phase 3 - 因子/策略/数据服务/执行迁移
+REQ-FACTOR-P3-001:
+  desc: 因子函数标准形态（factor_xxx(df: DataFrame) → Series/DataFrame）
+  implemented_by: []
+  verified_by: []
+
+REQ-STRATEGY-P3-001:
+  desc: 策略函数标准形态（消费 factors/prices/portfolio）
+  implemented_by: []
+  verified_by: []
+
+REQ-DATASVC-P2-001:
+  desc: 统一数据形态（离线/研究：MultiIndex(datetime,instrument) DataFrame）
+  implemented_by: []
+  verified_by: []
+
+REQ-DATASVC-P3-001:
+  desc: 仅通过 DataService 获取执行栈数据（禁止越过 DataService）
+  implemented_by: []
+  verified_by: []
+
+REQ-DATASVC-P3-002:
+  desc: DataService 与 qlib runtime 的数据契约（索引/字段/缺失值一致）
+  implemented_by: []
+  verified_by: []
+
+REQ-MODEL-P3-010:
+  desc: 模型复用范围与约束（通过 DataService + qlib runtime 复用 RD-Agent 模型）
+  implemented_by:
+    - rdagent/utils/artifacts_writer.py::write_loop_artifacts
+  verified_by:
+    - tests/acceptance/test_phase3_model_reuse.py::test_rebuild_model_from_model_meta_json
+
+REQ-LOOP-P3-001:
+  desc: 基于 loop 的一键重放能力（AIstock 执行栈重放 RD-Agent loop）
+  implemented_by: []
+  verified_by: []
+
+# 后续如果在项目规范或各 Phase 文档中新增 REQ ID，
+# 需要同步在此处补充 skeleton，确保 CI 中可以做 REQ 覆盖检查。

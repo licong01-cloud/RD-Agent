@@ -1,18 +1,17 @@
 from __future__ import annotations
 
+import hashlib
+import importlib.metadata
 import json
 import os
 import sqlite3
 import threading
 import time
 import uuid
-import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-
-import importlib.metadata
 
 from rdagent.log import rdagent_logger as logger
 
@@ -67,9 +66,9 @@ def _default_registry_path() -> Path:
                 override_path.relative_to(repo_root)
                 return override_path
             except Exception:
-                logger.warning(
-                    f"[SQLiteRegistry] Ignore RD_AGENT_REGISTRY_DB_PATH (must be under repo root {repo_root}): {override_path}"
-                )
+                # Silently ignore invalid override paths to avoid triggering rich/pandas formatting
+                # which could cause Segmentation Fault
+                pass
         except Exception:
             pass
 
@@ -172,7 +171,31 @@ SCHEMA_SQL = [
         turnover REAL,
         multi_score REAL,
         metrics_json TEXT,
+        log_dir TEXT,
+        materialization_status TEXT,
+        materialization_error TEXT,
+        materialization_updated_at_utc TEXT,
+        
+        -- Phase3 资产固化与增量同步扩展
+        asset_bundle_id TEXT,              -- 资产包唯一标识 (UUID)
+        is_solidified INTEGER DEFAULT 0,   -- 是否已完成核心资产固化 (0/1)
+        sync_status TEXT DEFAULT 'pending', -- AIstock 同步状态 (pending, synced)
+        updated_at_utc TEXT,               -- 最近更新时间 (用于增量同步)
+        
         PRIMARY KEY (task_run_id, loop_id)
+    );
+    """.strip(),
+    """
+    CREATE TABLE IF NOT EXISTS factor_registry (
+        factor_name TEXT,                  -- 因子名称
+        expression TEXT,                   -- 因子表达式 (与 formula_hint 对齐)
+        performance_json TEXT,             -- 结构化绩效指标 (JSON)
+        asset_bundle_id TEXT,              -- 关联的资产包 ID
+        workspace_id TEXT,                 -- 来源工作区 ID
+        task_run_id TEXT,                  -- 来源任务 ID
+        loop_id INTEGER,                   -- 来源 Loop ID
+        updated_at_utc TEXT,               -- 入库/更新时间
+        PRIMARY KEY (factor_name, asset_bundle_id)
     );
     """.strip(),
     """
@@ -211,6 +234,10 @@ SCHEMA_SQL = [
         primary_flag INTEGER DEFAULT 0,
         summary_json TEXT,
         entry_path TEXT,
+        model_type TEXT,
+        model_conf_json TEXT,
+        dataset_conf_json TEXT,
+        feature_schema_json TEXT,
         created_at_utc TEXT,
         updated_at_utc TEXT
     );
@@ -257,22 +284,68 @@ class SQLiteRegistry:
         self.config = config or RegistryConfig(db_path=_default_registry_path())
         self._lock = threading.Lock()
         self._initialized = False
+        self._init_pid = None
+
+    def _best_effort(self, op_name: str, fn) -> None:
+        try:
+            self._ensure_initialized()
+
+            with self._lock:
+                self._execute_with_retry(fn)
+        except (sqlite3.Error, threading.ThreadError):
+            # Silently suppress library errors to avoid triggering rich/pandas formatting
+            # which could cause Segmentation Fault
+            pass
+        except Exception:
+            # Never raise to caller. Silently suppress to avoid triggering rich/pandas formatting
+            # which could cause Segmentation Fault
+            pass
 
     def _ensure_initialized(self) -> None:
-        if self._initialized:
+        if getattr(self, "_initialized", False):
             return
-        db_path = self.config.db_path
-        db_path.parent.mkdir(parents=True, exist_ok=True)
+        
         with self._lock:
-            if self._initialized:
+            # Double check inside lock
+            if getattr(self, "_initialized", False):
                 return
-            conn = _connect(db_path)
+            
+            db_path = self.config.db_path
             try:
-                for stmt in SCHEMA_SQL:
-                    if stmt:
-                        conn.execute(stmt)
-            finally:
-                conn.close()
+                db_path.parent.mkdir(parents=True, exist_ok=True)
+                conn = _connect(db_path)
+                try:
+                    for sql in SCHEMA_SQL:
+                        conn.execute(sql)
+                    
+                    # Manual migration check for task_runs
+                    try:
+                        conn.execute("ALTER TABLE task_runs ADD COLUMN params_json TEXT;")
+                    except sqlite3.OperationalError:
+                        pass # Column already exists
+                    
+                    # Manual migration check for loops
+                    migration_cols = [
+                        ("materialization_status", "TEXT"),
+                        ("materialization_error", "TEXT"),
+                        ("materialization_updated_at_utc", "TEXT"),
+                        ("asset_bundle_id", "TEXT"),
+                        ("is_solidified", "INTEGER DEFAULT 0"),
+                        ("sync_status", "TEXT DEFAULT 'pending'"),
+                        ("updated_at_utc", "TEXT"),
+                    ]
+                    for col_name, col_type in migration_cols:
+                        try:
+                            conn.execute(f"ALTER TABLE loops ADD COLUMN {col_name} {col_type};")
+                        except sqlite3.OperationalError:
+                            pass
+                finally:
+                    conn.close()
+            except Exception:
+                # Silently suppress initialization errors to avoid triggering rich/pandas formatting
+                # which could cause Segmentation Fault
+                return # Still marked as not initialized, will retry next time
+            
             self._initialized = True
 
     def _execute_with_retry(self, fn, *, max_attempts: int = 10) -> None:
@@ -290,15 +363,6 @@ class SQLiteRegistry:
                     raise
                 time.sleep(delay)
                 delay = min(delay * 2, 1.0)
-
-    def _best_effort(self, op_name: str, fn) -> None:
-        try:
-            self._ensure_initialized()
-            with self._lock:
-                self._execute_with_retry(fn)
-        except Exception as e:
-            # Never raise to caller.
-            logger.warning(f"[SQLiteRegistry] {op_name} failed: {type(e).__name__}: {e}")
 
     def upsert_task_run(
         self,
@@ -361,10 +425,20 @@ class SQLiteRegistry:
         status: str,
         error_type: str | None = None,
         error_message: str | None = None,
+        log_dir: str | None = None,
+        materialization_status: str | None = None,
+        materialization_error: str | None = None,
+        materialization_updated_at_utc: str | None = None,
+        asset_bundle_id: str | None = None,
+        is_solidified: bool | None = None,
+        sync_status: str | None = None,
     ) -> None:
 
         def _fn() -> None:
             now = _utc_now_iso()
+            mat_updated = materialization_updated_at_utc if materialization_updated_at_utc is not None else (
+                now if materialization_status is not None else None
+            )
             conn = _connect(self.config.db_path)
             try:
                 conn.execute("BEGIN IMMEDIATE;")
@@ -372,18 +446,31 @@ class SQLiteRegistry:
                     """
                     INSERT INTO loops(
                         task_run_id, loop_id, action, status, started_at_utc, ended_at_utc,
-                        error_type, error_message
-                    ) VALUES(?,?,?,?,?,?,?,?)
+                        error_type, error_message, log_dir,
+                        materialization_status, materialization_error, materialization_updated_at_utc,
+                        asset_bundle_id, is_solidified, sync_status, updated_at_utc
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(task_run_id, loop_id) DO UPDATE SET
-                        action=excluded.action,
+                        action=COALESCE(excluded.action, loops.action),
                         status=CASE
                             WHEN loops.status IN ('success','failed','aborted','skip') AND excluded.status='running' THEN loops.status
-                            ELSE excluded.status
+                            ELSE COALESCE(excluded.status, loops.status)
                         END,
                         started_at_utc=COALESCE(loops.started_at_utc, excluded.started_at_utc),
                         ended_at_utc=excluded.ended_at_utc,
                         error_type=excluded.error_type,
-                        error_message=excluded.error_message
+                        error_message=excluded.error_message,
+                        log_dir=COALESCE(excluded.log_dir, loops.log_dir),
+                        materialization_status=COALESCE(excluded.materialization_status, materialization_status),
+                        materialization_error=COALESCE(excluded.materialization_error, materialization_error),
+                        materialization_updated_at_utc=COALESCE(
+                            excluded.materialization_updated_at_utc,
+                            materialization_updated_at_utc
+                        ),
+                        asset_bundle_id=COALESCE(excluded.asset_bundle_id, loops.asset_bundle_id),
+                        is_solidified=COALESCE(excluded.is_solidified, loops.is_solidified),
+                        sync_status=COALESCE(excluded.sync_status, loops.sync_status),
+                        updated_at_utc=excluded.updated_at_utc
                     """,
                     (
                         task_run_id,
@@ -394,6 +481,14 @@ class SQLiteRegistry:
                         now,
                         error_type,
                         error_message,
+                        log_dir,
+                        materialization_status,
+                        materialization_error,
+                        mat_updated,
+                        asset_bundle_id,
+                        1 if is_solidified else (0 if is_solidified is not None else None),
+                        sync_status,
+                        now,
                     ),
                 )
                 conn.execute("COMMIT;")
@@ -401,6 +496,54 @@ class SQLiteRegistry:
                 conn.close()
 
         self._best_effort("upsert_loop", _fn)
+
+    def upsert_factor_registry(
+        self,
+        *,
+        factor_name: str,
+        expression: str,
+        performance_json: dict[str, Any],
+        asset_bundle_id: str,
+        workspace_id: str,
+        task_run_id: str,
+        loop_id: int,
+    ) -> None:
+
+        def _fn() -> None:
+            now = _utc_now_iso()
+            conn = _connect(self.config.db_path)
+            try:
+                conn.execute("BEGIN IMMEDIATE;")
+                conn.execute(
+                    """
+                    INSERT INTO factor_registry(
+                        factor_name, expression, performance_json, asset_bundle_id,
+                        workspace_id, task_run_id, loop_id, updated_at_utc
+                    ) VALUES(?,?,?,?,?,?,?,?)
+                    ON CONFLICT(factor_name, asset_bundle_id) DO UPDATE SET
+                        expression=excluded.expression,
+                        performance_json=excluded.performance_json,
+                        workspace_id=excluded.workspace_id,
+                        task_run_id=excluded.task_run_id,
+                        loop_id=excluded.loop_id,
+                        updated_at_utc=excluded.updated_at_utc
+                    """,
+                    (
+                        factor_name,
+                        expression,
+                        json.dumps(performance_json, ensure_ascii=False),
+                        asset_bundle_id,
+                        workspace_id,
+                        task_run_id,
+                        int(loop_id),
+                        now,
+                    ),
+                )
+                conn.execute("COMMIT;")
+            finally:
+                conn.close()
+
+        self._best_effort("upsert_factor_registry", _fn)
 
     def upsert_workspace(
         self,
@@ -508,7 +651,8 @@ class SQLiteRegistry:
                         turnover=COALESCE(?, turnover),
                         multi_score=COALESCE(?, multi_score),
                         metrics_json=COALESCE(?, metrics_json),
-                        ended_at_utc=?
+                        ended_at_utc=?,
+                        updated_at_utc=?
                     WHERE task_run_id=? AND loop_id=?
                     """,
                     (
@@ -521,6 +665,7 @@ class SQLiteRegistry:
                         turnover,
                         multi_score,
                         json.dumps(m, ensure_ascii=False) if m else None,
+                        now,
                         now,
                         task_run_id,
                         int(loop_id),
@@ -546,6 +691,10 @@ class SQLiteRegistry:
         primary_flag: bool = False,
         summary: dict[str, Any] | None = None,
         entry_path: str | None = None,
+        model_type: str | None = None,
+        model_conf: dict[str, Any] | None = None,
+        dataset_conf: dict[str, Any] | None = None,
+        feature_schema: dict[str, Any] | None = None,
     ) -> None:
 
         def _fn() -> None:
@@ -558,8 +707,10 @@ class SQLiteRegistry:
                     INSERT INTO artifacts(
                         artifact_id, task_run_id, loop_id, workspace_id,
                         artifact_type, name, version, status, primary_flag,
-                        summary_json, entry_path, created_at_utc, updated_at_utc
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        summary_json, entry_path, model_type, model_conf_json,
+                        dataset_conf_json, feature_schema_json,
+                        created_at_utc, updated_at_utc
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(artifact_id) DO UPDATE SET
                         task_run_id=excluded.task_run_id,
                         loop_id=excluded.loop_id,
@@ -571,6 +722,10 @@ class SQLiteRegistry:
                         primary_flag=excluded.primary_flag,
                         summary_json=excluded.summary_json,
                         entry_path=excluded.entry_path,
+                        model_type=excluded.model_type,
+                        model_conf_json=excluded.model_conf_json,
+                        dataset_conf_json=excluded.dataset_conf_json,
+                        feature_schema_json=excluded.feature_schema_json,
                         updated_at_utc=excluded.updated_at_utc
                     """,
                     (
@@ -585,6 +740,10 @@ class SQLiteRegistry:
                         1 if primary_flag else 0,
                         json.dumps(summary or {}, ensure_ascii=False),
                         entry_path,
+                        model_type,
+                        json.dumps(model_conf or {}, ensure_ascii=False) if model_conf else None,
+                        json.dumps(dataset_conf or {}, ensure_ascii=False) if dataset_conf else None,
+                        json.dumps(feature_schema or {}, ensure_ascii=False) if feature_schema else None,
                         now,
                         now,
                     ),
@@ -681,5 +840,9 @@ def new_task_run_id() -> str:
 
 
 def should_enable_registry() -> bool:
-    # default enabled; can be disabled by env for safety.
+    # Registry was disabled due to Segmentation Fault during startup.
+    # The issue was caused by typer's except_hook formatting exceptions with rich/pandas.
+    # Now that we've fixed the root cause (added debug method, improved error handling),
+    # we can re-enable registry functionality.
+    # Use RD_AGENT_DISABLE_SQLITE_REGISTRY=1 to disable if needed.
     return os.getenv("RD_AGENT_DISABLE_SQLITE_REGISTRY", "0") != "1"

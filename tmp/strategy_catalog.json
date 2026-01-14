@@ -1,0 +1,234 @@
+{
+  "version": "v1",
+  "generated_at_utc": "2025-12-25T15:08:53.162340+00:00",
+  "source": "rdagent_tools",
+  "strategies": [
+    {
+      "strategy_id": "9e92c854317f5684b0b25a49072c07aa",
+      "scenario": null,
+      "step_name": "feedback",
+      "action": "factor",
+      "workspace_example": {
+        "task_run_id": "95fde9f8cec7490580a12a992457dfd7",
+        "loop_id": 0,
+        "workspace_id": "462527f0ab3d4ccaa48fd8aad72284dc",
+        "workspace_path": "/mnt/f/Dev/RD-Agent-main/git_ignore_folder/RD-Agent_workspace/462527f0ab3d4ccaa48fd8aad72284dc"
+      },
+      "template_files": [
+        "conf_baseline.yaml",
+        "conf_baseline_20251209_backup.yaml",
+        "conf_combined_factors.yaml",
+        "conf_combined_factors_20251209_backup.yaml",
+        "conf_combined_factors_dynamic.yaml",
+        "conf_combined_factors_sota_model.yaml",
+        "conf_combined_factors_sota_model_20251209_backup.yaml",
+        "mlruns/574308137748469534/16a66745a6134d409c5ab6ab9afcaa2f/meta.yaml",
+        "mlruns/574308137748469534/meta.yaml"
+      ],
+      "data_config": {
+        "start_time": "2010-01-07",
+        "end_time": "2025-12-01",
+        "fit_start_time": "2010-01-07",
+        "fit_end_time": "2014-12-31",
+        "instruments": "all",
+        "infer_processors": [
+          {
+            "class": "FilterCol",
+            "kwargs": {
+              "fields_group": "feature",
+              "col_list": [
+                "RESI5",
+                "WVMA5",
+                "RSQR5",
+                "KLEN",
+                "RSQR10",
+                "CORR5",
+                "CORD5",
+                "CORR10",
+                "ROC60",
+                "RESI10",
+                "VSTD5",
+                "RSQR60",
+                "CORR60",
+                "WVMA60",
+                "STD5",
+                "RSQR20",
+                "CORD60",
+                "CORD10",
+                "CORR20",
+                "KLOW"
+              ]
+            }
+          },
+          {
+            "class": "RobustZScoreNorm",
+            "kwargs": {
+              "fields_group": "feature",
+              "clip_outlier": true
+            }
+          },
+          {
+            "class": "Fillna",
+            "kwargs": {
+              "fields_group": "feature"
+            }
+          }
+        ],
+        "learn_processors": [
+          {
+            "class": "DropnaLabel"
+          },
+          {
+            "class": "CSRankNorm",
+            "kwargs": {
+              "fields_group": "label"
+            }
+          }
+        ],
+        "label": [
+          "Ref($close, -2) / Ref($close, -1) - 1"
+        ]
+      },
+      "dataset_config": {
+        "class": "DatasetH",
+        "module_path": "qlib.data.dataset",
+        "kwargs": {
+          "handler": {
+            "class": "Alpha158",
+            "module_path": "qlib.contrib.data.handler",
+            "kwargs": {
+              "start_time": "2010-01-07",
+              "end_time": "2025-12-01",
+              "fit_start_time": "2010-01-07",
+              "fit_end_time": "2014-12-31",
+              "instruments": "all",
+              "infer_processors": [
+                {
+                  "class": "FilterCol",
+                  "kwargs": {
+                    "fields_group": "feature",
+                    "col_list": [
+                      "RESI5",
+                      "WVMA5",
+                      "RSQR5",
+                      "KLEN",
+                      "RSQR10",
+                      "CORR5",
+                      "CORD5",
+                      "CORR10",
+                      "ROC60",
+                      "RESI10",
+                      "VSTD5",
+                      "RSQR60",
+                      "CORR60",
+                      "WVMA60",
+                      "STD5",
+                      "RSQR20",
+                      "CORD60",
+                      "CORD10",
+                      "CORR20",
+                      "KLOW"
+                    ]
+                  }
+                },
+                {
+                  "class": "RobustZScoreNorm",
+                  "kwargs": {
+                    "fields_group": "feature",
+                    "clip_outlier": true
+                  }
+                },
+                {
+                  "class": "Fillna",
+                  "kwargs": {
+                    "fields_group": "feature"
+                  }
+                }
+              ],
+              "learn_processors": [
+                {
+                  "class": "DropnaLabel"
+                },
+                {
+                  "class": "CSRankNorm",
+                  "kwargs": {
+                    "fields_group": "label"
+                  }
+                }
+              ],
+              "label": [
+                "Ref($close, -2) / Ref($close, -1) - 1"
+              ]
+            }
+          },
+          "segments": {
+            "train": [
+              "2010-01-07",
+              "2018-12-31"
+            ],
+            "valid": [
+              "2019-01-01",
+              "2020-12-31"
+            ],
+            "test": [
+              "2021-01-01",
+              "2025-12-01"
+            ]
+          }
+        }
+      },
+      "portfolio_config": {
+        "class": "TopkDropoutStrategy",
+        "module_path": "qlib.contrib.strategy",
+        "kwargs": {
+          "signal": "<PRED>",
+          "topk": 50,
+          "n_drop": 5
+        }
+      },
+      "backtest_config": {
+        "start_time": "2021-01-01",
+        "end_time": "2025-11-28",
+        "account": 100000000,
+        "benchmark": "000300.SH",
+        "exchange_kwargs": {
+          "limit_threshold": 0.095,
+          "deal_price": "close",
+          "open_cost": 0.0005,
+          "close_cost": 0.0015,
+          "min_cost": 5
+        }
+      },
+      "model_config": {
+        "class": "LGBModel",
+        "module_path": "qlib.contrib.model.gbdt",
+        "kwargs": {
+          "loss": "mse",
+          "device_type": "cpu",
+          "max_bin": 63,
+          "colsample_bytree": 0.8879,
+          "learning_rate": 0.2,
+          "subsample": 0.8789,
+          "lambda_l1": 205.6999,
+          "lambda_l2": 580.9768,
+          "max_depth": 8,
+          "num_leaves": 210,
+          "num_threads": 20
+        }
+      }
+    },
+    {
+      "strategy_id": "bd47118e4fad5e55a77c96f572975558",
+      "scenario": null,
+      "step_name": "feedback",
+      "action": "factor",
+      "workspace_example": {
+        "task_run_id": "95fde9f8cec7490580a12a992457dfd7",
+        "loop_id": 0,
+        "workspace_id": "b170369f75e34addb982b516cd3ccf08",
+        "workspace_path": "/mnt/f/Dev/RD-Agent-main/git_ignore_folder/RD-Agent_workspace/b170369f75e34addb982b516cd3ccf08"
+      },
+      "template_files": []
+    }
+  ]
+}

@@ -126,11 +126,56 @@ class RDAgentLog(SingletonBaseClass):
             logger.remove()
             logger.add(sys.stderr)
 
-    def info(self, msg: str, *, tag: str = "", raw: bool = False) -> None:
+    def info(self, msg: str, *args: object, tag: str = "", raw: bool = False) -> None:
+        """Log an info message.
+
+        Support both `info("text")` and `info("text %s", arg)` calling styles
+        to be compatible with standard logging APIs.
+        """
+
+        if args:
+            try:
+                msg = msg % args
+            except Exception:
+                # Fallback to a simple representation if %-formatting fails.
+                msg = " ".join([msg, *[str(a) for a in args]])
         self._log("info", msg, tag=tag, raw=raw)
 
-    def warning(self, msg: str, *, tag: str = "", raw: bool = False) -> None:
+    def debug(self, msg: str, *args: object, tag: str = "", raw: bool = False) -> None:
+        """Log a debug message.
+
+        Accepts optional *args for compatibility with logging.debug.
+        """
+
+        if args:
+            try:
+                msg = msg % args
+            except Exception:
+                msg = " ".join([msg, *[str(a) for a in args]])
+        self._log("debug", msg, tag=tag, raw=raw)
+
+    def warning(self, msg: str, *args: object, tag: str = "", raw: bool = False) -> None:
+        """Log a warning message.
+
+        Accepts optional *args for compatibility with logging.warning.
+        """
+
+        if args:
+            try:
+                msg = msg % args
+            except Exception:
+                msg = " ".join([msg, *[str(a) for a in args]])
         self._log("warning", msg, tag=tag, raw=raw)
 
-    def error(self, msg: str, *, tag: str = "", raw: bool = False) -> None:
+    def error(self, msg: str, *args: object, tag: str = "", raw: bool = False) -> None:
+        """Log an error message.
+
+        Accepts optional *args for compatibility with logging.error.
+        """
+
+        if args:
+            try:
+                msg = msg % args
+            except Exception:
+                msg = " ".join([msg, *[str(a) for a in args]])
         self._log("error", msg, tag=tag, raw=raw)

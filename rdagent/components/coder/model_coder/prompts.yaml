@@ -143,6 +143,7 @@ evaluator_final_feedback:
             "final_decision": True,
             "final_feedback": "The final feedback message",
         }
+        IMPORTANT: You must include both "final_decision" (boolean) and "final_feedback" (string) fields exactly as shown above. Do not change the field names.
     user: |-
         --------------Model information:---------------
         {{ model_information }}

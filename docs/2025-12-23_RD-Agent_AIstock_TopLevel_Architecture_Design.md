@@ -91,6 +91,32 @@
 - **统一约束**：
   - RD-Agent 演进出来的因子/策略应尽量以“对 DataFrame/标准视图的纯函数形式”表达，使同一套逻辑既可被离线 wrapper 包装为文件型流程（训练/回测），也可被 AIstock 在线策略引擎包装为实时流程（直接消费数据服务层视图）。
 
+### 1.5 成果资产化与集中因子/策略库原则
+
+- **资产范围**：
+  - RD-Agent 侧的“成功成果”不仅包括策略（可执行组合/模型），还包括所有被接受的因子及其组合；
+  - 这些成果必须在 AIstock 侧形成**集中资产池**：
+    - 因子库（Factor Registry）：因子名称、中文描述、公式提示、来源（RD-Agent 演进 / Alpha 库 / 外部）、标签等；
+    - 策略库（Strategy Registry）：策略配置、输出形态、关联因子集合、来源、回测与反馈信息等。
+
+- **成果入库与归档**：
+  - RD-Agent 通过统一的 artifacts 体系（Phase 1/2）将回测/因子成果结构化为 JSON/CSV/PKL 等标准文件（如 `factor_meta.json`、`factor_perf.json`、`feedback.json`、`qlib_res.csv` 等）；
+  - AIstock 必须提供 importer/任务，将这些结构化成果：
+    - 写入自有数据库（因子库/策略库/实验表）；
+    - 按需复制关键文件到 AIstock 管理的文件存储或对象存储；
+  - 对每个实验/策略/因子组合维护“归档状态”，标记是否已完成最小归档或完整归档。
+
+- **历史成果补录**：
+  - 需要通过脚本或工具对现有所有 RD-Agent workspace/log 进行**一次性全量扫描与补录**：
+    - 先用 RD-Agent 侧 backfill 工具补齐 registry/artifacts；
+    - 再用 AIstock 侧 importer 将历史中有价值的因子与策略成果导入本地数据库与文件存档；
+  - 保证过去的演进成果不会因为后续的 workspace/log 清理而丢失。
+
+- **清理策略约束**：
+  - 在成果未完成“完整归档”前，RD-Agent 的 workspace 目录视为**成果唯一物理载体**，清理将导致信息不可恢复；
+  - 只有当某个实验/策略/因子组合在 AIstock 侧达到预设归档等级（例如：关键指标、因子元数据、反馈、必要文件均已本地化）后，才允许通过策略性脚本清理对应 workspace/log 目录；
+  - 顶层设计的后续 Phase（尤其 Phase 2/3）需围绕“从结构化 artifacts 到 AIstock 资产池”的归档闭环展开。
+
 ---
 
 ## 2. 分阶段实施设计（含验收标准与改动评估）
@@ -167,6 +193,45 @@
   - 仍作为黑盒，只需从其输出中提取指标与时间序列生成 JSON/图表；
   - 侵入性：**极低**。
 
+#### Phase 2 最终协议补充（2025-12-26）
+
+> 本小节是 RD-Agent × AIstock 在 Phase 2 阶段的**最终实现协议**。RD-Agent 侧代码已经按本方案落地并通过真实任务验证，AIstock 侧可以仅依据本节内容完成后续阶段二的全部开发。
+
+- **RD-Agent 侧保证：**
+  - 对所有 `has_result=1` 的 loop×workspace：
+    - workspace 下存在完整的 Phase2 artifacts：`factor_meta.json` / `factor_perf.json` / `feedback.json` / `ret_curve.png` / `dd_curve.png`；
+    - 在 `registry.sqlite` 中有对应的 `artifacts` / `artifact_files` 记录；
+  - 通过 backfill（log 模式）可以对历史任务补齐 Phase2，并将符合条件的 loop 的 `has_result` 从 0/NULL 更新为 1；
+  - 通过三大导出脚本可以随时生成：
+    - `tmp/factor_catalog.json`（因子全集：Alpha158 + RD-Agent 因子）、
+    - `tmp/strategy_catalog.json`（策略配置全集）、
+    - `tmp/loop_catalog.json`（所有 `has_result=1` 的 loop×workspace）。
+
+- **AIstock 侧职责（Phase 2）：**
+  - **数据获取与导入流程**：
+    - 在 Windows 侧通过 WSL 命令触发 RD-Agent 在 WSL/Linux 中执行：
+      - `backfill_registry_artifacts.py`（按 log 目录补齐 Phase2 与 `has_result`）；
+      - 三个 `export_aistock_*.py` 脚本生成最新 Catalog JSON；
+    - 从共享路径（例如 `F:\Dev\RD-Agent-main\tmp\`）读取：
+      - `factor_catalog.json`
+      - `strategy_catalog.json`
+      - `loop_catalog.json`
+    - 将上述 JSON 按约定 schema 导入自有数据库，采用 **全量覆盖 + upsert** 策略，保证幂等：
+      - 因子表（如 `factor_registry`）：`(name, source)` 为主键；
+      - 策略表（如 `strategy_registry`）：`strategy_id` 为主键；
+      - 实验表（如 `loop_result`）：`(task_run_id, loop_id, workspace_id)` 为主键，并关联 `strategy_id`。
+
+  - **只依赖三大 Catalog 与文件路径**：
+    - 所有前端/后端功能只使用导入后的三张表及共享文件路径，不直接访问 RD-Agent 的 `registry.sqlite`、日志或 workspace 目录结构；
+    - 若未来 Catalog schema 升级，将通过 `version` 字段版本化，保持向后兼容旧字段。
+
+  - **功能目标（AIstock 侧）：**
+    - 基于 `factor_catalog` + Phase2 的 `factor_meta`，构建因子库：支持按标签/来源/性能筛选并勾选因子集合；
+    - 基于 `strategy_catalog` 构建策略库：展示策略配置（data/model/backtest），允许用户选择某个 `strategy_id` 生成 ExperimentRequest；
+    - 基于 `loop_catalog` 构建实验库：以 loop 维度展示关键指标、收益/回撤曲线（根据 `paths` 拼接静态文件 URL）、以及 LLM 反馈文本，用于研究与人工决策。
+
+> 达成以上约定后，Phase 2 可视为双方协议已冻结，AIstock 侧可以在不依赖 RD-Agent 内部实现细节的前提下，独立完成阶段二剩余所有开发工作。
+
 ---
 
 ### Phase 3：StrategyConfig / FactorSetConfig 与外部资产接入
@@ -213,41 +278,162 @@
 
 ---
 
-### Phase 4：多策略、多窗口与模拟盘反馈闭环
+### Phase 3 补充：AIstock 执行层 × miniQMT × Qlib 分工与模块结构（2025-12-28 更新）
 
-**核心思路：**
+> 本小节在 1.5「成果资产化」和 Phase 3 核心思路的基础上，明确 **AIstock 执行层** 在短中期（仅 A 股、只做多头、不考虑融资融券/期货/期权/ETF 套利）的具体分工与模块结构。
+> 目的是让 AIstock 侧可以在不依赖 RD-Agent 内部实现的前提下，独立完成执行层编码与演进。
 
-- 在 StrategyConfig 的基础上支持：
-  - 多策略、多参数版本并行实验（同一因子集下不同策略）；
-  - 多时间窗口（regime）评估。
+#### 3.x.1 约束前提与目标
 
-- AIstock 将模拟盘/实盘中的 **LiveFeedback** 结构化发送给 RD-Agent：
-  - 包含真实收益/回撤/滑点/风控事件等指标；
-  - 指明希望改进的方向（降低回撤、降低滑点、保持收益等）。
+- 交易标的：仅 A 股现货；
+- 方向约束：只做多头，不涉及融券/卖空，不涉及融资融券业务；
+- 衍生品：暂不考虑期货、期权、ETF 套利等场景；
+- 执行通道：统一通过 miniQMT（XtQuantTrader）与券商侧交互；
+- 研究/回测：继续由 RD-Agent + Qlib 承担，AIstock 仅在需要时本地复用 Qlib 的组合/风控/评估逻辑；
+- 阶段目标：
+  - Phase 3 期间，**模拟盘优先**，实盘在同一执行架构下自然扩展；
+  - 初期模拟盘风控可以大量复用 Qlib 组合风险与评估逻辑。
 
-- RD-Agent 以 LiveFeedback 为约束和目标，执行“定向演进实验”（而非完全探索式）。
+#### 3.x.2 执行层逻辑分层与模块图（文字版）
 
-**阶段性验收标准：**
+从下到上将 AIstock 执行层拆成五层（与 1.1 的整体分层对齐）：
 
-1. **多策略/多窗口能力：**
-   - 针对同一因子集，能配置并跑通至少 2–3 个不同策略配置 + 不同回测窗口；
-   - registry 中能区分这些实验，并在 AIstock UI 中并排对比。
+1. **执行网关层（Execution Gateway Layer，miniQMT 为主）**
+   - 责任：
+     - 管理与 miniQMT 的连接、会话、账号订阅；
+     - 提供统一的报单/撤单接口：`place_order` / `cancel_order`；
+     - 消费 XtQuant 回调：委托、成交、持仓、资金变化等。
+   - 实现：
+     - AIstock 内部实现一个 `MiniQMTExecutionGateway` 适配器，
+       对外暴露领域友好的接口，对内调用：
+       - `XtQuantTrader.order_stock(...)` / `cancel_order_stock(...)`；
+       - `XtQuantTrader.subscribe(...)` / `run_forever()` 等；
+     - **miniQMT 提供全部下单、撤单、账户与成交信息能力**；
+     - AIstock 不直接操作柜台/交易所，只与 miniQMT 交互。
 
-2. **LiveFeedback 闭环：**
-   - 模拟盘/实盘模块能针对某个 strategy_instance_id 输出结构化 LiveFeedback；
-   - RD-Agent 能基于该反馈启动新一轮 ExperimentRequest，并在 experiment_summary / feedback.json 中体现“本轮改进目标与结果”。
+2. **账户与市场视图层（Account & Market View Layer，miniQMT + Data Service）**
+   - 责任：
+     - 将 miniQMT 的 XtAsset / XtPosition / XtOrder / XtTrade 结构化存入 AIstock DB；
+     - 将 xtdata 的实时/历史行情经数据服务层标准化，统一对上提供：
+       - `get_realtime_quotes` / `get_kline` / `get_trading_calendar` 等接口；
+     - 为上层组合决策和风控提供“当前账户状态 + 市场状态”视图。
+   - 实现：
+     - **完全复用 miniQMT/xtdata 的数据接口**；
+     - AIstock 负责：
+       - 设计 DB 表结构（账户、持仓、订单、成交、资金流水）；
+       - 编写 importer/同步服务，将回调/查询结果写入 DB；
+       - 对上暴露统一的数据服务 API（与顶层 1.2 的 Data Service Layer 一致）。
 
-**改动量与侵入性评估：**
+3. **组合构建与仓位决策层（Portfolio & Positioning Layer，Qlib 逻辑可复用）**
+   - 责任：
+     - 将策略信号（预测得分、打分因子等）转化为**目标组合权重/目标持仓**；
+     - 应用组合约束：
+       - 单票权重上限、行业权重上限；
+       - 换手限制、benchmark 约束、tracking error 等。
+   - 与 Qlib 的关系：
+     - 在研究/模拟环境中，可以直接使用 Qlib 提供的：
+       - `WeightStrategyBase` 及相关策略（如 Topk/Enhanced Indexing）；
+       - 风险模型（因子协方差、特异风险）与优化器；
+     - 在执行路径上，推荐：
+       - 将 Qlib 的组合优化算法/公式以“纯 Python 数学逻辑”的方式移植到 AIstock 服务；
+       - 替换数据源为 AIstock 数据服务/xtdata，而非 Qlib provider；
+       - 保证 **模拟盘与实盘共用同一套组合决策逻辑**，只是数据源不同。
+   - 所属：
+     - **AIstock 自研服务（组合决策服务）**，
+     - 但可以大量复用 Qlib 的思路与代码片段（保持与 RD-Agent 研究侧一致）。
 
-- RD-Agent：
-  - 需要在 ExperimentRequest 解析层与 runner 层增加对多策略/多窗口组合的支持；
-  - 需要在 feedback/summary 中记录“上一轮 LiveFeedback 与本轮对齐关系”；
-  - 侵入性：**中等**，但集中在 orchestrator 层，可控。
-- Qlib：
-  - 依旧通过多 YAML / 多 run 的方式承载不同策略与窗口；
-  - 侵入性：**极低**。
-- AIstock：
-  - 需要实现模拟盘/实盘的指标聚合与 LiveFeedback 输出，工作量较大，但与 RD-Agent 的接口清晰。
+4. **订单生成与执行策略层（Order Generation & Execution Policy Layer，AIstock 自研）**
+   - 责任：
+     - 从「当前实盘持仓 + 目标持仓」推导出**调仓指令集**：
+       - 需要买入/卖出的标的与数量；
+     - 将调仓指令拆分为具体订单：
+       - 下单时机（例如开盘/收盘/分时段）；
+       - 价格类型（限价、对手方最优、本方最优、智能算法等）；
+       - 是否使用 miniQMT 的 `smart_algo_order_async` 实现 TWAP/VWAP 等执行策略。
+   - 实现：
+     - **必须由 AIstock 自研**，因为这是策略风格与风险偏好的核心体现；
+     - Qlib 可作为“在回测中模拟调仓结果”的参考，但实盘中：
+       - 真实成交由 miniQMT/交易所决定；
+       - 执行策略需要显式利用 XtQuant 的价格类型和智能算法能力。
+
+5. **风控与监控层（Risk & Monitoring Layer，规则借鉴 Qlib，执行由 AIstock 自研）**
+   - 责任：
+     - 在线风控：
+       - 单票持仓/下单金额上限；
+       - 组合总仓位/行业敞口限制；
+       - 最大日内/累计回撤阈值（结合实时净值/资产曲线）；
+       - 黑名单/停牌/高风险证券过滤；
+       - 全局 kill-switch（异常时一键止损、停策略、停止报单）。
+     - 事后评估：
+       - 利用 Qlib 的风险分析与成本/滑点模型，对模拟盘和实盘路径进行统一评估；
+   - 与 Qlib 的关系：
+     - **规则与指标体系可以完全借鉴 Qlib**（如 IR、max drawdown、tracking error 等）；
+     - 在线执行逻辑（是否放行某个订单）必须在 AIstock 自己的风控服务中实现；
+     - Qlib 更适合作为：
+       - 模拟盘/回测的评估工具；
+       - 实盘后的回放与对账工具。
+
+#### 3.x.3 miniQMT / Qlib / AIstock 在执行层的职责边界
+
+- **miniQMT / XtQuant：**
+  - 提供：
+    - 真实的券商交易通道：报单、撤单、异步回报；
+    - 账户、持仓、资金与信用数据视图（本项目暂不使用信用部分）；
+    - 基于交易所规则的价格类型与智能算法执行能力；
+  - 不负责：
+    - 量化策略逻辑、组合优化、因子计算；
+    - 高层风控规则编排。
+
+- **Qlib（在本项目中的定位）：**
+  - 保持 RD-Agent 侧 **完全不改动**，只用于：
+    - 研究/回测阶段的组合构建与回测；
+    - 风险分析与成本/滑点模型评估；
+  - 在 AIstock 侧：
+    - 仅借鉴/复用其**组合优化、风险评估的数学与实现**；
+    - 不直接作为实盘撮合引擎；
+    - 不直接访问 miniQMT，而是通过 AIstock 数据服务消费数据。
+
+- **AIstock 执行层：**
+  - 负责：
+    - 从策略信号到目标组合的决策（可使用移植后的 Qlib 逻辑）；
+    - 从目标组合到具体订单的拆分与执行策略；
+    - 在线风控与监控；
+    - 与 miniQMT 的交易网关集成；
+  - 不负责：
+    - 低层撮合与柜台风控（由券商/miniQMT 负责）；
+    - Qlib 内部模型训练与回测细节（由 RD-Agent 负责）。
+
+> 按照上述分工，Phase 3 之后 AIstock 可以在不修改 RD-Agent/Qlib 源码的前提下，
+> 独立完成模拟盘与实盘执行层的绝大部分开发工作，仅通过：
+> - Phase 2/3 已定义的 JSON/Schema 与因子/策略/loop Catalog 同步研究成果；
+> - miniQMT/xtdata 提供的行情与交易接口连接真实市场；
+> - 自研的执行与风控服务承载 AIstock 策略逻辑与风险约束。
+
+- **建议的 LiveFeedback 结构要素（示意）：**
+  - 元信息：`strategy_instance_id`、`experiment_id`、`env`（preview/paper/live）、统计区间 `period`（start_date/end_date）；
+  - 绩效指标汇总：`total_return`、`annual_return`、`max_drawdown`、`volatility`、`sharpe`、`win_rate`、`turnover` 等；
+  - 执行与成本：`avg_slippage_bps`、`fill_ratio`、`order_reject_count`、`risk_block_count` 等；
+  - 风险与事件：一组带时间戳与类型的 `events`（如 `risk_limit_hit`、`drawdown_alert`、`kill_switch`、`qmt_error` 等）；
+  - 配置摘要（可选）：`strategy_config_hash`、`factor_set_hash` 等，便于 RD-Agent 将实盘/模拟盘结果对齐到具体实验版本。
+
+- **数据来源与边界：**
+  - AIstock：
+    - 从预览/模拟盘/实盘执行路径中采集成交、持仓、账户、风控拦截和异常事件；
+    - 基于本地 DB 中的账户/预览数据（如 `preview_account`/实盘账户表）按周期聚合上述指标；
+    - 生成符合约定 schema 的 LiveFeedback JSON，并写入约定路径或通过 API 推送。
+  - RD-Agent：
+    - 定期扫描 LiveFeedback 输出目录或接收推送；
+    - 将 `strategy_instance_id` / `experiment_id` 与内部 registry 关联；
+    - 以 LiveFeedback 为约束与目标，发起“定向演进实验”（例如：降低回撤、改善风险收益比），并将该约束记录在新的 ExperimentRequest 中。
+
+- **阶段划分建议：**
+  - Phase 3：
+    - 确定 LiveFeedback schema 并在文档中冻结；
+    - 在 AIstock 执行路径中补齐必要的指标采集与落库（成交/持仓/风险事件等）；
+    - 可先在模拟盘路径输出最小版本的 LiveFeedback JSON 作为联调验证，不要求全量覆盖。
+  - Phase 4：
+    - 在模拟盘与实盘路径上全面启用 LiveFeedback 生成与回传机制；
+    - RD-Agent 侧实现基于 LiveFeedback 的实验触发与对齐逻辑，形成“模拟盘/实盘反馈闭环”。
 
 ---
 
@@ -298,4 +484,186 @@
    - Phase 3 引入外部资产与结构化配置，不影响 Phase 2 产物；
    - Phase 4/5 主要增加智能性与自动化，不破坏前期存量实验数据与接口。
 
-本顶层设计文件作为后续各阶段详细设计文档的“框架与约束”，后续任何阶段性方案（包括具体 schema、字段与实现细节）都应在其指导下展开，以最大程度避免重构与无效开发工作。
+ 本顶层设计文件作为后续各阶段详细设计文档的“框架与约束”，后续任何阶段性方案（包括具体 schema、字段与实现细节）都应在其指导下展开，以最大程度避免重构与无效开发工作。
+
+---
+
+## 附录：AIstock Phase 2 协议与数据结构（实现说明）
+
+本附录是面向 AIstock 团队的 **Phase 2 实现说明**，在不深入 RD-Agent 内部代码的前提下，AIstock 可以完全据此完成后续开发与联调。
+
+### A. RD-Agent 输出的三大 Catalog（JSON）
+
+#### 1. `factor_catalog.json`
+
+- 顶层结构：
+
+  - `version: "v1"`
+  - `generated_at_utc: str`（UTC ISO8601 时间）
+  - `source: "rdagent_tools"`
+  - `factors: list`
+
+- 单条因子结构：
+
+  - `name: str`
+  - `expression: str`
+    - Alpha158 因子：一定存在（Qlib 表达式）；
+    - RD-Agent 因子：若暂缺，可由 AIstock 后续补充；
+  - `source: "qlib_alpha158" | "rd_agent"`
+  - `region: "cn"`
+  - `tags: list[str]`
+    - 示例：`["alpha158"]`, `["rdagent_generated"]`, `["risk"]` 等。
+
+#### 2. `strategy_catalog.json`
+
+- 顶层结构：
+
+  - `version: str`
+  - `generated_at_utc: str`
+  - `source: str`
+  - `strategies: list`
+
+- 单条策略结构：
+
+  - `strategy_id: str`
+    - UUIDv5，基于 `step_name + action + template_files` 生成；
+    - RD-Agent / AIstock 如需重建，必须遵守相同规则以保证一致性。
+  - `scenario: null`（预留）
+  - `step_name: str`（如 `"feedback"`）
+  - `action: "factor" | "model"`
+  - `workspace_example: {task_run_id, loop_id, workspace_id, workspace_path}`
+  - `template_files: list[str]`
+    - YAML 与 mlflow meta 等相对路径（相对 workspace 根目录）；
+  - `data_config / dataset_config / portfolio_config / backtest_config / model_config`
+    - 均为从 Qlib YAML 透传的配置子树，类型为 JSON 对象。
+
+#### 3. `loop_catalog.json`
+
+- 顶层结构：
+
+  - `version: str`
+  - `generated_at_utc: str`
+  - `source: str`
+  - `loops: list`
+
+- 单条记录（一个 `(task_run_id, loop_id, workspace_id)`）：
+
+  - 标识字段：
+    - `task_run_id: str`
+    - `loop_id: int`
+    - `workspace_id: str`
+    - `step_name: str`
+    - `action: str`
+    - `status: str`
+    - `has_result: bool`（RD-Agent + backfill 维护，AIstock 只需信任该值）
+  - 关联：
+    - `strategy_id: str | null`（与 Strategy Catalog 中的 `strategy_id` 对齐）
+  - 因子与指标：
+    - `factor_names: list[str]`（来自 `factor_perf.combinations[*].factor_names`）
+    - `metrics: dict`
+      - 主 window（如 `main_window`）的关键指标：
+        - `annualized_return`
+        - `max_drawdown`
+        - `ic_mean`
+        - `rank_ic_mean`
+        - `multi_score`
+        - 其他补充指标按原样透传。
+  - 决策与反馈：
+    - `decision: bool | null`（来自 `feedback.json.decision`）
+    - `summary_texts: {execution, value_feedback, shape_feedback}`
+      - 三段中文文本摘要，分别描述执行情况、假设/价值评价、曲线形态与风险。
+  - 关键文件路径：
+    - `paths: {factor_meta, factor_perf, feedback, ret_curve, dd_curve}`
+      - 值为文件名（如 `"factor_meta.json"`），不含绝对路径。
+
+### B. RD-Agent 导出命令（固定协议）
+
+在 WSL 中，RD-Agent 提供统一导出方式（路径可按实际安装位置调整）：
+
+```bash
+cd /mnt/f/Dev/RD-Agent-main
+
+# 1) Alpha158 元信息（只需偶尔刷新）
+python tools/export_alpha158_meta.py \
+  --conf-yaml rdagent/scenarios/qlib/experiment/factor_template/conf_combined_factors_dynamic.yaml \
+  --output tmp/alpha158_meta.json
+
+# 2) Factor Catalog
+python tools/export_aistock_factor_catalog.py \
+  --registry-sqlite RDagentDB/registry.sqlite \
+  --alpha-meta tmp/alpha158_meta.json \
+  --output tmp/factor_catalog.json
+
+# 3) Strategy Catalog
+python tools/export_aistock_strategy_catalog.py \
+  --registry-sqlite RDagentDB/registry.sqlite \
+  --output tmp/strategy_catalog.json
+
+# 4) Loop Catalog（全量，has_result=1 的 loop×workspace）
+python tools/export_aistock_loop_catalog.py \
+  --registry-sqlite RDagentDB/registry.sqlite \
+  --output tmp/loop_catalog.json \
+  --limit 0
+```
+
+- 每次执行会生成 **全量快照**，覆盖写 `tmp/*.json`。
+- AIstock 侧导入时，应采用“全量读取 + upsert”策略，而不是做增量 diff。
+
+> 若 AIstock 运行在 Windows，可通过 `wsl -d <发行版> -- bash -lc "..."` 调用上述命令，并从 `F:\\Dev\\RD-Agent-main\\tmp\\` 读取生成的 JSON 文件。
+
+### C. AIstock 侧建议的数据库结构设计
+
+#### 1. `factor_registry` 表
+
+- 主键：`(name, source)`
+- 字段建议：
+  - `expression: text`
+  - `region: text`
+  - `tags: jsonb`
+  - `description_cn: text`（可从 Phase2 的 `factor_meta.json` 中补充）
+  - `formula_hint: text`
+  - `variables: jsonb`
+
+#### 2. `strategy_registry` 表
+
+- 主键：`strategy_id`
+- 字段建议：
+  - `step_name: text`
+  - `action: text`
+  - `template_files: jsonb`
+  - `data_config: jsonb`
+  - `dataset_config: jsonb`
+  - `portfolio_config: jsonb`
+  - `backtest_config: jsonb`
+  - `model_config: jsonb`
+
+#### 3. `loop_result` 表
+
+- 主键：`(task_run_id, loop_id, workspace_id)`
+- 外键：`strategy_id → strategy_registry(strategy_id)`
+- 字段建议：
+  - `status: text`
+  - `has_result: boolean`
+  - `step_name: text`
+  - `action: text`
+  - `metrics: jsonb`
+  - `decision: boolean`
+  - `summary_execution: text`
+  - `summary_value_feedback: text`
+  - `summary_shape_feedback: text`
+  - `paths: jsonb`
+
+### D. 分工与协议重申
+
+- **RD-Agent 保证：**
+  - 通过在线写入 + backfill，为所有“有结果”的 loop 生成完整的 Phase2 artifacts，并在 registry 中登记；
+  - 通过上述脚本，随时导出三大 Catalog 的最新全量视图；
+  - 不要求 AIstock 直接操作 `registry.sqlite` 或解析工作空间目录结构。
+
+- **AIstock 需完成：**
+  - 定时或按需触发 RD-Agent 在 WSL 中执行 backfill + 三大 Catalog 导出；
+  - 从共享目录（例如 `F:\\Dev\\RD-Agent-main\\tmp\\`）读取三大 JSON；
+  - 将 JSON 内容导入本地数据库对应表，使用 upsert 保证幂等；
+  - 所有 UI 和后续逻辑只依赖这三张表，不再直接解析 RD-Agent 的 `registry.sqlite` 或 workspace 目录。
+
+本附录配合正文 Phase 2 小节，可视为 AIstock 阶段二研发的“接口文档”，在协议不变的前提下，AIstock 侧可以独立完成后续开发与演进.

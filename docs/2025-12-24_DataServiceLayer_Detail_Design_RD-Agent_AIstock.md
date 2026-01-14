@@ -298,7 +298,9 @@ RD-Agent 演进出来的策略：
 - 数据服务层主要负责：
   - 从自有 DB/行情源导出 snapshot HDF5 / qlib bin；
   - 确保字段/索引规范与本设计保持一致；
-- 在线接口可以仅做 PoC，不作为硬性验收标准。
+- 在线接口在 Phase 1–2 阶段可以先以 PoC 形式做早期验证，
+  但进入 Phase 2/3 验收与生产使用时，必须按照本设计与 REQ-DATASVC-P2-001/P3-001 所定义的接口和数据形态完成生产级实现，
+  不得以 PoC 或“最小可用实现”为理由保留精简路径进入执行栈。
 
 ### 6.2 Phase 3：数据服务层模块化与标准接口固化
 
@@ -306,6 +308,58 @@ RD-Agent 演进出来的策略：
   - 把上述接口实现为清晰可复用的模块/服务；
   - 完成对 miniQMT / TDX / DB 的适配；
   - 完成与账号/风控模块的基本集成。
+
+### 6.4 与 qlib runtime 集成及模型复用（面向 AIstock 的硬性要求）
+
+- **统一数据形态：tabular MultiIndex 因子矩阵**
+  - 本设计明确要求：
+    - 无论后续在 RD-Agent/qlib 侧使用何种模型（线性、树模型、深度模型、序列模型等），
+    - AIstock 数据服务层对上暴露的**唯一标准数据形态**均为：
+      - `pd.DataFrame`，MultiIndex: `(datetime, instrument)`；
+      - columns：标准行情字段 + 因子字段（包括 Alpha158 与 RD-Agent 演进因子）；
+    - 更复杂的张量结构（如 K 线图像、序列张量）须在上层通过该 tabular 矩阵自行转换获得。
+  - 因此，本文件中定义的 `get_history_window` / `get_realtime_snapshot` 等接口，不是建议性的 PoC，而是 AIstock 在 Phase 2–3 内必须落地的**生产级接口契约**。
+
+- **固定版本 qlib runtime + 自定义 DataProvider**
+  - 为保证 RD-Agent 侧使用的全部 qlib 模型可以在 AIstock 侧“零重写”复用，AIstock 后端需：
+    - 集成固定版本的 qlib runtime（例如 `qlib==x.y.z`），用于：
+      - 解析 RD-Agent 导出的 `model_conf` / `dataset_conf` / `feature_conf` 等；
+      - 加载与运行符合 qlib Model 接口的已训练模型；
+    - 实现自定义 DataProvider / DataHandler，将 qlib 的数据请求（字段名、频率、窗口长度等）
+      映射到本文件定义的数据服务层接口：
+      - 历史视图：通过 `get_history_window` 获取指定 universe、时间窗口、字段集合；
+      - 实时/近实时视图：通过 `get_realtime_snapshot` 等接口补齐当日数据；
+    - 确保 DataProvider 输出的数据结构在索引、字段名、缺失值处理等方面，与 RD-Agent 在科研/回测中使用 qlib 时保持一致。
+
+- **模型复用范围与约束**
+  - RD-Agent 侧所有希望在 AIstock 生产侧复用的模型必须：
+    - 遵守 qlib Model 接口契约（`fit` / `predict` / `save` / `load` 等）；
+    - 在 loop 的 artifacts/registry 中完整记录：
+      - 模型类型（对 qlib 而言的模型类名或 `model_type` 字段）；
+      - 对应的 `model_conf` / `dataset_conf` / 特征字段名列表 / 窗口长度 / 频率等；
+  - 在上述前提下，AIstock 必须保证：
+    - 只要模型在 RD-Agent + qlib 环境中已通过训练和回测验证，
+    - 即可在 AIstock 侧通过固定版本 qlib runtime + 本数据服务层接口直接运行，
+      不得以“模型类型不在白名单”等理由简化或拒绝实现。
+
+- **Alpha158 与 RD-Agent 因子支持**
+  - 数据服务层必须完整支持：
+    - Alpha158 因子所需的基础行情字段、时间索引与数据频率；
+    - RD-Agent 演进因子在离线视图与在线视图中的消费需求（参见因子共享包与成果导出设计文档），
+      包括近 N 日窗口的滚动计算；
+  - 具体实现路径可以灵活选择（RD-Agent 预计算、AIstock 内部 Python 实现、或基于 qlib 表达式），
+    但对上层使用者而言，必须通过本数据服务层提供统一、稳定的字段视图。
+
+- **不得使用临时/精简数据路径进入生产执行栈**
+  - 所有进入模拟盘/实盘执行栈的策略/模型，在消费行情与因子数据时：
+    - 一律通过本设计中定义的数据服务层接口访问数据；
+    - 不得绕过数据服务层，直接访问底层行情源或临时缓存；
+  - 面向研究/PoC 的特殊数据路径（如直接读取某个测试文件）
+    只能用于本地验证，不得进入正式运行环境，以免导致与 RD-Agent/qlib 回测环境的数据不一致。
+
+> 本小节的约束是面向 AIstock 实现团队的硬性要求，目的是：
+> - 确保 RD-Agent × qlib 侧所有已验证模型与因子，在 AIstock 生产环境中可以在统一的数据形态与接口下复用；
+> - 避免由于临时/精简实现导致的回测环境与生产环境行为偏差。
 
 ### 6.3 Phase 4–5：在线策略与真实反馈闭环
 
@@ -333,4 +387,24 @@ RD-Agent 演进出来的策略：
 
 ---
 
-> 本文档重点固定了未来数据消费侧的接口形态与使用方法。AIstock 侧可以在此基础上，自由选择具体技术栈与部署形态，只要保证对上层暴露的行为与本设计保持兼容即可。
+## 8. 硬性要求（REQ Checklist，按 2025-12-30 项目规范对齐）
+
+> 本节将数据服务层的关键约束 ID 化，便于在 RD-Agent × AIstock 联合开发中作为硬性契约执行。
+
+- **REQ-DATASVC-P2-001：统一数据形态（离线/研究场景）**  
+  数据服务层对上暴露的历史窗口与快照接口，必须以 `pd.DataFrame`（MultiIndex `(datetime, instrument)`）
+  作为唯一标准数据形态，字段名与含义与离线视图（如 `daily_pv.h5`、Alpha158 因子）保持一致。
+
+- **REQ-DATASVC-P3-001：仅通过 DataService 获取执行栈数据**  
+  进入模拟盘/实盘执行栈的策略/模型在消费行情与因子数据时，必须通过本文件定义的数据服务层接口，
+  禁止直接访问底层行情源、临时缓存或测试文件。
+
+- **REQ-DATASVC-P3-002：与 qlib runtime 的数据契约**  
+  自定义 DataProvider / DataHandler 必须通过 DataService 接口获取数据，并保证输出的数据结构在
+  索引、字段命名与缺失值处理等方面与 RD-Agent/qlib 回测环境保持一致，以支持模型零重写复用。
+
+- **REQ-MODEL-P3-010：模型复用范围与约束（数据服务视角）**  
+  所有希望在 AIstock 生产环境复用的 RD-Agent 模型，必须通过 DataService + qlib runtime 的组合
+  进行预测，不得引入绕过 DataService 的“临时/精简数据路径”。
+
+---

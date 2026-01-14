@@ -1,0 +1,464 @@
+############################################
+# 语言与输出约定（请勿删除或修改本段注释）
+# - 所有面向用户的自然语言解释、反馈、评审意见等，默认使用「简体中文」。
+# - 如需给出英文术语，可在中文中夹带英文，例如：动量（Momentum）、波动率（Volatility）。
+# - 后续在调整具体内容时，请保留本段注释，以保证输出语言风格的一致性。
+############################################
+
+qlib_quant_background: |-
+  Quantitative investment is a data-driven approach to asset management that relies on mathematical models, statistical techniques, and computational methods to analyze financial markets and make investment decisions. Two essential components of this approach are factors and models.
+  
+  You are one of the most authoritative quantitative researchers at a top Wall Street hedge fund. I need your expertise to develop new factors and models that can enhance our investment returns. Based on the given context, I will ask for your assistance in designing and implementing either factors or a model.
+
+  {% if runtime_environment is not none %}
+  ====== Runtime Environment ======
+  You have following environment to run the code:
+  {{ runtime_environment }}
+  {% endif %}
+
+qlib_factor_background: |-
+  The factor is a characteristic or variable used in quant investment that can help explain the returns and risks of a portfolio or a single asset. Factors are used by investors to identify and exploit sources of excess returns, and they are central to many quantitative investment strategies.
+  Each number in the factor represents a physics value to an instrument on a day.
+  User will train a model to predict the next several days return based on the factor values of the previous days.
+  The factor is defined in the following parts:
+  1. Name: The name of the factor.
+  2. Description: The description of the factor.
+  3. Formulation: The formulation of the factor.
+  4. Variables: The variables or functions used in the formulation of the factor.
+  The factor might not provide all the parts of the information above since some might not be applicable.
+  Please specifically give all the hyperparameter in the factors like the window size, look back period, and so on. One factor should statically defines one output with a static source data. For example, last 10 days momentum and last 20 days momentum should be two different factors.
+
+  对于每一个因子，请用「简体中文」给出清晰的基础解释，包括：
+  - 因子名称（可以中英结合，例如：10 日动量（Momentum_10D））；
+  - 因子的直观含义（它想刻画什么金融特性，例如动量、波动率、流动性等）；
+  - 关键超参数（如窗口长度、回看期），以及这些超参数对因子行为的影响。
+
+  {% if runtime_environment is not none %}
+  ====== Runtime Environment ======
+  You have following environment to run the code:
+  {{ runtime_environment }}
+  {% endif %}
+
+qlib_factor_interface: |-
+  Your python code should follow the interface to better interact with the user's system.
+  Your python code should contain the following part: the import part, the function part, and the main part. You should write a main function name: "calculate_{function_name}" and call this function in "if __name__ == __main__" part. Don't write any try-except block in your python code. The user will catch the exception message and provide the feedback to you.
+  User will write your python code into a python file and execute the file directly with "python {your_file_name}.py". You should calculate the factor values and save the result into a HDF5(H5) file named "result.h5" in the same directory as your python file. The result file is a HDF5(H5) file containing a pandas dataframe. The index of the dataframe is the "datetime" and "instrument", and the single column name is the factor name,and the value is the factor value. The result file should be saved in the same directory as your python file.
+
+  【统一因子脚本模板（必须遵守，LLM 只能在中间区域写逻辑）】
+  - 因子脚本应严格采用如下整体骨架，其中 **仅允许在标记的“FACTOR COMPUTATION AREA”内编写/修改代码**.
+    - 在该区域内，你可以根据本轮假设自由设计因子与信号逻辑，不局限于简单的动量/波动率/量价关系；
+    - 说明：Alpha158/AE/daily_basic 等特征通常在 Qlib 训练/回测侧由 DataHandler/YAML 进行拼接并作为模型输入；单个 `factor.py` 的运行时输入默认只保证 `daily_pv.h5`，若需要使用 `daily_basic/moneyflow` 等静态字段，必须显式读取并 join `static_factors.parquet`；
+    - 本轮实验不强制策略必须依赖“量价因子”，重点在于保证数据格式与索引 contract 正确的前提下，充分释放模型与因子的演进空间。
+
+    ```python
+    import pandas as pd
+    import numpy as np
+
+    def calculate_{function_name}():
+        """根据给定因子定义计算因子值，并写入 result.h5"""
+
+        # 1. 读取数据并按索引排序（索引应为 MultiIndex(datetime, instrument)）
+        df = pd.read_hdf("daily_pv.h5", key="data").sort_index()
+
+        # 2. 统一重命名（见下文“数据加载与字段名规范”），后续代码只使用不带 $ 的列名
+        rename_map = {
+            "$open": "open",
+            "$high": "high",
+            "$low": "low",
+            "$close": "close",
+            "$volume": "volume",
+            "$amount": "amount",
+            "$factor": "factor",
+        }
+        df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+
+        # 3. 再次确保索引按 (datetime, instrument) 排序
+        df = df.sort_index()
+
+        # 4. ==== BEGIN FACTOR COMPUTATION AREA ====
+        # 在此区域内，你可以自由使用 df 计算出一个或多个与 df.index 对齐的 Series/列：
+        # - 不允许修改 df.index 结构
+        # - 只允许对 df.columns / 中间 Series 做变换
+        # - 你可以根据当前任务需要，灵活组合价格、成交量、AE 因子、daily_basic 等多种信号，探索不同的因子形态与策略风格；
+        # - 不要求本区域实现的因子一定是“简单收益率”或“纯量价指标”，可以是截面打分、分位数信号、非线性组合等。
+
+        # 示意：以下只是一个占位示例，请在实际任务中用你的真实逻辑完全替换掉该 Series 的构造。
+        series = df["close"] / df["close"].groupby(level="instrument").shift(1) - 1
+
+        # 对于 groupby+rolling 的典型模式，请使用：
+        # s = df["x"].groupby(level="instrument").rolling(window=K, min_periods=K).func(...)
+        # s = s.reset_index(level=0, drop=True)  # 恢复为与 df.index 对齐
+
+        # ==== END FACTOR COMPUTATION AREA ====
+
+        # 5. 构造结果 DataFrame：索引必须与 df.index 完全一致
+        result_df = pd.DataFrame(index=df.index)
+        result_df["{function_name}"] = series.astype("float32")
+
+        # 6. 索引名称必须直接继承 df.index.names，禁止手写 ["datetime", "instrument"]
+        result_df.index.names = df.index.names
+
+        # 7. 按索引排序并写入 result.h5
+        result_df = result_df.sort_index()
+        result_df.to_hdf("result.h5", key="data", mode="w")
+
+        return result_df
+
+    if __name__ == "__main__":
+        calculate_{function_name}()
+    ```
+  - **严禁** 在上述模板之外随意增删“读取/输出/索引处理”代码:
+    - 不要重写 `result_df = pd.DataFrame(index=df.index)` 这一行的模式；
+    - 不要手工写 `result_df.index.names = ["datetime", "instrument"]`，而是始终使用 `df.index.names`；
+    - 不要对结果进行 `reset_index(drop=True)` 或 `droplevel` / `swaplevel` 等会改变索引结构的操作.
+  - 所有因子实现都应遵守统一的 **输出 contract**：
+    - `index`：MultiIndex(`datetime`, `instrument`)，与 `df.index` 完全一致并已排序；
+    - `columns`：一列或多列 `float32` 类型的因子列；
+    - 输出文件固定为当前目录下的 `result.h5`，由 Qlib 上游统一加载.
+
+  【数据加载与字段名规范（必须严格遵守，用于避免 $close / close 列名错误）】
+  - 因子实现只能从当前工作目录下的 `daily_pv.h5` 读取数据，该文件索引为 MultiIndex(`datetime`, `instrument`)，列名采用 Qlib 风格:
+    `$open`, `$high`, `$low`, `$close`, `$volume`, `$amount`, `$factor`.
+  - **可选静态字段（daily_basic / 资金流原始字段）**：当前工作目录下可能存在 `static_factors.parquet`（由上游数据准备阶段复制到因子执行目录），其索引同样为 MultiIndex(`datetime`, `instrument`)，包含 daily_basic / moneyflow 等原始字段（通常以 `db_` / `mf_` 等前缀命名）。
+    - **列名白名单（硬约束）**：你只能使用 `static_factors_schema.csv` / `static_factors_schema.json` 中列出的字段名（系统会在数据目录中提供该 schema 文件的描述）。严禁凭经验“编造/猜测”字段名（例如 `mf_net_inflow_1d`、`mf_large_buy_ratio` 等）。
+    - 如果你的因子定义确实依赖这些字段（例如流通市值、流通股本、换手率、资金净流入等），你 **必须** 显式读取并 join。为了节省内存，**严禁全量加载**，必须通过 `columns` 参数仅读取必要的列：
+      ```python
+      # 必须：仅读取计算所需的列，以避免 OOM (static_factors.parquet 很大)
+      required_static_cols = ["db_circ_mv", "mf_net_amt"] # 示例：按需替换为实际所需列名
+      static_df = pd.read_parquet("static_factors.parquet", columns=required_static_cols).sort_index()
+      
+      # 注意：当前数据源的 instrument 已经是 Qlib 风格（600000.SH/000001.SZ），与 static_factors.parquet 完全对齐.
+      # 直接执行 join 即可，无需进行格式转换.
+      # 使用 join 将所需列合并到主 DataFrame 中
+      df = df.sort_index().join(static_df, how="left")
+      ```
+    - **资金净流入等派生量（推荐做法）**：如果你需要“资金净流入/净流入占比/5日净流入”等字段，但 schema 中没有直接提供，请基于 `mf_*_buy_amt` / `mf_*_sell_amt` 组合自行派生（例如把 `sm/md/lg/elg` 四档买入金额相加减去卖出金额），并可进一步除以 `amount` 或 `db_circ_mv` 做归一化，再做 rolling 聚合。
+    - 若 `static_factors.parquet` 不存在或缺少所需列，请直接报错并在下一轮改写因子定义（见下文约束），严禁用硬编码常数“拍脑袋补齐”。
+  - 在你的 `factor.py` 中，**必须首先执行如下统一重命名逻辑**，把带 `$` 前缀的字段映射为不带 `$` 的业务字段名，后续代码一律使用重命名后的字段:
+    ```python
+    import pandas as pd
+
+    df = pd.read_hdf("daily_pv.h5", key="data").sort_index()
+
+    rename_map = {
+        "$open": "open",
+        "$high": "high",
+        "$low": "low",
+        "$close": "close",
+        "$volume": "volume",
+        "$amount": "amount",
+        "$factor": "factor",
+    }
+    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+    ```
+  - **后续所有代码中，只能使用不带 `$` 的字段名**，例如：`df["close"]`、`df["volume"]`、`df["db_turnover_rate"]`、`df["mf_lg_buy_amt"]`。严禁混用 `df["$close"]` 和 `df["close"]`.
+
+  【严禁硬编码替代变量（必须严格遵守）】
+  - 如果核心价量字段（例如 `close/open/high/low/volume/amount`）缺失：
+    - **必须** `raise ValueError` 明确指出缺失字段；
+  - 如果你希望使用 `static_factors.parquet` 中的可选静态字段（例如 `db_*`/`mf_*`），但实际不存在或 join 后全为空：
+    - 优先改写因子定义为仅依赖当前可获得字段；
+    - 或在不破坏输出 contract 的前提下采用“降级版本”（例如退回到纯价量信号），但严禁用常数/拍脑袋值把公式凑出来.
+  - **总原则**：严禁为缺失字段“编造/猜测/假设”一个固定值或常数分母来把公式凑出来.
+  - 在实现依赖特定字段的因子前，必须先做列存在性检查：
+    ```python
+    required_cols = ["close", "volume", "db_circ_mv"]
+    missing = [c for c in required_cols if c not in df.columns]
+
+    if missing:
+        raise ValueError(f"Missing columns: {missing}. Please redesign factor using available fields.")
+    ```
+
+  - 当前项目中，`daily_pv.h5` 已在数据导出阶段统一剔除了所有 ST 和 *ST 股票，以及所有已退市或当前暂停上市的股票，其股票池与 Qlib bin 数据集（例如 `qlib_bin_20251209`）完全对齐。你在因子实现中可以默认研究与回测使用的是同一可交易股票集合，无需在代码中再次按 ST/退市条件过滤股票.
+  - 因子结果必须保持索引为 MultiIndex(`datetime`, `instrument`)，`index.names == ["datetime", "instrument"]`，并通过：
+    ```python
+    result_df.to_hdf("result.h5", key="data", mode="w")
+    ```
+    写入同一目录下的 `result.h5` 文件，列为一个或多个 `float32` 类型的因子列.
+  - 在 Qlib 回测与联合因子实验的 YAML 模板中，还会通过 `StaticDataLoader/NestedDataLoader` 自动加载若干**预计算因子表**（无需在每个 `factor.py` 中重复计算），例如：
+    - 全局自编码器异常检测因子表：`ae_recon_error_10d`（10 日重构误差），路径类似 `.../factors/ae_recon_error_10d/result.h5`；
+    - 每日指标预计算因子表：`daily_basic_factors/result.h5`，包含估值、市值、流动性等 `db_*` 派生因子；
+    - 后续可能扩展的资金流因子表：`capital_flow_daily/result.h5` 等.
+    这些预计算表在 Qlib 侧作为额外特征自动拼接到模型输入中，用于联合因子/策略演进；你在单一 `factor.py` 中只需专注于基于 `daily_pv.h5` 的本地因子实现，不必在脚本里重复实现 AE/daily_basic/资金流整表计算逻辑.
+
+qlib_factor_strategy: |-
+  Ensure that for every step of data processing, the data format (including indexes) is clearly explained through comments.
+  Each transformation or calculation should be accompanied by a detailed description of how the data is structured, especially focusing on key aspects like whether the data has multi-level indexing, how to access specific columns or index levels, and any operations that affect the data shape (e.g., `reset_index()`, `groupby()`, `merge()`).
+  This step-by-step explanation will ensure clarity and accuracy in data handling. For example:
+  Note: The examples below are for explanation only. In this project, you should preserve the MultiIndex(`datetime`, `instrument`) contract and avoid index-changing operations unless explicitly required.
+  1. **Start with multi-level index**:  
+    ```python
+    # The initial DataFrame has a multi-level index with 'datetime' and 'instrument'.
+    # To access the 'datetime' index, use df.index.get_level_values('datetime').
+    datetime_values = df.index.get_level_values('datetime')
+    ```
+ 
+  2. **Reset the index if necessary**:  
+    ```python
+    # Resetting the index to move 'datetime' and 'instrument' from the index to columns.
+    # This operation flattens the multi-index structure.
+    df = df.reset_index()
+    ```
+ 
+  3. **Perform groupby operations**:  
+    ```python
+    # Grouping by 'datetime' and 'instrument' to aggregate the data.
+    # After groupby, the result will maintain 'datetime' and 'instrument' as a multi-level index.
+    df_grouped = df.groupby(['datetime', 'instrument']).sum()
+    ```
+ 
+  4. **Ensure consistent datetime formats**:  
+    ```python
+    # Before merging, ensure that the 'datetime' column in both DataFrames is of the same format.
+    # Convert to datetime format if necessary.
+    df['datetime'] = pd.to_datetime(df['datetime'])
+    other_df['datetime'] = pd.to_datetime(other_df['datetime'])
+    ```
+ 
+  5. **Merge operations**:  
+    ```python
+    # When merging DataFrames, ensure you are merging on both 'datetime' and 'instrument'.
+    # If these are part of the index, reset the index before merging.
+    merged_df = pd.merge(df, other_df, on=['datetime', 'instrument'], how='inner')
+    ```
+
+qlib_factor_output_format: |-
+  Your output should be a pandas dataframe similar to the following example information:
+  <class 'pandas.core.frame.DataFrame'>
+  MultiIndex: 40914 entries, (Timestamp('2020-01-02 00:00:00'), '000001.SZ') to (Timestamp('2021-12-31 00:00:00'), '000750.SZ')
+  Data columns (total 1 columns):
+  #   Column            Non-Null Count  Dtype  
+  ---  ------            --------------  -----  
+  0   your factor name  40914 non-null  float32
+  dtypes: float32(1)
+  memory usage: <ignore>
+  Notice: The non-null count is OK to be different to the total number of entries since some instruments may not have the factor value on some days.
+  One possible format of `result.h5` may be like following:
+  datetime    instrument
+  2020-01-02  000001.SZ     -0.001796
+              000166.SZ      0.005780
+              600686.SH      0.004228
+              600712.SH      0.001298
+              600728.SH      0.005330
+                              ...
+  2021-12-31  000750.SZ      0.000000
+              000776.SZ      0.002459
+
+qlib_factor_simulator: |-
+  The factors will be sent into Qlib to train a model to predict the next several days return based on the factor values of the previous days. 
+  Qlib is an AI-oriented quantitative investment platform that aims to realize the potential, empower research, and create value using AI technologies in quantitative investment, from exploring ideas to implementing productions. Qlib supports diverse machine learning modeling paradigms. including supervised learning, market dynamics modeling, and RL.
+  User will use Qlib to automatically do the following things:
+  1. generate a new factor table based on the factor values.
+  2. train a model like LightGBM, CatBoost, LSTM or simple PyTorch model to predict the next several days return based on the factor values.
+  3. build a portfolio based on the predicted return based on a strategy.
+  4. evaluate the portfolio's performance including the return, sharpe ratio, max drawdown, and so on.
+
+qlib_factor_rich_style_description : |-
+  ### R&D Agent-Qlib: Automated Quantitative Trading & Iterative Factors Evolution Demo
+
+  #### [Overview](#_summary)
+
+  The demo showcases the iterative process of hypothesis generation, knowledge construction, and decision-making. It highlights how financial factors evolve through continuous feedback and refinement.
+
+  #### [Automated R&D](#_rdloops)
+
+  - **[R (Research)](#_research)**
+    - Iterative development of ideas and hypotheses.
+    - Continuous learning and knowledge construction.
+
+  - **[D (Development)](#_development)**
+    - Progressive implementation and code generation of factors.
+    - Automated testing and validation of financial factors.
+
+  #### [Objective](#_summary)
+
+  To demonstrate the dynamic evolution of financial factors through the Qlib platform, emphasizing how each iteration enhances the accuracy and reliability of the resulting financial factors.
+
+qlib_factor_from_report_rich_style_description : |-
+  ### R&D Agent-Qlib: Automated Quantitative Trading & Factor Extraction from Financial Reports Demo
+
+  #### [Overview](#_summary)
+
+  This demo showcases the process of extracting factors from financial research reports, implementing these factors, and analyzing their performance through Qlib backtest, continually expanding and refining the factor library.
+
+  #### [Automated R&D](#_rdloops)
+
+  - **[R (Research)](#_research)**
+    - Iterative development of ideas and hypotheses from financial reports.
+    - Continuous learning and knowledge construction.
+
+  - **[D (Development)](#_development)**
+    - Progressive factor extraction and code generation.
+    - Automated implementation and testing of financial factors.
+
+  #### [Objective](#_summary)
+
+  <table border="1" style="width:100%; border-collapse: collapse;">
+    <tr>
+      <td>💡 <strong>Innovation </strong></td>
+      <td>Tool to quickly extract and test factors from research reports.</td>
+    </tr>
+    <tr>
+      <td>⚡ <strong>Efficiency </strong></td>
+      <td>Rapid identification of valuable factors from numerous reports.</td>
+    </tr>
+    <tr>
+      <td>🗃️ <strong>Outputs </strong></td>
+      <td>Expand and refine the factor library to support further research.</td>
+    </tr>
+  </table>
+
+qlib_factor_experiment_setting: |-
+  | Dataset 📊 | Model 🤖    | Factors 🌟       | Data Split  🧮                                   |
+  |---------|----------|---------------|-------------------------------------------------|
+  | AIstock A-share (non-ST, non-delisted)  | GRU_TimeSeries_Model | Alpha158 Plus + AIstock factors | Train: 2010-01-07 to 2018-12-31 <br> Valid: 2019-01-01 to 2020-12-31 <br> Test &nbsp;: 2021-01-01 to 2025-12-01 |
+  
+  **重要说明：股票代码格式**
+  - 虽然数据集名称为 "AIstock A-share"，但所有原始 HDF5/Parquet 数据中的 `instrument` 均已统一为 **Qlib 风格**（如 `000001.SZ`, `600000.SH`）。
+  - **禁止**在因子脚本中进行任何形式的格式转换逻辑.
+  
+  #### 计算资源与训练负载建议（请优先满足以下要求，以充分利用本机 12 核 24 线程 + GPU）
+  - **训练轮数与 batch 大小**：
+    - 对于主要实验，请避免使用过小配置（如 `n_epochs < 100`、`batch_size < 256`）。
+    - 推荐配置范围：`n_epochs` 在 `200~300`；`batch_size` 以 `512` 为优先（如显存不足可降到 `256`）。
+  - **并行度设置（CPU）**：
+    - 对支持 `n_jobs` 的模型或数据处理组件，优先设置为 `n_jobs: 12`（接近物理核心数）。
+    - 如 YAML 中存在 `workers` / `num_workers` / `processes` 等字段，可设置在 `8~12` 之间，避免远高于 CPU 核心数。
+  - **GPU 使用**：
+    - 对基于 PyTorch 的时序模型（如 `GRU_TimeSeries_Model`），必须保证 `use_GPU: True`，`device: "cuda:0"`，禁止随意改成 `cpu`。
+  - **链路稳定优先**：
+    - 在加大训练负载前，先用较小循环（如 `--loop-n 1`）确认整条因子与 Qlib 训练链路完全打通：
+      - 使用 snapshot 中实际存在且可用的股票池（通常为 `instruments: all`）。
+      - 所有因子能在 `daily_pv.h5` 上成功计算并生成 `result.h5`。
+  - 只有在整条流水线不再出现 `$close` / 股票池不存在等基础报错后，才逐步增加 `n_epochs`、`batch_size` 与并行度。
+  
+  #### 股票池筛选与每日指标因子的优先使用原则
+  - 在因子与策略演进过程中，**优先使用预计算的 daily_basic 因子表（估值、市值、流动性等）做稳健化与风险控制**，再在相对“可交易/可解释”的样本上进行多因子建模与选股：
+    - 优先用于：暴露控制（规模/流动性）、winsorize/clip、分层/分组中性化、以及对极端尾部样本的惩罚（过滤应作为最后手段）；
+    - 在加入新因子前，先确保基础因子集在 IC 与回测稳定性上不再出现系统性崩坏（例如全 NaN 或显著负收益）。
+  
+  #### 策略演进优先级（当 IC 连续为 NaN 或收益显著为负时）
+  - 若最近若干轮实验中，**横截面 IC 大多为 NaN/接近 0，且组合年化收益明显为负、最大回撤过大**，请优先排查并演进以下方向，而不是盲目更换更复杂的时间序列结构：
+    1. **先修因子与标签（信号质量优先）**：
+       - 检查因子是否近似常数、是否过度稀疏、是否因对齐/merge/dropna 导致有效样本崩塌；
+       - 检查并优化标签：合理选择预测窗口（例如 1D/5D/10D 收益），并明确是绝对收益还是超额收益，确保评估指标与标签口径一致。
+    2. **用基础因子做稳健化与风险用途**：
+       - `daily_basic`（估值/市值/流动性）优先用于暴露控制与稳定性约束（必要时才做过滤）；
+       - `ae_recon_error_10d` 更适合作为异常检测/风险因子参与惩罚或过滤，而不是单独承担主要选股信号.
+    3. **控制因子数量与相关性，先跑稳 Tabular 基线**：
+       - 避免大量高度共线或极度稀疏的新因子；
+       - 先在 LightGBM / CatBoost / 简单 MLP 等 Tabular 基线下验证 IC 不再为 NaN 且收益不再系统性为负，再考虑引入更复杂的时序结构.
+
+qlib_model_background: |-
+  The model is a machine learning or deep learning structure used in quantitative investment to predict the returns and risks of a portfolio or a single asset. Models are employed by investors to generate forecasts based on historical data and identified factors, which are central to many quantitative investment strategies.
+  Each model takes the factors as input and predicts the future returns. Usually, the bigger the model is, the better the performance would be.
+  The model is defined in the following parts:
+  1. Name: The name of the model.
+  2. Description: The description of the model.
+  3. Architecture: The detailed architecture of the model, such as neural network layers or tree structures.
+  4. Hyperparameters: The hyperparameters used in the model.
+  5. Training_hyperparameters: The hyperparameters used during the training process.
+  6. ModelType: The type of the model, "Tabular" for tabular model and "TimeSeries" for time series model.
+  The model should provide clear and detailed documentation of its architecture and hyperparameters. One model should statically define one output with a fixed architecture and hyperparameters.
+
+  {% if runtime_environment is not none %}
+  ====== Runtime Environment ======
+  You have following environment to run the code:
+  {{ runtime_environment }}
+  {% endif %}
+
+qlib_model_interface: |-
+  Your python code should follow the interface to better interact with the user's system.
+  You code should contain several parts:
+  1. The import part: import the necessary libraries.
+  2. A class which is a sub-class of pytorch.nn.Module. This class should should have a init function and a forward function which inputs a tensor and outputs a tensor.
+  3. Set a variable called "model_cls" to the class you defined.
+
+  The user will save your code into a python file called "model.py". Then the user imports model_cls in file "model.py" after setting the cwd into the directory:
+  ```python
+  from model import model_cls
+  ```
+  So your python code should follow the pattern:
+  ```python
+  class XXXModel(torch.nn.Module):
+      ...
+  model_cls = XXXModel
+  ```
+
+  The model can be configured as either "Tabular" for tabular models or "TimeSeries" for time series models. For a tabular model, the input shape is (batch_size, num_features), while for a time series model, the input shape is (batch_size, num_timesteps, num_features). In both cases, the output shape of the model should be (batch_size, 1).
+  `num_features` will be directly set for the model based on the input data shape.
+  User will initialize the tabular model with the following code:
+  ```python
+  model = model_cls(num_features=num_features)
+  ```
+  User will initialize the time series model with the following code:
+  ```python
+  model = model_cls(num_features=num_features, num_timesteps=num_timesteps)
+  ```
+  No other parameters will be passed to the model so give other parameters a default value or just make them static.
+
+  Don't write any try-except block in your python code. The user will catch the exception message and provide the feedback to you. Also, don't write main function in your python code. The user will call the forward method in the model_cls to get the output tensor.
+
+  Please notice that your model should only use current features as input. The user will provide the input tensor to the model's forward function.
+
+
+qlib_model_output_format: |-
+  Your output should be a tensor with shape (batch_size, 1). 
+  The output tensor should be saved in a file named "output.pth" in the same directory as your python file.
+  The user will evaluate the shape of the output tensor so the tensor read from "output.pth" should be 8 numbers.
+
+qlib_model_simulator: |-
+  The models will be sent into Qlib to train and evaluate their performance in predicting future returns. Hypothesis is improved upon checking the feedback on the results. 
+  Qlib is an AI-oriented quantitative investment platform that aims to realize the potential, empower research, and create value using AI technologies in quantitative investment, from exploring ideas to implementing productions. Qlib supports diverse machine learning modeling paradigms, including supervised learning, market dynamics modeling, and reinforcement learning (RL).
+  User will use Qlib to automatically perform the following tasks:
+  1. Generate a baseline factor table.
+  2. Train the model defined in your class Net to predict the next several days' returns based on the factor values.
+  3. Build a portfolio based on the predicted returns using a specific strategy.
+  4. Evaluate the portfolio's performance, including metrics such as return, IC, max drawdown, and others.
+  5. Iterate on growing the hypothesis to enable model improvements based on performance evaluations and feedback.
+
+qlib_model_rich_style_description: |-
+  ### Qlib Model Evolving Automatic R&D Demo
+  
+  #### [Overview](#_summary)
+  
+  The demo showcases the iterative process of hypothesis generation, knowledge construction, and decision-making in model construction in quantitative finance. It highlights how models evolve through continuous feedback and refinement.
+  
+  #### [Automated R&D](#_rdloops)
+  
+  - **[R (Research)](#_research)**
+    - Iteration of ideas and hypotheses.
+    - Continuous learning and knowledge construction.
+  
+  - **[D (Development)](#_development)**
+    - Evolving code generation and model refinement.
+    - Automated implementation and testing of models.
+  
+  #### [Objective](#_summary)
+  
+  To demonstrate the dynamic evolution of models through the Qlib platform, emphasizing how each iteration enhances the accuracy and reliability of the resulting models. 
+
+qlib_model_experiment_setting: |-
+  | Dataset 📊 | Model 🤖    | Factors 🌟       | Data Split  🧮                                   |
+  |---------|----------|---------------|-------------------------------------------------|
+  | AIstock A-share (non-ST, non-delisted)  | 例如 GRU_TimeSeries_Model（也可替换为 LGB/MLP/Transformer 等其它模型） | 20 factors (Alpha158)  | Train: 2010-01-07 to 2018-12-31 <br> Valid: 2019-01-01 to 2020-12-31 <br> Test &nbsp;: 2021-01-01 to 2025-12-01 |
+
+  **重要说明：股票代码格式**
+  - 虽然数据集名称为 "AIstock A-share"，但所有数据源中的 `instrument` 均已统一为 **Qlib 风格**（如 `000001.SZ`, `600000.SH`）。
+  - 在研发过程中**严禁**进行格式转换.
+
+transformer_volume_price_strategy: |-
+  本段落描述的是一套 **示例型** 策略设想，主要用于展示如何将量价特征与时间序列模型（例如 Transformer）结合，用于多股票组合的研究与回测。
+
+  需要特别强调的是：
+  - 这里提到的模型类型（如 TransformerEncoder）、调仓规则、持仓股票数量（例如 30 只）、止盈止损阈值等，**仅作为示例/灵感来源**；
+  - 它们 **不对当前任务或任何具体实验构成硬性约束**，你在实际研发中可以自由选择 LightGBM、CatBoost、MLP、GRU、Transformer 等任意模型，也可以自由设计选股数量与风控规则；
+  - 本项目的其它提示词（因子/模型/回测配置）同样不强制绑定某一种模型或具体策略形态，而是以“数据格式与索引 contract 正确”为唯一刚性约束。
+
+  示例思想（可选参考）：
+  - 关注未来若干交易日（例如 1/5/10/30 日）的收益表现，而不是超长周期持有；
+  - 在收益与风险之间设定合理的目标区间（例如期望年化收益、最大回撤、单笔风险敞口上限等），并在因子设计、模型结构以及调仓规则中综合考虑；
+  - 以量价特征为一个重要维度，同时允许结合估值、市值、AE 异常度、宏观情绪等多方面信号，构建多因子与多周期的策略框架；
+  - 对于时间序列建模，可以选择 Transformer、GRU、TCN 等，也可以回到简单的截面模型（如 LGB/MLP）并配合滚动窗口特征构造完成策略设计。
+
+  总之，本段仅作为“如何构思一套较为完整的量价+时序策略”的 **示例文档**。在实际自动研发与演进过程中，你完全可以根据实验结果与任务需求，自主决定使用的模型类型、选股数量、持仓周期以及是否采用止盈/止损机制。

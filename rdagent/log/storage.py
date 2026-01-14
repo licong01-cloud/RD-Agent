@@ -11,6 +11,21 @@ from .utils import gen_datetime
 LOG_LEVEL = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
 
+class _CompatUnpickler(pickle.Unpickler):
+    def find_class(self, module: str, name: str):  # type: ignore[override]
+        if module == "pathlib" and name in {"PosixPath", "WindowsPath"}:
+            return Path
+        if module == "pathlib" and name in {"PurePosixPath", "PureWindowsPath"}:
+            from pathlib import PurePath
+
+            return PurePath
+        return super().find_class(module, name)
+
+
+def _compat_pickle_load(f):
+    return _CompatUnpickler(f).load()
+
+
 def _remove_empty_dir(path: Path) -> None:
     """
     Recursively remove empty directories.
@@ -92,7 +107,7 @@ class FileStorage(Storage):
             pid = file.parent.name
 
             with file.open("rb") as f:
-                content = pickle.load(f)
+                content = _compat_pickle_load(f)
 
             timestamp = datetime.strptime(file.stem, "%Y-%m-%d_%H-%M-%S-%f").replace(tzinfo=timezone.utc)
 

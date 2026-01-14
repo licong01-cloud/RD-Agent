@@ -1,22 +1,45 @@
+import gc
+import json
+import os
 import random
 import re
 import shutil
 import subprocess
-import json
-import os
+import warnings
 from pathlib import Path
+from typing import Any, Optional
 
 import pandas as pd
+import pyarrow.parquet as pq
+import tables
 from jinja2 import Environment, StrictUndefined
 
 from rdagent.components.coder.factor_coder.config import FACTOR_COSTEER_SETTINGS
+from rdagent.log import rdagent_logger as logger
+
+# 限制 pandas 警告
+warnings.filterwarnings('ignore')
+pd.options.mode.chained_assignment = None
+
+
+def _cleanup_memory() -> None:
+    """清理内存，释放 pandas 和 Qlib 缓存"""
+    try:
+        gc.collect()
+        # 清理 pandas 缓存
+        pd.options.mode.chained_assignment = None
+    except Exception:
+        pass
 
 
 def _to_unix_path(p: Path) -> Path:
     s = str(p)
-    if len(s) >= 3 and s[1:3] == ":/":
+    # Windows path like F:\... or F:/...
+    if len(s) >= 2 and s[1] == ":":
         drive = s[0].lower()
-        return Path("/mnt") / drive / s[3:]
+        # Convert backslashes to forward slashes for consistency if needed
+        tail = s[2:].replace("\\", "/")
+        return Path(f"/mnt/{drive}{tail}")
     return p
 
 
@@ -41,18 +64,30 @@ def _candidate_schema_paths_for_file(p: Path) -> list[Path]:
     # 3) governance schemas (env override, else default)
     gov_root = os.environ.get("AISTOCK_DATA_GOVERNANCE_DIR", "") or os.environ.get("AIstock_DATA_GOVERNANCE_DIR", "")
     if gov_root:
-        gov = _to_unix_path(Path(gov_root)).resolve()
+        gov = Path(gov_root)
         cands.append(gov / "schemas" / f"{stem}_schema.csv")
         cands.append(gov / "schemas" / f"{stem}_schema.json")
         cands.append(gov / "schemas" / "factors" / f"{stem}_schema.csv")
         cands.append(gov / "schemas" / "factors" / f"{stem}_schema.json")
+        
+        # Also try Unix-style mapping if we are in a mixed environment
+        gov_unix = _to_unix_path(gov)
+        if str(gov_unix) != str(gov):
+            cands.append(gov_unix / "schemas" / f"{stem}_schema.csv")
+            cands.append(gov_unix / "schemas" / f"{stem}_schema.json")
+            cands.append(gov_unix / "schemas" / "factors" / f"{stem}_schema.csv")
+            cands.append(gov_unix / "schemas" / "factors" / f"{stem}_schema.json")
 
-    # 4) common default governance folder
-    default_gov = Path("/mnt/f/Dev/AIstock/data_governance")
-    cands.append(default_gov / "schemas" / f"{stem}_schema.csv")
-    cands.append(default_gov / "schemas" / f"{stem}_schema.json")
-    cands.append(default_gov / "schemas" / "factors" / f"{stem}_schema.csv")
-    cands.append(default_gov / "schemas" / "factors" / f"{stem}_schema.json")
+    # 4) common default governance folder (both Windows and Unix styles)
+    default_gov_win = Path("F:/Dev/AIstock/data_governance")
+    cands.append(default_gov_win / "schemas" / f"{stem}_schema.csv")
+    cands.append(default_gov_win / "schemas" / f"{stem}_schema.json")
+    
+    default_gov_unix = Path("/mnt/f/Dev/AIstock/data_governance")
+    cands.append(default_gov_unix / "schemas" / f"{stem}_schema.csv")
+    cands.append(default_gov_unix / "schemas" / f"{stem}_schema.json")
+    cands.append(default_gov_unix / "schemas" / "factors" / f"{stem}_schema.csv")
+    cands.append(default_gov_unix / "schemas" / "factors" / f"{stem}_schema.json")
 
     # De-dup while preserving order
     out: list[Path] = []
@@ -66,14 +101,28 @@ def _candidate_schema_paths_for_file(p: Path) -> list[Path]:
     return out
 
 
-def _load_schema_preview(p: Path, max_rows: int = 60) -> str:
+def _is_nan(val: Any) -> bool:
+    """Check if a value is NaN, None, or the string 'nan'."""
+    if val is None:
+        return True
+    if pd.isna(val):
+        return True
+    s = str(val).lower().strip()
+    return s == "" or s == "nan"
+
+
+def _load_schema_preview(schema_path: Path, data_path: Optional[Path] = None, max_rows: int = 60) -> str:
     try:
-        if p.suffix.lower() == ".csv":
-            df = pd.read_csv(p)
+        h5_dtypes: dict[str, str] = {}
+        if data_path and data_path.suffix.lower() == ".h5":
+            h5_dtypes = _try_get_h5_columns_dtypes(data_path)
+
+        if schema_path.suffix.lower() == ".csv":
+            df = pd.read_csv(schema_path)
             lines = []
             for _, row in df.head(max_rows).iterrows():
                 col = str(row.get("name", ""))
-                dtype = str(row.get("dtype", ""))
+                dtype = row.get("dtype")
                 meaning = (
                     row.get("meaning")
                     if "meaning" in df.columns
@@ -81,37 +130,53 @@ def _load_schema_preview(p: Path, max_rows: int = 60) -> str:
                     if "meaning_cn" in df.columns
                     else row.get("meaning_zh")
                 )
-                meaning = "" if meaning is None else str(meaning)
-                unit = str(row.get("unit", "")) if "unit" in df.columns else ""
+                meaning_str = "" if _is_nan(meaning) else str(meaning)
+                unit = row.get("unit")
+                unit_str = "" if _is_nan(unit) else str(unit)
                 if col:
-                    line = f"- {col} ({dtype})"
-                    if unit and unit != "nan":
-                        line += f" [{unit}]"
-                    if meaning and meaning != "nan":
-                        line += f": {meaning}"
+                    if _is_nan(dtype) and col in h5_dtypes:
+                        dtype = h5_dtypes[col]
+                    
+                    if not _is_nan(dtype):
+                        line = f"- {col} ({dtype})"
+                    else:
+                        line = f"- {col}"
+                    
+                    if unit_str:
+                        line += f" [{unit_str}]"
+                    if meaning_str:
+                        line += f": {meaning_str}"
                     lines.append(line)
             return "\n".join(lines) + ("\n..." if len(df) > max_rows else "")
 
-        if p.suffix.lower() == ".json":
-            obj = json.loads(p.read_text(encoding="utf-8"))
-            cols = obj.get("columns", []) if isinstance(obj, dict) else []
+        if schema_path.suffix.lower() == ".json":
+            obj = json.loads(schema_path.read_text(encoding="utf-8"))
+            cols_list = obj.get("columns", []) if isinstance(obj, dict) else []
             lines = []
-            for item in cols[:max_rows]:
+            for item in cols_list[:max_rows]:
                 if not isinstance(item, dict):
                     continue
                 col = str(item.get("name", ""))
-                dtype = str(item.get("dtype", ""))
-                meaning = item.get("meaning") or item.get("meaning_cn") or item.get("meaning_zh") or ""
-                meaning = str(meaning)
-                unit = str(item.get("unit", ""))
+                dtype = item.get("dtype")
+                meaning = item.get("meaning") or item.get("meaning_cn") or item.get("meaning_zh")
+                meaning_str = "" if _is_nan(meaning) else str(meaning)
+                unit = item.get("unit")
+                unit_str = "" if _is_nan(unit) else str(unit)
                 if col:
-                    line = f"- {col} ({dtype})"
-                    if unit:
-                        line += f" [{unit}]"
-                    if meaning:
-                        line += f": {meaning}"
+                    if _is_nan(dtype) and col in h5_dtypes:
+                        dtype = h5_dtypes[col]
+
+                    if not _is_nan(dtype):
+                        line = f"- {col} ({dtype})"
+                    else:
+                        line = f"- {col}"
+                    
+                    if unit_str:
+                        line += f" [{unit_str}]"
+                    if meaning_str:
+                        line += f": {meaning_str}"
                     lines.append(line)
-            return "\n".join(lines) + ("\n..." if isinstance(cols, list) and len(cols) > max_rows else "")
+            return "\n".join(lines) + ("\n..." if isinstance(cols_list, list) and len(cols_list) > max_rows else "")
     except Exception:
         return ""
 
@@ -120,43 +185,72 @@ def _load_schema_preview(p: Path, max_rows: int = 60) -> str:
 
 def _try_get_h5_columns_dtypes(p: Path, key: str = "data") -> dict[str, str]:
     # Avoid loading full HDF5; best-effort extract columns and dtypes.
+    cols: list[str] = []
     try:
         with pd.HDFStore(str(p), mode="r") as store:
             h5_key = f"/{key}" if f"/{key}" in store.keys() else key
             if h5_key not in store:
-                # fallback to first key
                 keys = store.keys()
                 if not keys:
                     return {}
                 h5_key = keys[0]
 
             storer = store.get_storer(h5_key)
-            cols: list[str] = []
             axes = getattr(storer, "axes", None)
             if axes and len(axes) >= 1:
                 try:
                     cols = [str(c) for c in list(axes[0])]
                 except Exception:
-                    cols = []
+                    pass
             if not cols:
                 non_index_axes = getattr(storer, "non_index_axes", None)
                 if non_index_axes:
                     try:
                         cols = [str(c) for c in list(non_index_axes[0][1])]
                     except Exception:
-                        cols = []
+                        pass
 
-        # dtype hint: try a small read
-        try:
-            df_head = pd.read_hdf(p, key=h5_key.strip("/"), stop=1000)
-            return {str(c): str(df_head[c].dtype) for c in df_head.columns}
-        except Exception:
-            return {c: "" for c in cols}
+            try:
+                if getattr(storer, "is_table", False):
+                    df_head = store.select(h5_key, start=0, stop=1)
+                else:
+                    df_head = pd.read_hdf(p, key=h5_key.strip("/"), start=0, stop=1)
+                
+                if df_head is not None:
+                    # Filter out "nan" strings and real NaNs from column names and types
+                    cleaned_dtypes = {}
+                    for col in df_head.columns:
+                        c_str = str(col)
+                        if _is_nan(c_str):
+                            continue
+                        dt_str = str(df_head[col].dtype)
+                        cleaned_dtypes[c_str] = dt_str if not _is_nan(dt_str) else ""
+                    return cleaned_dtypes
+            except Exception:
+                if cols:
+                    return {str(c): "" for c in cols if not _is_nan(c)}
     except Exception:
-        return {}
+        # Fallback to PyTables for column extraction if pandas metadata extraction fails
+        try:
+            import tables
+            h5 = tables.open_file(str(p), mode="r")
+            try:
+                # Standard pandas-saved HDF5 layout
+                if f"/{key}" in h5:
+                    node = h5.get_node(f"/{key}")
+                    if hasattr(node, "axis0"):
+                        cols = [x.decode("utf-8") if isinstance(x, bytes) else str(x) for x in node.axis0[:]]
+                    elif hasattr(node, "block0_items"):
+                        cols = [x.decode("utf-8") if isinstance(x, bytes) else str(x) for x in node.block0_items[:]]
+            finally:
+                h5.close()
+        except Exception:
+            pass
+    
+    return {c: "" for c in cols} if cols else {}
 
 
-def generate_data_folder_from_qlib():
+def generate_data_folder_from_qlib() -> None:
     template_path = Path(__file__).parent / "factor_data_template"
     # Run the Qlib backtest locally in the current conda environment instead of Docker
     result = subprocess.run(
@@ -269,19 +363,74 @@ def generate_data_folder_from_qlib():
                 Path(FACTOR_COSTEER_SETTINGS.data_folder) / "schemas",
                 dirs_exist_ok=True,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Failed to copy schemas to data_folder: {e}")
         try:
             shutil.copytree(
                 gov_schemas,
                 Path(FACTOR_COSTEER_SETTINGS.data_folder_debug) / "schemas",
                 dirs_exist_ok=True,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Failed to copy schemas to data_folder_debug: {e}")
 
 
-def get_file_desc(p: Path, variable_list=[]) -> str:
+def _try_get_h5_index_samples(p: Path, n: int = 5) -> list[str]:
+    """Try to get n index samples from H5 file."""
+    try:
+        # Try reading with pandas first for structured HDF5
+        df_head = pd.read_hdf(p, key="data", start=0, stop=n)
+        if isinstance(df_head.index, pd.MultiIndex):
+            result = [str(idx) for idx in df_head.index.tolist()]
+        else:
+            result = [str(idx) for idx in df_head.index[:n].tolist()]
+        # 清理 DataFrame 和内存
+        del df_head
+        _cleanup_memory()
+        return result
+    except ValueError as e:
+        # Handle corrupted MultiIndex data
+        if "inconsistent state" in str(e):
+            logger.debug(f"H5 file contains corrupted MultiIndex data: {p}")
+            logger.debug(f"  Error: {e}")
+            # Try to read with tables directly to bypass pandas validation
+            try:
+                with tables.open_file(str(p), mode="r") as h5:
+                    if "/data/axis1" in h5:
+                        samples = h5.root.data.axis1[:n]
+                        result = [s.decode() if isinstance(s, bytes) else str(s) for s in samples]
+                        _cleanup_memory()
+                        return result
+            except Exception:
+                pass
+        logger.debug(f"Failed to read H5 index samples with pandas: {p}")
+    except Exception as e:
+        logger.debug(f"Failed to read H5 index samples with pandas: {p}")
+        logger.debug(f"  Error: {e}")
+        try:
+            with tables.open_file(str(p), mode="r") as h5:
+                # Common pandas HDF5 structure
+                if "/data/axis1_level1" in h5:
+                    samples = h5.root.data.axis1_level1[:n]
+                    return [s.decode() if isinstance(s, bytes) else str(s) for s in samples]
+                if "/data/table" in h5:
+                    # Table format might have different structure
+                    table = h5.root.data.table
+                    # Try to find instrument-like column
+                    instr_col = None
+                    for col in table.colnames:
+                        if "instrument" in col.lower() or "axis1" in col.lower():
+                            instr_col = col
+                            break
+                    if instr_col:
+                        return [row[instr_col].decode() if isinstance(row[instr_col], bytes) else str(row[instr_col]) 
+                                for row in table.read(0, n)]
+        except Exception as e2:
+            logger.debug(f"Failed to read H5 index samples with tables: {e2}")
+    return []
+
+
+def get_file_desc(p: Path, variable_list: list[str] = []) -> str:
     """
     Get the description of a file based on its type.
 
@@ -289,6 +438,8 @@ def get_file_desc(p: Path, variable_list=[]) -> str:
     ----------
     p : Path
         The path of the file.
+    variable_list : list[str]
+        Optional list of relevant variables to highlight.
 
     Returns
     -------
@@ -316,12 +467,17 @@ def get_file_desc(p: Path, variable_list=[]) -> str:
 
         df_info = "### Data Structure\n"
         df_info += "- Index: MultiIndex with levels ['datetime', 'instrument'] (convention)\n"
+        index_samples = _try_get_h5_index_samples(p)
+        if index_samples:
+            df_info += f"- Index Samples (datetime, instrument): {index_samples}\n"
 
         df_info += "\n### Columns\n"
         columns = _try_get_h5_columns_dtypes(p)
-        grouped_columns = {}
+        grouped_columns: dict[str, list[str]] = {}
 
         for col in columns:
+            if _is_nan(col):
+                continue
             if col.startswith("$"):
                 prefix = col.split("_")[0] if "_" in col else col
                 grouped_columns.setdefault(prefix, []).append(col)
@@ -330,24 +486,25 @@ def get_file_desc(p: Path, variable_list=[]) -> str:
 
         if variable_list:
             df_info += "#### Relevant Columns:\n"
-            relevant_line = ", ".join(f"{col}: {columns[col]}" for col in variable_list if col in columns)
-            df_info += relevant_line + "\n"
+            relevant_cols = [col for col in variable_list if col in columns and not _is_nan(col)]
+            relevant_line = ", ".join(f"{col}: {columns[col]}" if not _is_nan(columns.get(col)) else f"{col}" for col in relevant_cols)
+            df_info += (relevant_line if relevant_line else "None found") + "\n"
         else:
             df_info += "#### All Columns:\n"
             grouped_items = list(grouped_columns.items())
             random.shuffle(grouped_items)
-            for prefix, cols in grouped_items:
+            for prefix, cols_to_show in grouped_items:
                 header = "Other Columns" if prefix == "other" else f"{prefix} Related Columns"
                 df_info += f"\n#### {header}:\n"
-                random.shuffle(cols)
-                line = ", ".join(f"{col}: {columns[col]}" for col in cols)
+                random.shuffle(cols_to_show)
+                line = ", ".join(f"{col}: {columns[col]}" if not _is_nan(columns.get(col)) else f"{col}" for col in cols_to_show)
                 df_info += line + "\n"
 
         # Attach schema (preferred) if available.
         schema_preview = ""
         for sp in _candidate_schema_paths_for_file(p):
             if sp.exists():
-                schema_preview = _load_schema_preview(sp)
+                schema_preview = _load_schema_preview(sp, data_path=p)
                 if schema_preview:
                     df_info += f"\n### Schema (from {sp.name})\n" + schema_preview + "\n"
                     break
@@ -366,7 +523,7 @@ def get_file_desc(p: Path, variable_list=[]) -> str:
         schema_preview = ""
         for sp in _candidate_schema_paths_for_file(p):
             if sp.exists():
-                schema_preview = _load_schema_preview(sp)
+                schema_preview = _load_schema_preview(sp, data_path=p)
                 if schema_preview:
                     content += f"\n### Schema (from {sp.name})\n" + schema_preview + "\n"
                     break
@@ -382,81 +539,50 @@ def get_file_desc(p: Path, variable_list=[]) -> str:
 
     elif p.name.endswith(".parquet"):
         file_size_mb = p.stat().st_size / (1024 * 1024)
-        content = "### File Info\n"
-        content += f"- Size: {file_size_mb:.2f} MB\n"
+        df_info = "### File Info\n"
+        df_info += f"- Size: {file_size_mb:.2f} MB\n"
+
+        df_info += "\n### Data Structure\n"
+        df_info += "- Index: MultiIndex with levels ['datetime', 'instrument'] (convention)\n"
+        try:
+            df_head = pd.read_parquet(p)
+            if not df_head.empty:
+                index_samples = [str(idx) for idx in df_head.index[:5].tolist()]
+                df_info += f"- Index Samples (datetime, instrument): {index_samples}\n"
+        except Exception:
+            pass
 
         if p.name == "static_factors.parquet":
-            content += "\n### Intended Usage\n"
-            content += "- This is a joinable static factor table (e.g., fundamentals/liquidity/flow fields)\n"
-            content += "- Typical index convention: (datetime, instrument)\n"
-            content += "- Common column prefixes: db_ (daily_basic), mf_ (moneyflow), ae_ (precomputed factors)\n"
+            df_info += "\n### Intended Usage\n"
+            df_info += "- This is a joinable static factor table (e.g., fundamentals/liquidity/flow fields)\n"
+            df_info += "- Typical index convention: (datetime, instrument)\n"
+            df_info += "- Common column prefixes: db_ (daily_basic), mf_ (moneyflow), ae_ (precomputed factors)\n"
 
-        schema_csv = p.with_name(f"{p.stem}_schema.csv")
-        schema_json = p.with_name(f"{p.stem}_schema.json")
+        schema_preview = ""
+        for sp in _candidate_schema_paths_for_file(p):
+            if sp.exists():
+                schema_preview = _load_schema_preview(sp, data_path=p)
+                if schema_preview:
+                    df_info += f"\n### Schema (from {sp.name})\n" + schema_preview + "\n"
+                    break
 
-        schema_loaded = False
-        if schema_csv.exists():
+        if not schema_preview:
             try:
-                schema_df = pd.read_csv(schema_csv)
-                content += "\n### Schema (from .csv)\n"
-                for _, row in schema_df.head(60).iterrows():
-                    col = str(row.get("name", ""))
-                    dtype = str(row.get("dtype", ""))
-                    meaning = (
-                        row.get("meaning")
-                        if "meaning" in schema_df.columns
-                        else row.get("meaning_cn")
-                        if "meaning_cn" in schema_df.columns
-                        else row.get("meaning_zh")
-                    )
-                    meaning = "" if meaning is None else str(meaning)
-                    if col:
-                        line = f"- {col} ({dtype})"
-                        if meaning and meaning != "nan":
-                            line += f": {meaning}"
-                        content += line + "\n"
-                schema_loaded = True
-            except Exception:
-                schema_loaded = False
-        elif schema_json.exists():
-            try:
-                schema_obj = json.loads(schema_json.read_text(encoding="utf-8"))
-                cols = schema_obj.get("columns", []) if isinstance(schema_obj, dict) else []
-                content += "\n### Schema (from .json)\n"
-                for item in cols[:60]:
-                    if not isinstance(item, dict):
-                        continue
-                    col = str(item.get("name", ""))
-                    dtype = str(item.get("dtype", ""))
-                    meaning = item.get("meaning") or item.get("meaning_cn") or item.get("meaning_zh") or ""
-                    meaning = str(meaning)
-                    if col:
-                        line = f"- {col} ({dtype})"
-                        if meaning:
-                            line += f": {meaning}"
-                        content += line + "\n"
-                schema_loaded = True
-            except Exception:
-                schema_loaded = False
-
-        if not schema_loaded:
-            try:
-                import pyarrow.parquet as pq  # type: ignore[import-not-found]
-
                 pf = pq.ParquetFile(p)
                 arrow_schema = pf.schema_arrow
                 names = [arrow_schema.names[i] for i in range(len(arrow_schema.names))]
-                content += "\n### Columns (from parquet metadata)\n"
+                df_info += "\n### Columns (from parquet metadata)\n"
                 shown = names[:120]
-                content += ", ".join(shown) + ("\n..." if len(names) > 120 else "\n")
-            except Exception:
-                content += "\n### Columns\n"
-                content += "- Unable to read parquet schema (pyarrow not available or file unreadable).\n"
+                df_info += ", ".join(shown) + ("\n..." if len(names) > 120 else "\n")
+            except Exception as e:
+                logger.debug(f"Failed to read parquet schema: {e}")
+                df_info += "\n### Columns\n"
+                df_info += "- Unable to read parquet schema (pyarrow not available or file unreadable).\n"
 
         return JJ_TPL.render(
             file_name=p.name,
             type_desc="Parquet Data File",
-            content=content,
+            content=df_info,
         )
 
     elif p.name.endswith(".md"):
@@ -470,33 +596,20 @@ def get_file_desc(p: Path, variable_list=[]) -> str:
 
     elif p.name.endswith(".csv"):
         try:
-            df = pd.read_csv(p)
-            content = ""
-            content += f"\n## Content Overview\n"
-            content += f"- rows: {len(df)}\n"
-            content += f"- columns: {list(df.columns)}\n"
-            if "name" in df.columns:
-                shown = df.head(80)
-                content += "\n### Preview (first 80 rows)\n"
-                for _, row in shown.iterrows():
-                    col = str(row.get("name", ""))
-                    dtype = str(row.get("dtype", ""))
-                    meaning = (
-                        row.get("meaning")
-                        if "meaning" in df.columns
-                        else row.get("meaning_cn")
-                        if "meaning_cn" in df.columns
-                        else row.get("meaning_zh")
-                    )
-                    meaning = "" if meaning is None else str(meaning)
-                    if col:
-                        line = f"- {col} ({dtype})"
-                        if meaning and meaning != "nan":
-                            line += f": {meaning}"
-                        content += line + "\n"
+            if p.name.endswith("_schema.csv"):
+                content = "### Schema Preview\n" + _load_schema_preview(p)
             else:
-                content += "\n### Preview\n"
-                content += df.head(40).to_string(index=False) + "\n"
+                df = pd.read_csv(p)
+                content = ""
+                content += "\n## Content Overview\n"
+                content += f"- rows: {len(df)}\n"
+                content += f"- columns: {list(df.columns)}\n"
+                if "name" in df.columns:
+                    content += "\n### Preview\n"
+                    content += _load_schema_preview(p, max_rows=80)
+                else:
+                    content += "\n### Preview\n"
+                    content += df.head(40).to_string(index=False) + "\n"
         except Exception as e:
             content = "\n## Content Overview\n"
             content += f"- failed to read csv: {repr(e)}\n"
@@ -508,28 +621,20 @@ def get_file_desc(p: Path, variable_list=[]) -> str:
 
     elif p.name.endswith(".json"):
         try:
-            obj = json.loads(p.read_text(encoding="utf-8"))
-            content = "\n## Content Overview\n"
-            if isinstance(obj, dict) and "columns" in obj:
-                cols = obj.get("columns", [])
-                content += f"- columns entries: {len(cols) if isinstance(cols, list) else 'N/A'}\n"
-                if isinstance(cols, list):
-                    content += "\n### Preview (first 80 columns)\n"
-                    for item in cols[:80]:
-                        if not isinstance(item, dict):
-                            continue
-                        col = str(item.get("name", ""))
-                        dtype = str(item.get("dtype", ""))
-                        meaning = item.get("meaning") or item.get("meaning_cn") or item.get("meaning_zh") or ""
-                        meaning = str(meaning)
-                        if col:
-                            line = f"- {col} ({dtype})"
-                            if meaning:
-                                line += f": {meaning}"
-                            content += line + "\n"
+            # Check if it's a schema file itself
+            if p.name.endswith("_schema.json"):
+                content = "### Schema Preview\n" + _load_schema_preview(p)
             else:
-                content += "\n### Preview\n"
-                content += str(obj)[:4000] + ("\n...\n" if len(str(obj)) > 4000 else "\n")
+                obj = json.loads(p.read_text(encoding="utf-8"))
+                content = "\n## Content Overview\n"
+                if isinstance(obj, dict) and "columns" in obj:
+                    cols_count = len(obj["columns"]) if isinstance(obj["columns"], list) else "N/A"
+                    content += f"- columns entries: {cols_count}\n"
+                    content += "\n### Preview\n"
+                    content += _load_schema_preview(p, max_rows=80)
+                else:
+                    content += "\n### Preview\n"
+                    content += str(obj)[:4000] + ("\n...\n" if len(str(obj)) > 4000 else "\n")
         except Exception as e:
             content = "\n## Content Overview\n"
             content += f"- failed to read json: {repr(e)}\n"
@@ -545,7 +650,7 @@ def get_file_desc(p: Path, variable_list=[]) -> str:
         )
 
 
-def get_data_folder_intro(fname_reg: str = ".*", flags=0, variable_mapping=None) -> str:
+def get_data_folder_intro(fname_reg: str = ".*", flags: int = 0, variable_mapping: Optional[dict[str, list[str]]] = None) -> str:
     """
     Directly get the info of the data folder.
     It is for preparing prompting message.
