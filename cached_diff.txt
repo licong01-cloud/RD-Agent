@@ -1,0 +1,51 @@
+﻿diff --git a/rdagent/scenarios/qlib/developer/model_runner.py b/rdagent/scenarios/qlib/developer/model_runner.py
+index 862fc82a..b0c63a6b 100644
+--- a/rdagent/scenarios/qlib/developer/model_runner.py
++++ b/rdagent/scenarios/qlib/developer/model_runner.py
+@@ -30,8 +30,24 @@ def load_alpha_factors_from_yaml() -> list[str] | None:
+             logger.warning(f"Alpha鍥犲瓙閰嶇疆鏂囦欢涓嶅瓨鍦? {alpha_config_path}")
+             return None
+         
+-        with open(alpha_config_path, 'r', encoding='utf-8') as f:
+-            content = f.read()
++        # 灏濊瘯澶氱缂栫爜鏂瑰紡璇诲彇鏂囦欢
++        encodings = ['utf-8', 'gbk', 'gb2312', 'utf-16', 'latin-1']
++        content = None
++        used_encoding = None
++        
++        for encoding in encodings:
++            try:
++                with open(alpha_config_path, 'r', encoding=encoding) as f:
++                    content = f.read()
++                used_encoding = encoding
++                logger.info(f"鎴愬姛浣跨敤 {encoding} 缂栫爜璇诲彇閰嶇疆鏂囦欢")
++                break
++            except UnicodeDecodeError:
++                continue
++        
++        if content is None:
++            logger.error(f"鏃犳硶璇诲彇閰嶇疆鏂囦欢锛屽皾璇曠殑缂栫爜: {encodings}")
++            return None
+         
+         # 浣跨敤姝ｅ垯琛ㄨ揪寮忔彁鍙朿ol_list锛岄伩鍏岼inja2妯℃澘瑙ｆ瀽闂
+         import re
+@@ -159,7 +175,6 @@ class QlibModelRunner(CachedRunner[QlibModelExperiment]):
+             sota_factor_experiments_list = [
+                 base_exp for base_exp in exp.based_experiments if isinstance(base_exp, QlibFactorExperiment)
+             ]
+-            # 淇敼锛氶檷浣嶴OTA鍥犲瓙浣跨敤鏉′欢锛屼粠>1鏀逛负>=1锛岀‘淇濆彧瑕佹湁SOTA鍥犲瓙灏变娇鐢?             if len(sota_factor_experiments_list) >= 1:
+                 logger.info(f"SOTA factor processing ...")
+                 SOTA_factor = process_factor_data(sota_factor_experiments_list)
+@@ -183,11 +198,11 @@ class QlibModelRunner(CachedRunner[QlibModelExperiment]):
+                         for factor_name in alpha_factor_names:
+                             if ("feature", factor_name) in combined_factors.columns:
+                                 alpha_factors_from_sota.append(combined_factors[("feature", factor_name)])
+-                        
++
+                         # 璁板綍鍙犲姞鍓嶅悗鐨勫洜瀛愭暟閲?                         sota_factor_count = len([col for col in combined_factors.columns if col[0] == "feature"])
+                         logger.info(f"SOTA鍥犲瓙鏁伴噺: {sota_factor_count}")
+-                        
++
+                         num_features = str(RD_AGENT_SETTINGS.initial_fator_library_size + len([col for col in combined_factors.columns if col[0] == "feature"]))
+                     else:
+                         num_features = str(RD_AGENT_SETTINGS.initial_fator_library_size + len([col for col in combined_factors.columns if col[0] == "feature"]))
