@@ -71,7 +71,14 @@ class LiteLLMAPIBackend(APIBackend):
     def _create_embedding_inner_function(self, input_content_list: list[str]) -> list[list[float]]:
         """
         Call the embedding function
+        
+        Modified: 2026-02-04
+        - Added support for Alibaba Cloud Bailian text-embedding models
+        - Added encoding_format parameter (required by Bailian embedding API)
+        - Added api_base and api_key parameters from environment variables
         """
+        import os
+        
         model_name = LITELLM_SETTINGS.embedding_model
         logger.info(f"{LogColors.GREEN}Using emb model{LogColors.END} {model_name}", tag="debug_litellm_emb")
         if LITELLM_SETTINGS.log_llm_chat_content:
@@ -79,10 +86,42 @@ class LiteLLMAPIBackend(APIBackend):
                 f"{LogColors.MAGENTA}Creating embedding{LogColors.END} for: {input_content_list}",
                 tag="debug_litellm_emb",
             )
-        response = embedding(
-            model=model_name,
-            input=input_content_list,
-        )
+        
+        # Prepare embedding parameters
+        embedding_params = {
+            "model": model_name,
+            "input": input_content_list,
+        }
+        
+        # Add api_base if EMBEDDING_API_BASE is set
+        embedding_api_base = os.getenv("EMBEDDING_API_BASE")
+        if embedding_api_base:
+            embedding_params["api_base"] = embedding_api_base
+            logger.info(
+                f"{LogColors.CYAN}Using EMBEDDING_API_BASE: {embedding_api_base}{LogColors.END}",
+                tag="debug_litellm_emb",
+            )
+        
+        # Add api_key if EMBEDDING_API_KEY is set
+        embedding_api_key = os.getenv("EMBEDDING_API_KEY")
+        if embedding_api_key:
+            embedding_params["api_key"] = embedding_api_key
+            logger.info(
+                f"{LogColors.CYAN}Using EMBEDDING_API_KEY from environment{LogColors.END}",
+                tag="debug_litellm_emb",
+            )
+            
+            # Add encoding_format for Alibaba Cloud Bailian embedding models
+            # Only add when using environment variables (actual runtime scenario)
+            # Bailian text-embedding models (v1/v2/v3/v4) require explicit encoding_format parameter
+            if "text-embedding-v" in model_name or "dashscope/" in model_name:
+                embedding_params["encoding_format"] = "float"
+                logger.info(
+                    f"{LogColors.YELLOW}Added encoding_format=float for Bailian embedding model{LogColors.END}",
+                    tag="debug_litellm_emb",
+                )
+        
+        response = embedding(**embedding_params)
         response_list = [data["embedding"] for data in response.data]
         return response_list
 

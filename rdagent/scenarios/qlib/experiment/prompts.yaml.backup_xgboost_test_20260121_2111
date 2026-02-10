@@ -1,0 +1,331 @@
+############################################
+# 语言与输出约定（请勿删除或修改本段注释）
+# - 所有面向用户的自然语言解释、反馈、评审意见等，默认使用「简体中文」。
+# - 如需给出英文术语，可在中文中夹带英文，例如：动量（Momentum）、波动率（Volatility）。
+# - 后续在调整具体内容时，请保留本段注释，以保证输出语言风格的一致性。
+############################################
+
+qlib_quant_background: |-
+  Quantitative investment is a data-driven approach to asset management that relies on mathematical models, statistical techniques, and computational methods to analyze financial markets and make investment decisions. Two essential components of this approach are factors and models.
+  
+  You are one of the most authoritative quantitative researchers at a top Wall Street hedge fund. I need your expertise to develop new factors and models that can enhance our investment returns. Based on the given context, I will ask for your assistance in designing and implementing either factors or a model.
+
+  {% if runtime_environment is not none %}
+  ====== Runtime Environment ======
+  You have following environment to run the code:
+  {{ runtime_environment }}
+  {% endif %}
+
+qlib_factor_background: |-
+  The factor is a characteristic or variable used in quant investment that can help explain the returns and risks of a portfolio or a single asset. Factors are used by investors to identify and exploit sources of excess returns, and they are central to many quantitative investment strategies.
+  Each number in the factor represents a physics value to an instrument on a day.
+  User will train a model to predict the next several days return based on the factor values of the previous days.
+  The factor is defined in the following parts:
+  1. Name: The name of the factor.
+  2. Description: The description of the factor.
+  3. Formulation: The formulation of the factor.
+  4. Variables: The variables or functions used in the formulation of the factor.
+  The factor might not provide all the parts of the information above since some might not be applicable.
+  Please specifically give all the hyperparameter in the factors like the window size, look back period, and so on. One factor should statically defines one output with a static source data. For example, last 10 days momentum and last 20 days momentum should be two different factors.
+
+  对于每一个因子，请用「简体中文」给出清晰的基础解释，包括：
+  - 因子名称（可以中英结合，例如：10 日动量（Momentum_10D））；
+  - 因子的直观含义（它想刻画什么金融特性，例如动量、波动率、流动性等）；
+  - 关键超参数（如窗口长度、回看期），以及这些超参数对因子行为的影响。
+
+  {% if runtime_environment is not none %}
+  ====== Runtime Environment ======
+  You have following environment to run the code:
+  {{ runtime_environment }}
+  {% endif %}
+
+qlib_factor_interface: |-
+  {% include "scenarios.qlib.experiment.prompts_core_constraints:qlib_factor_interface_core_constraints" %}
+
+  {% include "scenarios.qlib.experiment.prompts_data_loading:qlib_factor_interface_data_loading" %}
+
+  {% include "scenarios.qlib.experiment.prompts_error_prevention:qlib_factor_interface_error_prevention" %}
+
+  {% include "scenarios.qlib.experiment.prompts_dataset_info:qlib_factor_interface_dataset_info" %}
+
+  {% include "scenarios.qlib.experiment.prompts_language_spec:qlib_factor_interface_language_spec" %}
+
+qlib_factor_strategy: |-
+  确保每一步数据处理操作都通过注释清晰说明数据格式（包括索引结构）。
+
+  **重要约束**：
+  - 在本项目因子编码中，**严禁**在最终结果上使用 `reset_index(drop=True)`、`droplevel()`、`swaplevel()` 等会改变索引结构的操作
+  - 始终保持 MultiIndex(`datetime`, `instrument`) 结构不变
+  - 如需访问索引值，使用 `df.index.get_level_values()` 方法
+  - `groupby+rolling` 后必须使用 `reset_index(level=0, drop=True)` 恢复索引
+
+  正确示例：
+  1. 访问索引值：`datetime_values = df.index.get_level_values('datetime')`
+  2. groupby+rolling：`s = s.reset_index(level=0, drop=True)`
+  3. join 操作：`df = df.join(static_df, how="left")`
+
+qlib_factor_output_format: |-
+  Your output should be a pandas dataframe similar to the following example information:
+  <class 'pandas.core.frame.DataFrame'>
+  MultiIndex: 40914 entries, (Timestamp('2020-01-02 00:00:00'), '000001.SZ') to (Timestamp('2021-12-31 00:00:00'), '000750.SZ')
+  Data columns (total 1 columns):
+  #   Column            Non-Null Count  Dtype  
+  ---  ------            --------------  -----  
+  0   your factor name  40914 non-null  float32
+  dtypes: float32(1)
+  memory usage: <ignore>
+  Notice: The non-null count is OK to be different to the total number of entries since some instruments may not have the factor value on some days.
+  One possible format of `result.h5` may be like following:
+  datetime    instrument
+  2020-01-02  000001.SZ     -0.001796
+              000166.SZ      0.005780
+              600686.SH      0.004228
+              600712.SH      0.001298
+              600728.SH      0.005330
+                              ...
+  2021-12-31  000750.SZ      0.000000
+              000776.SZ      0.002459
+
+qlib_factor_simulator: |-
+  The factors will be sent into Qlib to train a model to predict the next several days return based on the factor values of the previous days. 
+  Qlib is an AI-oriented quantitative investment platform that aims to realize the potential, empower research, and create value using AI technologies in quantitative investment, from exploring ideas to implementing productions. Qlib supports diverse machine learning modeling paradigms. including supervised learning, market dynamics modeling, and RL.
+  User will use Qlib to automatically do the following things:
+  1. generate a new factor table based on the factor values.
+  2. train a model like LightGBM, CatBoost, LSTM or simple PyTorch model to predict the next several days return based on the factor values.
+  3. build a portfolio based on the predicted return based on a strategy.
+  4. evaluate the portfolio's performance including the return, sharpe ratio, max drawdown, and so on.
+
+qlib_factor_rich_style_description : |-
+  ### R&D Agent-Qlib: Automated Quantitative Trading & Iterative Factors Evolution Demo
+
+  #### [Overview](#_summary)
+
+  The demo showcases the iterative process of hypothesis generation, knowledge construction, and decision-making. It highlights how financial factors evolve through continuous feedback and refinement.
+
+  #### [Automated R&D](#_rdloops)
+
+  - **[R (Research)](#_research)**
+    - Iterative development of ideas and hypotheses.
+    - Continuous learning and knowledge construction.
+
+  - **[D (Development)](#_development)**
+    - Progressive implementation and code generation of factors.
+    - Automated testing and validation of financial factors.
+
+  #### [Objective](#_summary)
+
+  To demonstrate the dynamic evolution of financial factors through the Qlib platform, emphasizing how each iteration enhances the accuracy and reliability of the resulting financial factors.
+
+qlib_factor_from_report_rich_style_description : |-
+  ### R&D Agent-Qlib: Automated Quantitative Trading & Factor Extraction from Financial Reports Demo
+
+  #### [Overview](#_summary)
+
+  This demo showcases the process of extracting factors from financial research reports, implementing these factors, and analyzing their performance through Qlib backtest, continually expanding and refining the factor library.
+
+  #### [Automated R&D](#_rdloops)
+
+  - **[R (Research)](#_research)**
+    - Iterative development of ideas and hypotheses from financial reports.
+    - Continuous learning and knowledge construction.
+
+  - **[D (Development)](#_development)**
+    - Progressive factor extraction and code generation.
+    - Automated implementation and testing of financial factors.
+
+  #### [Objective](#_summary)
+
+  <table border="1" style="width:100%; border-collapse: collapse;">
+    <tr>
+      <td>💡 <strong>Innovation </strong></td>
+      <td>Tool to quickly extract and test factors from research reports.</td>
+    </tr>
+    <tr>
+      <td>⚡ <strong>Efficiency </strong></td>
+      <td>Rapid identification of valuable factors from numerous reports.</td>
+    </tr>
+    <tr>
+      <td>🗃️ <strong>Outputs </strong></td>
+      <td>Expand and refine the factor library to support further research.</td>
+    </tr>
+  </table>
+
+qlib_factor_experiment_setting: |-
+  | Dataset 📊 | Data Split  🧮                                   |
+  |---------|-------------------------------------------------|
+  | AIstock A-share (non-ST, non-delisted) | Train: 2010-01-07 to 2018-12-31 <br> Valid: 2019-01-01 to 2020-12-31 <br> Test : 2021-01-01 to 2025-12-01 |
+
+  **数据说明**：
+  - `daily_pv.h5` 已剔除 ST/*ST 股票和退市股票
+  - 股票代码格式统一为 Qlib 风格（如 `000001.SZ`, `600000.SH`）
+  - **禁止**在因子脚本中进行任何形式的格式转换逻辑
+
+qlib_model_background: |-
+  The model is a machine learning or deep learning structure used in quantitative investment to predict the returns and risks of a portfolio or a single asset. Models are employed by investors to generate forecasts based on historical data and identified factors, which are central to many quantitative investment strategies.
+  Each model takes the factors as input and predicts the future returns. Usually, the bigger the model is, the better the performance would be.
+  The model is defined in the following parts:
+  1. Name: The name of the model.
+  2. Description: The description of the model.
+  3. Architecture: The detailed architecture of the model, such as neural network layers or tree structures.
+  4. Hyperparameters: The hyperparameters used in the model.
+  5. Training_hyperparameters: The hyperparameters used during the training process.
+  6. ModelType: The type of the model, "Tabular" for tabular model and "TimeSeries" for time series model.
+  The model should provide clear and detailed documentation of its architecture and hyperparameters. One model should statically define one output with a fixed architecture and hyperparameters.
+
+  {% if runtime_environment is not none %}
+  ====== Runtime Environment ======
+  You have following environment to run the code:
+  {{ runtime_environment }}
+  {% endif %}
+
+qlib_model_interface: |-
+  Your python code should follow the interface to better interact with the user's system.
+  You code should contain several parts:
+  1. The import part: import the necessary libraries.
+  2. A class which is a sub-class of pytorch.nn.Module. This class should should have a init function and a forward function which inputs a tensor and outputs a tensor.
+  3. Set a variable called "model_cls" to the class you defined.
+
+  The user will save your code into a python file called "model.py". Then the user imports model_cls in file "model.py" after setting the cwd into the directory:
+  ```python
+  from model import model_cls
+  ```
+  So your python code should follow the pattern:
+  ```python
+  class XXXModel(torch.nn.Module):
+      ...
+  model_cls = XXXModel
+  ```
+
+  The model can be configured as either "Tabular" for tabular models or "TimeSeries" for time series models. For a tabular model, the input shape is (batch_size, num_features), while for a time series model, the input shape is (batch_size, num_timesteps, num_features). In both cases, the output shape of the model should be (batch_size, 1).
+  `num_features` will be directly set for the model based on the input data shape.
+  User will initialize the tabular model with the following code:
+  ```python
+  model = model_cls(num_features=num_features)
+  ```
+  User will initialize the time series model with the following code:
+  ```python
+  model = model_cls(num_features=num_features, num_timesteps=num_timesteps)
+  ```
+  No other parameters will be passed to the model so give other parameters a default value or just make them static.
+
+  Don't write any try-except block in your python code. The user will catch the exception message and provide the feedback to you. Also, don't write main function in your python code. The user will call the forward method in the model_cls to get the output tensor.
+
+  Please notice that your model should only use current features as input. The user will provide the input tensor to the model's forward function.
+
+  **IMPORTANT NOTE FOR XGBoost IMPLEMENTATION:**
+  If the hypothesis requires XGBoost or any gradient boosting decision tree model:
+  - DO NOT implement XGBoost using PyTorch neural networks or fully connected layers to simulate decision trees.
+  - DO NOT use torch.nn.Module to create a neural network approximation of gradient boosting.
+  - XGBoost is a tree-based ensemble model, NOT a neural network. Using PyTorch layers to simulate trees is INCORRECT.
+  - Instead, you should implement XGBoost using the xgboost library directly within the torch.nn.Module interface as a wrapper.
+  - **CRITICAL**: The XGBoost model MUST be trained BEFORE the forward method is called. The Qlib framework will train your model using actual target labels (returns) before inference.
+  - Your model should provide a training method that Qlib can call, or the model should be designed to be trained externally.
+  - The forward method should ONLY perform inference using the trained model. Do NOT include training logic (model.fit) in the forward method.
+  - Example correct implementation pattern:
+    ```python
+    import torch
+    import xgboost as xgb
+    import numpy as np
+
+    class XGBoostModel(torch.nn.Module):
+        def __init__(self, num_features, n_estimators=100, max_depth=3, learning_rate=0.1, subsample=1.0, reg_alpha=0.0, reg_lambda=1.0, min_child_weight=1, gamma=0.0):
+            super().__init__()
+            self.num_features = num_features
+            self.n_estimators = n_estimators
+            self.max_depth = max_depth
+            self.learning_rate = learning_rate
+            self.subsample = subsample
+            self.reg_alpha = reg_alpha
+            self.reg_lambda = reg_lambda
+            self.min_child_weight = min_child_weight
+            self.gamma = gamma
+            # Initialize XGBoost model (untrained)
+            self.model = xgb.XGBRegressor(
+                n_estimators=n_estimators,
+                max_depth=max_depth,
+                learning_rate=learning_rate,
+                subsample=subsample,
+                reg_alpha=reg_alpha,
+                reg_lambda=reg_lambda,
+                min_child_weight=min_child_weight,
+                gamma=gamma,
+                objective='reg:squarederror',
+                random_state=42
+            )
+            self._is_fitted = False
+
+        def fit(self, X, y):
+            """Train the XGBoost model on data X and targets y."""
+            X_np = X if isinstance(X, np.ndarray) else X.detach().cpu().numpy()
+            y_np = y if isinstance(y, np.ndarray) else y.detach().cpu().numpy()
+            self.model.fit(X_np, y_np)
+            self._is_fitted = True
+
+        def forward(self, x):
+            # x is a tensor with shape (batch_size, num_features)
+            # Handle untrained model case for Qlib testing
+            if not self._is_fitted:
+                # Return zeros as dummy output for untrained model
+                batch_size = x.shape[0]
+                output = torch.zeros(batch_size, 1, dtype=torch.float32)
+            else:
+                # Convert to numpy for XGBoost prediction
+                x_np = x.detach().cpu().numpy()
+                # Perform inference only (no training in forward)
+                predictions = self.model.predict(x_np)
+                # Return as tensor with shape (batch_size, 1)
+                output = torch.tensor(predictions, dtype=torch.float32).unsqueeze(1)
+
+            # Save output tensor to output.pth as required by the scenario
+            torch.save(output, 'output.pth')
+
+            return output
+
+    model_cls = XGBoostModel
+    ```
+  - Key XGBoost hyperparameters (n_estimators, max_depth, learning_rate, subsample, reg_alpha, reg_lambda, min_child_weight, gamma) MUST be used in the XGBRegressor/XGBClassifier initialization, not ignored.
+  - The model MUST include a `fit` method that accepts training data (X, y) and trains the XGBoost model.
+  - The forward method should handle the untrained model case gracefully by returning a tensor of zeros with shape (batch_size, 1) when called before training. This is necessary for Qlib's testing workflow.
+  - The forward method should save the output tensor to 'output.pth' as required by the scenario.
+  - Never use dropout layers, ReLU activations, or sequential fully connected layers to simulate XGBoost.
+
+qlib_model_output_format: |-
+  Your output should be a tensor with shape (batch_size, 1). 
+  The output tensor should be saved in a file named "output.pth" in the same directory as your python file.
+  The user will evaluate the shape of the output tensor so the tensor read from "output.pth" should be 8 numbers.
+
+qlib_model_simulator: |-
+  The models will be sent into Qlib to train and evaluate their performance in predicting future returns. Hypothesis is improved upon checking the feedback on the results. 
+  Qlib is an AI-oriented quantitative investment platform that aims to realize the potential, empower research, and create value using AI technologies in quantitative investment, from exploring ideas to implementing productions. Qlib supports diverse machine learning modeling paradigms, including supervised learning, market dynamics modeling, and reinforcement learning (RL).
+  User will use Qlib to automatically perform the following tasks:
+  1. Generate a baseline factor table.
+  2. Train the model defined in your class Net to predict the next several days' returns based on the factor values.
+  3. Build a portfolio based on the predicted returns using a specific strategy.
+  4. Evaluate the portfolio's performance, including metrics such as return, IC, max drawdown, and others.
+  5. Iterate on growing the hypothesis to enable model improvements based on performance evaluations and feedback.
+
+qlib_model_rich_style_description: |-
+  ### Qlib Model Evolving Automatic R&D Demo
+  
+  #### [Overview](#_summary)
+  
+  The demo showcases the iterative process of hypothesis generation, knowledge construction, and decision-making in model construction in quantitative finance. It highlights how models evolve through continuous feedback and refinement.
+  
+  #### [Automated R&D](#_rdloops)
+  
+  - **[R (Research)](#_research)**
+    - Iteration of ideas and hypotheses.
+    - Continuous learning and knowledge construction.
+  
+  - **[D (Development)](#_development)**
+    - Evolving code generation and model refinement.
+    - Automated implementation and testing of models.
+  
+  #### [Objective](#_summary)
+  
+  To demonstrate the dynamic evolution of models through the Qlib platform, emphasizing how each iteration enhances the accuracy and reliability of the resulting models. 
+
+qlib_model_experiment_setting: |-
+  | Dataset 📊 | Model 🤖    | Factors 🌟       | Data Split  🧮                                   |
+  |---------|----------|---------------|-------------------------------------------------|
+  | AIstock A-share (non-ST, non-delisted)  | 例如 GRU_TimeSeries_Model（也可替换为 LGB/MLP/Transformer 等其它模型） | 20 factors (Alpha158)  | Train: 2010-01-07 to 2018-12-31 <br> Valid: 2019-01-01 to 2020-12-31 <br> Test : 2021-01-01 to 2025-12-01 |

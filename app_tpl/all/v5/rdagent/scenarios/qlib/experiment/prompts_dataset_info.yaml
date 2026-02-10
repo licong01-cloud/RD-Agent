@@ -1,0 +1,13 @@
+qlib_factor_interface_dataset_info: |-
+  【数据集信息】
+  - 当前项目中，`daily_pv.h5` 已在数据导出阶段统一剔除了所有 ST 和 *ST 股票，以及所有已退市或当前暂停上市的股票，其股票池与 Qlib bin 数据集（例如 `qlib_bin_20251209`）完全对齐。你在因子实现中可以默认研究与回测使用的是同一可交易股票集合，无需在代码中再次按 ST/退市条件过滤股票.
+  - 因子结果必须保持索引为 MultiIndex(`datetime`, `instrument`)，`index.names == ["datetime", "instrument"]`，并通过：
+    ```python
+    result_df.to_hdf("result.h5", key="data", mode="w")
+    ```
+    写入同一目录下的 `result.h5` 文件，列为一个或多个 `float32` 类型的因子列.
+  - 在 Qlib 回测与联合因子实验的 YAML 模板中，还会通过 `StaticDataLoader/NestedDataLoader` 自动加载若干**预计算因子表**（无需在每个 `factor.py` 中重复计算），例如：
+    - 全局自编码器异常检测因子表：`ae_recon_error_10d`（10 日重构误差），路径类似 `.../factors/ae_recon_error_10d/result.h5`；
+    - 每日指标预计算因子表：`daily_basic_factors/result.h5`，包含估值、市值、流动性等 `db_*` 派生因子；
+    - 后续可能扩展的资金流因子表：`capital_flow_daily/result.h5` 等.
+    这些预计算表在 Qlib 侧作为额外特征自动拼接到模型输入中，用于联合因子/策略演进；你在单一 `factor.py` 中只需专注于基于 `daily_pv.h5` 的本地因子实现，不必在脚本里重复实现 AE/daily_basic/资金流整表计算逻辑.

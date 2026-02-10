@@ -1,0 +1,190 @@
+{
+  "scenario": "all",
+  "version": "v5",
+  "created_at": "2026-02-04T15:46:09.460932",
+  "description": "去掉新因子研发的限制，整理多余的提示词",
+  "base_version": "V3",
+  "changed_files": [],
+  "files": [
+    {
+      "path": "rdagent/scenarios/qlib/experiment/__init__.py",
+      "size": 26,
+      "sha256": "14f9a6016cbcd8ac3265e2ee0820b3c0f99f7cb16e644819a29ecac4e1c42747"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/experiment/custom_loaders.py",
+      "size": 10963,
+      "sha256": "ae758945b97acb3515699f75f594b0fc46e31e9ee191a8d76c88fd0a25f7a093"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/experiment/factor_data_template/generate.py",
+      "size": 1168,
+      "sha256": "348c1a2c3423f3ad884e4bac19766e1581804676070061678a7cdf44b9a51f74"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/experiment/factor_data_template/README.md",
+      "size": 879,
+      "sha256": "c798ee6a950c6ad3ecd8e671223effd114b6942cf98adf11dbea70aa58479018"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/experiment/factor_experiment.py",
+      "size": 3297,
+      "sha256": "100a3f66be5288a478365f71fe42292601653f632d25e6db2126672af2e54162"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/experiment/factor_from_report_experiment.py",
+      "size": 497,
+      "sha256": "35f3537037455facf68c2b6bd584066c75d7aeb5dfa0fd951271c66e7ad52a4f"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/experiment/factor_template/__init__.py",
+      "size": 48,
+      "sha256": "0ef944ec76d1a1639fe43ab67bcc7a7b32e1ac54fb28e52ffd7994e627985f0e"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/experiment/factor_template/conf_baseline.yaml",
+      "size": 4030,
+      "sha256": "675fb807be28342f0059c1c1a067d7e5ca328234a1a57b2c368a62224ab0a0c4"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/experiment/factor_template/conf_combined_factors_dynamic.yaml",
+      "size": 4300,
+      "sha256": "45f083f9263abe7331035fea0cf1048a39dd6ae9733ccf86a40790b00e236091"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/experiment/factor_template/conf_combined_factors_sota_model.yaml",
+      "size": 4817,
+      "sha256": "d9b65993182de7aeb8e7ed51a0a3de5cd99f360eed16a8c1fa34c46fd04f19ec"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/experiment/factor_template/conf_combined_factors.yaml",
+      "size": 4135,
+      "sha256": "4314f772a3f86884735b1bded4e69f44ef1f32baef378776ad377042b76ae5c0"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/experiment/factor_template/custom_strategy.py",
+      "size": 22580,
+      "sha256": "f9138fbcc78fbd236680a06e13b89b000dd147450517953e0058cf8309c59004"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/experiment/factor_template/read_exp_res.py",
+      "size": 10860,
+      "sha256": "d0b9e02d035cd5f5d6b5cd59855de05fb72f6836e3e16ac5c10196526e670d09"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/experiment/factor_template/README.md",
+      "size": 723,
+      "sha256": "80cab12c38cbdf0bd7bd452c65fa53720ca4262484cb7214549e055c6083165c"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/experiment/model_experiment.py",
+      "size": 2882,
+      "sha256": "79c0fac12503f8e9dc2de210a68284f9ac662f782517fb90f323332df07d808e"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/experiment/model_template/conf_baseline_factors_model_standalone.yaml",
+      "size": 2902,
+      "sha256": "78bd21c9e54c06f2327fd6678e65aa5b4f2cf49615739277de07b9e99f3936f8"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/experiment/model_template/conf_baseline_factors_model.yaml",
+      "size": 3394,
+      "sha256": "e84c7432cac0fc936b60bc4d2f4c1a5d8f4994abe7c715e52d7bb16c6f0de2fa"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/experiment/model_template/conf_sota_factors_model.yaml",
+      "size": 4898,
+      "sha256": "cfd3321c21ab6d40064f2ec6f3857e00f5eab24fe269be0f6361b4deafa7cb22"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/experiment/model_template/read_exp_res.py",
+      "size": 10860,
+      "sha256": "d0b9e02d035cd5f5d6b5cd59855de05fb72f6836e3e16ac5c10196526e670d09"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/experiment/model_template/README.md",
+      "size": 705,
+      "sha256": "15e6b24a9ec60ca7697bc78a3d1720423b86afab1aea492a360ff7ff4b30b43e"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/experiment/prompts_core_constraints.yaml",
+      "size": 5876,
+      "sha256": "3d7117d26dd022889adf501abe9987641254ca6c36851feadd6cdc74893976d4"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/experiment/prompts_data_loading.yaml",
+      "size": 2566,
+      "sha256": "b6a94030f864adb421e1f83cc606bdeab0117181cc92110074c9fe89c59f8936"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/experiment/prompts_dataset_info.yaml",
+      "size": 1641,
+      "sha256": "80872b1c9e2e29fc3ffc67eb9178a54ce7f2b8e44bcfc61bf9e857a3185c71bd"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/experiment/prompts_error_prevention.yaml",
+      "size": 3831,
+      "sha256": "846e1d1f6cafa89cc63723d4708d01a58f94068d5943f82914f32db11750668e"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/experiment/prompts_language_spec.yaml",
+      "size": 1020,
+      "sha256": "a2ed011fc2dc6f0cc48c716834f3db8c46320fe5b7901fd814aebb56f40b3a27"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/experiment/prompts.yaml",
+      "size": 63857,
+      "sha256": "6f21452d9e50b0fa2da19bd63d10cc926882befc86d0e0f3505ff25bcec3e23e"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/experiment/quant_experiment.py",
+      "size": 8122,
+      "sha256": "3f3f8e3686391151fafd5a070886a0a1b161d2bc0795ca24a7c44335a509e743"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/experiment/utils.py",
+      "size": 28294,
+      "sha256": "206ba660db2e5445d30917cd1696e035eb76f06811b946fc2dd397056e4b7f91"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/experiment/workspace.py",
+      "size": 6058,
+      "sha256": "9622eb1f20ede7d528b0396d58b17a99954c4a75e726e3662231271b02486a81"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/factor_experiment_loader/factor_tasks_example.json",
+      "size": 649,
+      "sha256": "b953beba9c8a21311f36eb632369a151fb9dcb0d9388648febfd53c414f2b869"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/factor_experiment_loader/factor_testcases_example.json",
+      "size": 518,
+      "sha256": "1c907484535262638601f0ebd8cf70dac3d386958b7bf9cc657cf440bbe2ffd7"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/factor_experiment_loader/json_loader.py",
+      "size": 2576,
+      "sha256": "80b684f830bc71b37626a8d739f82f8a951801432e5c29841be14aa8ffe3e511"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/factor_experiment_loader/pdf_loader.py",
+      "size": 22612,
+      "sha256": "21b2b71b0c580b5bddf8ae490c128a23d993ccf3805e17b72bca5fd0a4856c51"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/factor_experiment_loader/prompts.yaml",
+      "size": 13117,
+      "sha256": "b1bb49c6a4d0e880f1107843ff2f606331f90ad5700e3d14abdf67c3134cfeec"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/factor_experiment_loader/report_list_example.json",
+      "size": 73,
+      "sha256": "bbb01e0a194e4667bd83e996f3a0b8aa7e719ca3dbd3d1da9f9efacab1a34d08"
+    },
+    {
+      "path": "rdagent/scenarios/qlib/prompts.yaml",
+      "size": 32396,
+      "sha256": "1ab3ed3a85e95696d86acc9a1d807da5088be42dc96a03313b9a7e73368b99b6"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "alpha_demo_1": {
+    "description": "A simple price momentum factor based on close price change over 5 days.",
+    "formulation": "(close_t - close_{t-5}) / close_{t-5}",
+    "variables": {
+      "close_t": "Closing price at time t",
+      "close_{t-5}": "Closing price 5 trading days before t"
+    }
+  },
+  "alpha_demo_2": {
+    "description": "A volume spike factor based on today's volume relative to 10-day average.",
+    "formulation": "volume_t / mean(volume_{t-9:t})",
+    "variables": {
+      "volume_t": "Trading volume at time t",
+      "mean(volume_{t-9:t})": "10-day moving average volume ending at t"
+    }
+  }
+}

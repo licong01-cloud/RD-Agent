@@ -195,3 +195,27 @@ qlib-main/
 .claude/
 AGENTS.md
 /qlib/
+
+# Template backups and history
+template_backups/
+backups/
+history/
+scheduler_data/
+
+# Temporary debug artifacts in root
+backfill_*.json
+cached_diff.txt
+diff.txt
+embedding_benchmark_results.json
+empty_bundle_dirs.txt
+experiment_request_demo.json
+current_py_list.txt
+remaining_py.txt
+temp_py_list.txt
+debug_tools_files.txt
+debug_tools_list.txt
+wsl_changed_files_full.txt
+quick_profit_analysis.txt
+sota_asset_scan_full.json
+sota_model_types_analysis.json
+backfill_check_before.json

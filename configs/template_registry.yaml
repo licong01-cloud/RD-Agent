@@ -1,0 +1,83 @@
+version: "v1"
+scopes:
+  - name: "scenario_qlib"
+    scenarios: ["qlib"]
+    roots:
+      - "rdagent/scenarios/qlib"
+    include:
+      - "**/*.yaml"
+      - "**/*.yml"
+      - "**/*.json"
+    exclude:
+      - "**/*.bak"
+      - "**/*~"
+      - "**/backup/**"
+      - "**/__pycache__/**"
+
+  - name: "scenario_data_science"
+    scenarios: ["data_science"]
+    roots:
+      - "rdagent/scenarios/data_science"
+    include:
+      - "**/*.yaml"
+      - "**/*.yml"
+      - "**/*.json"
+    exclude:
+      - "**/*.bak"
+      - "**/*~"
+      - "**/backup/**"
+      - "**/__pycache__/**"
+
+  - name: "scenario_kaggle"
+    scenarios: ["kaggle"]
+    roots:
+      - "rdagent/scenarios/kaggle"
+    include:
+      - "**/*.yaml"
+      - "**/*.yml"
+      - "**/*.json"
+    exclude:
+      - "**/*.bak"
+      - "**/*~"
+      - "**/backup/**"
+      - "**/__pycache__/**"
+
+  - name: "scenario_general_model"
+    scenarios: ["general_model"]
+    roots:
+      - "rdagent/scenarios/general_model"
+    include:
+      - "**/*.yaml"
+      - "**/*.yml"
+      - "**/*.json"
+    exclude:
+      - "**/*.bak"
+      - "**/*~"
+      - "**/backup/**"
+      - "**/__pycache__/**"
+
+  - name: "scenario_shared"
+    scenarios: ["shared"]
+    roots:
+      - "rdagent/scenarios/shared"
+    include:
+      - "**/*.yaml"
+      - "**/*.yml"
+      - "**/*.json"
+    exclude:
+      - "**/*.bak"
+      - "**/*~"
+      - "**/backup/**"
+      - "**/__pycache__/**"
+
+  - name: "task_config"
+    scenarios: ["all"]
+    roots:
+      - "configs"
+    include:
+      - "task_config*.json"
+    exclude:
+      - "**/*.bak"
+      - "**/*~"
+      - "**/backup/**"
+      - "**/__pycache__/**"

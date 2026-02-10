@@ -680,9 +680,16 @@ def get_data_folder_intro(fname_reg: str = ".*", flags: int = 0, variable_mappin
         # FIXME: (xiao) I think this is writing in a hard-coded way.
         # get data folder intro does not imply that we are generating the data folder.
         generate_data_folder_from_qlib()
+    # Skip standalone schema files (*_schema.csv, *_schema.json) to avoid
+    # duplicating field information that is already attached to the
+    # corresponding data file (H5/parquet) via _candidate_schema_paths_for_file().
+    _SCHEMA_SUFFIX_RE = re.compile(r"^.+_schema\.(csv|json)$", re.IGNORECASE)
+
     content_l = []
     for p in Path(FACTOR_COSTEER_SETTINGS.data_folder_debug).iterdir():
         if not p.is_file():
+            continue
+        if _SCHEMA_SUFFIX_RE.match(p.name):
             continue
         if re.match(fname_reg, p.name, flags) is not None:
             if variable_mapping:

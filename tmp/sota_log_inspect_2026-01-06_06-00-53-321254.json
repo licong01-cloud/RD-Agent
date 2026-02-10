@@ -1,0 +1,168 @@
+{
+  "task_log_dir": "F:\\Dev\\RD-Agent-main\\log\\2026-01-06_06-00-53-321254",
+  "trace_found": false,
+  "trace_candidates": [
+    {
+      "tag": "Loop_1.running.Quantitative Backtesting Chart",
+      "type": "DataFrame"
+    },
+    {
+      "tag": "Loop_0.running.Quantitative Backtesting Chart",
+      "type": "DataFrame"
+    },
+    {
+      "tag": "Loop_2.running.Quantitative Backtesting Chart",
+      "type": "DataFrame"
+    },
+    {
+      "tag": "Loop_4.running.Quantitative Backtesting Chart",
+      "type": "DataFrame"
+    },
+    {
+      "tag": "Loop_3.running.Quantitative Backtesting Chart",
+      "type": "DataFrame"
+    },
+    {
+      "tag": "Loop_5.running.Quantitative Backtesting Chart",
+      "type": "DataFrame"
+    }
+  ],
+  "tag_stats_total": 250,
+  "tag_stats_sample": [
+    [
+      "Loop_2.coding.evo_loop_0.debug_tpl",
+      249
+    ],
+    [
+      "Loop_3.coding.evo_loop_0.debug_tpl",
+      249
+    ],
+    [
+      "Loop_0.coding.evo_loop_0.debug_tpl",
+      166
+    ],
+    [
+      "Loop_1.coding.evo_loop_0.debug_tpl",
+      166
+    ],
+    [
+      "Loop_3.coding.evo_loop_1.debug_tpl",
+      166
+    ],
+    [
+      "Loop_4.coding.evo_loop_0.debug_tpl",
+      166
+    ],
+    [
+      "Loop_5.coding.evo_loop_1.debug_tpl",
+      166
+    ],
+    [
+      "Loop_5.coding.evo_loop_0.debug_tpl",
+      146
+    ],
+    [
+      "Loop_0.coding.evo_loop_1.debug_tpl",
+      83
+    ],
+    [
+      "Loop_0.coding.evo_loop_2.debug_tpl",
+      83
+    ],
+    [
+      "Loop_0.coding.evo_loop_3.debug_tpl",
+      83
+    ],
+    [
+      "Loop_2.coding.evo_loop_1.debug_tpl",
+      83
+    ],
+    [
+      "Loop_2.coding.evo_loop_2.debug_tpl",
+      83
+    ],
+    [
+      "Loop_2.coding.evo_loop_3.debug_tpl",
+      83
+    ],
+    [
+      "Loop_3.coding.evo_loop_2.debug_tpl",
+      83
+    ],
+    [
+      "Loop_3.coding.evo_loop_3.debug_tpl",
+      83
+    ],
+    [
+      "Loop_3.coding.evo_loop_4.debug_tpl",
+      83
+    ],
+    [
+      "Loop_3.coding.evo_loop_5.debug_tpl",
+      83
+    ],
+    [
+      "Loop_5.coding.evo_loop_2.debug_tpl",
+      83
+    ],
+    [
+      "Loop_5.coding.evo_loop_3.debug_tpl",
+      83
+    ],
+    [
+      "Loop_5.coding.evo_loop_4.debug_tpl",
+      83
+    ],
+    [
+      "Loop_5.coding.evo_loop_5.debug_tpl",
+      83
+    ],
+    [
+      "Loop_5.coding.evo_loop_6.debug_tpl",
+      83
+    ],
+    [
+      "Loop_5.coding.evo_loop_7.debug_tpl",
+      83
+    ],
+    [
+      "Loop_5.coding.evo_loop_8.debug_tpl",
+      83
+    ],
+    [
+      "Loop_5.coding.evo_loop_9.debug_tpl",
+      83
+    ],
+    [
+      "Loop_4.direct_exp_gen.debug_tpl",
+      67
+    ],
+    [
+      "Loop_5.direct_exp_gen.debug_tpl",
+      67
+    ],
+    [
+      "Loop_0.direct_exp_gen.debug_tpl",
+      64
+    ],
+    [
+      "Loop_1.direct_exp_gen.debug_tpl",
+      64
+    ]
+  ],
+  "sota_tag_hits": [],
+  "last_sota_factor_index": null,
+  "last_sota_factor_type": null,
+  "sota_factors_count": 0,
+  "sota_factors_sample": [],
+  "sota_exp_to_submit_found": false,
+  "sota_loop_id": null,
+  "sota_score": null,
+  "sota_stat": null,
+  "model_exp_index": null,
+  "model_exp_type": null,
+  "model_workspace": null,
+  "combined_factors_exists": null,
+  "combined_factors_cols_len": null,
+  "combined_factors_cols_sample": null
+}

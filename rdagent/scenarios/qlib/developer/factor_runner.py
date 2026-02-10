@@ -232,12 +232,15 @@ class QlibFactorRunner(CachedRunner[QlibFactorExperiment]):
 
         if exp.based_experiments:
             SOTA_factor = None
-            # Filter and retain only QlibFactorExperiment instances
+            # Filter and retain only QlibFactorExperiment instances that are SOTA (feedback.decision=True)
+            # based_experiments should already contain only SOTA factors from factor_proposal.py
             sota_factor_experiments_list = [
                 base_exp for base_exp in exp.based_experiments if isinstance(base_exp, QlibFactorExperiment)
             ]
+            # Only process SOTA factors if we have at least 2 experiments (including baseline)
             if len(sota_factor_experiments_list) > 1:
                 logger.info(f"SOTA factor processing ...")
+                logger.info(f"Processing {len(sota_factor_experiments_list)} SOTA factor experiments")
                 SOTA_factor = process_factor_data(sota_factor_experiments_list)
 
             logger.info(f"New factor processing ...")

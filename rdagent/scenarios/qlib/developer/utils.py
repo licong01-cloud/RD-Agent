@@ -23,6 +23,7 @@ def process_factor_data(exp_or_list: List[QlibFactorExperiment] | QlibFactorExpe
     if isinstance(exp_or_list, QlibFactorExperiment):
         exp_or_list = [exp_or_list]
     factor_dfs = []
+    error_message = ""
 
     # Collect all exp's dataframes
     for exp in exp_or_list:
@@ -40,7 +41,6 @@ def process_factor_data(exp_or_list: List[QlibFactorExperiment] | QlibFactorExpe
                     ],  # only execute successfully feedback
                     n=RD_AGENT_SETTINGS.multi_proc_n,
                 )
-                error_message = ""
                 for message, df in message_and_df_list:
                     # Check if factor generation was successful
                     if df is not None and "datetime" in df.index.names:

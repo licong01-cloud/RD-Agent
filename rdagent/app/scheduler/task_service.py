@@ -11,18 +11,20 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Any
 
-from .models import DatasetRecord, TaskRecord
 from .config_service import PROJECT_ROOT
+from .models import DatasetRecord, TaskRecord
 
 DATA_DIR = PROJECT_ROOT / "scheduler_data"
 TASK_FILE = DATA_DIR / "tasks.jsonl"
 DATASET_FILE = DATA_DIR / "datasets.jsonl"
-LOG_DIR = PROJECT_ROOT / "log" / "scheduler_tasks"
+# 使用git_ignore_folder避免污染项目根目录
+LOG_DIR = PROJECT_ROOT / "git_ignore_folder" / "logs" / "scheduler_tasks"
 RESULT_FILE = DATA_DIR / "results.jsonl"
+LOCAL_TZ = timezone(timedelta(hours=8))
 
 
 def _ensure_files() -> None:
@@ -33,7 +35,7 @@ def _ensure_files() -> None:
             f.write_text("", encoding="utf-8")
 
 
-def _load_jsonl(path: Path):
+def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     _ensure_files()
     items = []
     with path.open("r", encoding="utf-8") as f:
@@ -44,42 +46,42 @@ def _load_jsonl(path: Path):
     return items
 
 
-def _append_jsonl(path: Path, obj) -> None:
+def _append_jsonl(path: Path, obj: dict[str, Any]) -> None:
     _ensure_files()
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(obj, default=str) + "\n")
 
 
 # Dataset operations
-def list_datasets() -> List[DatasetRecord]:
+def list_datasets() -> list[DatasetRecord]:
     return [DatasetRecord(**d) for d in _load_jsonl(DATASET_FILE)]
 
 
 def create_dataset(rec: DatasetRecord) -> DatasetRecord:
-    rec.created_at = datetime.utcnow()
+    rec.created_at = datetime.now(LOCAL_TZ)
     _append_jsonl(DATASET_FILE, asdict(rec))
     return rec
 
 
 # Task operations
-def list_tasks() -> List[TaskRecord]:
+def list_tasks() -> list[TaskRecord]:
     return [TaskRecord(**t) for t in _load_jsonl(TASK_FILE)]
 
 
 def create_task(rec: TaskRecord) -> TaskRecord:
-    rec.created_at = datetime.utcnow()
+    rec.created_at = datetime.now(LOCAL_TZ)
     rec.updated_at = rec.created_at
     _append_jsonl(TASK_FILE, asdict(rec))
     return rec
 
 
-def update_task_status(task_id: str, status: str) -> Optional[TaskRecord]:
+def update_task_status(task_id: str, status: str) -> TaskRecord | None:
     tasks = _load_jsonl(TASK_FILE)
     updated = None
     for t in tasks:
         if str(t.get("id")) == str(task_id) or t.get("name") == task_id:
             t["status"] = status
-            t["updated_at"] = datetime.utcnow().isoformat()
+            t["updated_at"] = datetime.now(LOCAL_TZ).isoformat()
             updated = TaskRecord(**t)
     # rewrite file
     TASK_FILE.write_text("", encoding="utf-8")
@@ -88,7 +90,7 @@ def update_task_status(task_id: str, status: str) -> Optional[TaskRecord]:
     return updated
 
 
-def get_task(task_id: str) -> Optional[TaskRecord]:
+def get_task(task_id: str) -> TaskRecord | None:
     for t in _load_jsonl(TASK_FILE):
         if str(t.get("id")) == str(task_id) or t.get("name") == task_id:
             return TaskRecord(**t)
@@ -119,7 +121,7 @@ def record_result(task_id: str, result: dict) -> None:
     _append_jsonl(RESULT_FILE, payload)
 
 
-def list_results(task_id: Optional[str] = None) -> list:
+def list_results(task_id: str | None = None) -> list[dict[str, Any]]:
     items = _load_jsonl(RESULT_FILE)
     if task_id:
         items = [i for i in items if str(i.get("task_id")) == str(task_id)]
@@ -127,15 +129,15 @@ def list_results(task_id: Optional[str] = None) -> list:
 
 
 __all__ = [
-    "list_datasets",
-    "create_dataset",
-    "list_tasks",
-    "create_task",
-    "update_task_status",
-    "get_task",
-    "append_task_log",
-    "read_task_log",
-    "list_results",
     "DATA_DIR",
     "LOG_DIR",
+    "append_task_log",
+    "create_dataset",
+    "create_task",
+    "get_task",
+    "list_datasets",
+    "list_results",
+    "list_tasks",
+    "read_task_log",
+    "update_task_status",
 ]

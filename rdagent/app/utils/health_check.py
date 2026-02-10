@@ -80,12 +80,19 @@ def test_chat(chat_model, chat_api_key, chat_api_base):
 def test_embedding(embedding_model, embedding_api_key, embedding_api_base):
     logger.info(f"🧪 Testing embedding model: {embedding_model}")
     try:
-        response = embedding(
-            model=embedding_model,
-            api_key=embedding_api_key,
-            api_base=embedding_api_base,
-            input="Hello world!",
-        )
+        # Modified: 2026-02-04 - Add encoding_format for Alibaba Cloud Bailian embedding models
+        embedding_params = {
+            "model": embedding_model,
+            "api_key": embedding_api_key,
+            "api_base": embedding_api_base,
+            "input": "Hello world!",
+        }
+        
+        # Bailian text-embedding models require explicit encoding_format parameter
+        if "text-embedding-v" in embedding_model or "dashscope/" in embedding_model:
+            embedding_params["encoding_format"] = "float"
+        
+        response = embedding(**embedding_params)
         logger.info("✅ Embedding test passed.")
         return True
     except Exception as e:
@@ -100,12 +107,19 @@ def env_check():
             f"You can run a command like this: `dotenv set BACKEND rdagent.oai.backend.LiteLLMAPIBackend`"
         )
 
-    if "DEEPSEEK_API_KEY" in os.environ:
+    # 优先读取 Embedding 专用配置
+    embedding_api_key = os.getenv("EMBEDDING_API_KEY") or os.getenv("LITELLM_PROXY_API_KEY")
+    embedding_api_base = os.getenv("EMBEDDING_API_BASE") or os.getenv("LITELLM_PROXY_API_BASE")
+    embedding_model = os.getenv("EMBEDDING_MODEL")
+
+    # Chat 配置
+    if "DASHSCOPE_API_KEY" in os.environ:
+        chat_api_key = os.getenv("DASHSCOPE_API_KEY")
+        chat_api_base = os.getenv("OPENAI_API_BASE")
+        chat_model = os.getenv("CHAT_MODEL")
+    elif "DEEPSEEK_API_KEY" in os.environ:
         chat_api_key = os.getenv("DEEPSEEK_API_KEY")
         chat_model = os.getenv("CHAT_MODEL")
-        embedding_model = os.getenv("EMBEDDING_MODEL")
-        embedding_api_key = os.getenv("LITELLM_PROXY_API_KEY")
-        embedding_api_base = os.getenv("LITELLM_PROXY_API_BASE")
         if "DEEPSEEK_API_BASE" in os.environ:
             chat_api_base = os.getenv("DEEPSEEK_API_BASE")
         elif "OPENAI_API_BASE" in os.environ:
@@ -116,9 +130,6 @@ def env_check():
         chat_api_key = os.getenv("OPENAI_API_KEY")
         chat_api_base = os.getenv("OPENAI_API_BASE")
         chat_model = os.getenv("CHAT_MODEL")
-        embedding_model = os.getenv("EMBEDDING_MODEL")
-        embedding_api_key = chat_api_key
-        embedding_api_base = chat_api_base
     else:
         logger.error("No valid configuration was found, please check your .env file.")
 

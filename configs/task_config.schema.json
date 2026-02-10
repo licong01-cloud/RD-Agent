@@ -1,0 +1,134 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RD-Agent TaskConfig",
+  "type": "object",
+  "description": "TaskConfig for building app_tpl bundles and running RD-Agent loops.",
+  "properties": {
+    "task_id": {
+      "type": "string",
+      "description": "Task identifier used in manifest metadata."
+    },
+    "scenario": {
+      "type": "string",
+      "default": "qlib",
+      "description": "Scenario name (default: qlib)."
+    },
+    "version": {
+      "type": "string",
+      "description": "Template version under app_tpl/<scenario>/<version>."
+    },
+    "app_tpl": {
+      "type": "string",
+      "description": "Relative app_tpl path; overrides scenario/version when provided."
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "model_evolve",
+        "factor_evolve",
+        "quant_evolve",
+        "model_retrain",
+        "model",
+        "factor",
+        "quant"
+      ],
+      "description": "RDLoop mode for aistock_task_runner."
+    },
+    "loop_n": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Number of loops to run."
+    },
+    "all_duration": {
+      "type": "string",
+      "description": "Time budget passed to --all_duration (e.g. 2h, 30m)."
+    },
+    "template_base": {
+      "type": "string",
+      "enum": ["default", "none"],
+      "default": "default",
+      "description": "Copy default templates before applying overrides."
+    },
+    "template_files": {
+      "type": "array",
+      "description": "Additional template files to inject into the bundle.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Relative path under repo root."
+          },
+          "source": {
+            "type": "string",
+            "enum": ["default", "inline"],
+            "default": "default",
+            "description": "Use inline content or copy from repo."
+          },
+          "content": {
+            "type": "string",
+            "description": "Inline content when source=inline."
+          }
+        },
+        "required": ["path"],
+        "allOf": [
+          {
+            "if": {"properties": {"source": {"const": "inline"}}},
+            "then": {"required": ["content"]}
+          }
+        ],
+        "additionalProperties": false
+      }
+    },
+    "template_description": {
+      "type": "string",
+      "description": "Description of this template version."
+    },
+    "base_version": {
+      "type": "string",
+      "description": "Base template version this bundle derives from (e.g., v0)."
+    },
+    "changed_files": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Key files changed in this template version."
+    },
+    "prompt_patch": {
+      "type": "object",
+      "description": "Patch instructions for prompts.yaml keys.",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "replace": {"type": "string"},
+          "prepend": {"type": "array", "items": {"type": "string"}},
+          "append": {"type": "array", "items": {"type": "string"}}
+        },
+        "additionalProperties": false
+      }
+    },
+    "model_allowlist": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Optional model allowlist injected into prompts."
+    },
+    "factor_allowlist": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Optional factor allowlist injected into prompts."
+    },
+    "sota_factor_task_path": {
+      "type": "string",
+      "description": "Path to SOTA factor workspace (absolute or repo-relative)."
+    },
+    "runtime_env": {
+      "type": "object",
+      "description": "Extra environment variables to pass into RD-Agent.",
+      "additionalProperties": {"type": "string"}
+    }
+  },
+  "required": ["mode"],
+  "anyOf": [
+    {"required": ["app_tpl"]},
+    {"required": ["version"]}
+  ]
+}

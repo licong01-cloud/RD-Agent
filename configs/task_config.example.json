@@ -1,0 +1,35 @@
+{
+  "task_id": "demo-task-001",
+  "scenario": "qlib",
+  "version": "v1",
+  "mode": "model_evolve",
+  "loop_n": 2,
+  "all_duration": "2h",
+  "template_base": "default",
+  "template_description": "Qlib 模型演进 v1：增加模型/因子白名单并更新提示词约束",
+  "base_version": "v0",
+  "changed_files": [
+    "rdagent/scenarios/qlib/prompts.yaml",
+    "rdagent/scenarios/qlib/experiment/prompts.yaml"
+  ],
+  "model_allowlist": ["LGBModel", "XGBModel"],
+  "factor_allowlist": ["Alpha158", "Alpha360"],
+  "prompt_patch": {
+    "model_hypothesis_specification": {
+      "append": [
+        "IMPORTANT: Use only the allowed models above.",
+        "IMPORTANT: Provide a concise model rationale in the hypothesis."
+      ]
+    }
+  },
+  "template_files": [
+    {
+      "path": "rdagent/scenarios/qlib/experiment/prompts.yaml",
+      "source": "default"
+    }
+  ],
+  "sota_factor_task_path": "workspace/sota_task",
+  "runtime_env": {
+    "RD_AGENT_SETTINGS__LOG_LEVEL": "INFO"
+  }
+}

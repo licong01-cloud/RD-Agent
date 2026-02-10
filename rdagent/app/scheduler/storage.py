@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import List, Optional
 
 from .models import TemplateHistoryRecord
-from .config_service import HISTORY_ROOT, backup_file
+
+HISTORY_ROOT = Path(__file__).resolve().parents[3] / "history"
 
 META_FILE = HISTORY_ROOT / ".meta_history.jsonl"
 
@@ -53,4 +54,4 @@ def rollback_file(src: Path, backup_path: Path) -> Path:
     return src
 
 
-__all__ = ["append_history", "list_history", "rollback_file", "META_FILE"]
+__all__ = ["append_history", "list_history", "rollback_file", "META_FILE", "HISTORY_ROOT"]

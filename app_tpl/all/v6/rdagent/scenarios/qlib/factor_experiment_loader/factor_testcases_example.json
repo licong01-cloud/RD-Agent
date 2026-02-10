@@ -1,0 +1,11 @@
+{
+  "alpha_demo_test_1": {
+    "description": "Test case for a simple momentum factor using daily close price.",
+    "formulation": "(close_t - close_{t-5}) / close_{t-5}",
+    "variables": {
+      "close_t": "Closing price at time t",
+      "close_{t-5}": "Closing price 5 trading days before t"
+    },
+    "gt_code": "import pandas as pd\n\ndata_pv = pd.read_hdf('daily_pv.h5')\nclose = data_pv['$close']\nresult = (close - close.shift(5)) / close.shift(5)\nresult.to_hdf('result.h5', key='data')\n"
+  }
+}

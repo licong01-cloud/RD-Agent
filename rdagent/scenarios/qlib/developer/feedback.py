@@ -77,7 +77,7 @@ class QlibFactorExperiment2Feedback(Experiment2Feedback):
         # Generate the system prompt
         if isinstance(self.scen, QlibQuantScenario):
             sys_prompt = T("scenarios.qlib.prompts:factor_feedback_generation.system").r(
-                scenario=self.scen.get_scenario_all_desc(action="factor")
+                scenario=self.scen.get_scenario_all_desc(filtered_tag="feedback")
             )
         else:
             sys_prompt = T("scenarios.qlib.prompts:factor_feedback_generation.system").r(
@@ -137,7 +137,7 @@ class QlibModelExperiment2Feedback(Experiment2Feedback):
         # Generate the system prompt
         if isinstance(self.scen, QlibQuantScenario):
             sys_prompt = T("scenarios.qlib.prompts:model_feedback_generation.system").r(
-                scenario=self.scen.get_scenario_all_desc(action="model")
+                scenario=self.scen.get_scenario_all_desc(filtered_tag="feedback")
             )
         else:
             sys_prompt = T("scenarios.qlib.prompts:factor_feedback_generation.system").r(
@@ -166,17 +166,6 @@ class QlibModelExperiment2Feedback(Experiment2Feedback):
 
         # Parse the JSON response to extract the feedback
         response_json_hypothesis = json.loads(response)
-
-        # Call the APIBackend to generate the response for hypothesis feedback
-        response_hypothesis = APIBackend().build_messages_and_create_chat_completion(
-            user_prompt=user_prompt,
-            system_prompt=sys_prompt,
-            json_mode=True,
-            json_target_type=Dict[str, str | bool | int],
-        )
-
-        # Parse the JSON response to extract the feedback
-        response_json_hypothesis = json.loads(response_hypothesis)
         return HypothesisFeedback(
             observations=response_json_hypothesis.get("Observations", "No observations provided"),
             hypothesis_evaluation=response_json_hypothesis.get("Feedback for Hypothesis", "No feedback provided"),

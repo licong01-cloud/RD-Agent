@@ -22,7 +22,7 @@ extract_model_formulation_system: |-
                 "batch_size": 256,
                 "weight_decay": 1e-4,
             }
-            "model_type": "Tabular or TimeSeries or Graph or XGBoost"  # Should be one of "Tabular", "TimeSeries", "Graph", or "XGBoost"
+            "model_type": "Tabular or TimeSeries"  # Should be one of "Tabular" or "TimeSeries"
         }
     }
     such format content should be begin with ```json and end with ``` and the content should be in json format.

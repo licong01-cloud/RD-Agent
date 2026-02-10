@@ -265,6 +265,32 @@ def _build_schema(df: pd.DataFrame) -> list[dict[str, Any]]:
         "mf_main_net_amt_ratio_20d": "sum_20d(mf_main_net_amt)/sum_20d(amount)，主力净流入强度20日滚动；分母为0或缺失=>NaN",
         "mf_elg_net_amt_ratio_5d": "sum_5d(mf_elg_net_amt)/sum_5d(amount)，特大单净流入强度5日滚动；分母为0或缺失=>NaN",
         "mf_elg_net_amt_ratio_20d": "sum_20d(mf_elg_net_amt)/sum_20d(amount)，特大单净流入强度20日滚动；分母为0或缺失=>NaN",
+        # bak_basic (historical fundamentals)
+        "bb_pe_dyn": "动态市盈率",
+        "bb_total_assets": "总资产（元）",
+        "bb_liquid_assets": "流动资产（元）",
+        "bb_fixed_assets": "固定资产（元）",
+        "bb_reserved": "公积金",
+        "bb_reserved_pershare": "每股公积金",
+        "bb_eps": "每股收益",
+        "bb_bvps": "每股净资产",
+        "bb_undp": "未分配利润",
+        "bb_per_undp": "每股未分配利润",
+        "bb_rev_yoy": "营收同比增长率(%)",
+        "bb_profit_yoy": "利润同比增长率(%)",
+        "bb_gpr": "毛利率(%)",
+        "bb_npr": "净利率(%)",
+        "bb_holder_num": "股东人数",
+        # cyq_perf (chip distribution performance)
+        "cp_his_low": "历史最低价",
+        "cp_his_high": "历史最高价",
+        "cp_cost_5pct": "5%成本分位（筹码分布）",
+        "cp_cost_15pct": "15%成本分位（筹码分布）",
+        "cp_cost_50pct": "50%成本分位（筹码分布中位数）",
+        "cp_cost_85pct": "85%成本分位（筹码分布）",
+        "cp_cost_95pct": "95%成本分位（筹码分布）",
+        "cp_weight_avg": "加权平均成本",
+        "cp_winner_rate": "胜率（获利比例）",
         # precomputed (traceable via precompute_daily_basic_factors.py)
         "value_pe_inv": "倒数市盈率（估值因子）：1/db_pe_ttm（优先）或 1/db_pe；分母为0或缺失=>NaN",
         "value_pb_inv": "倒数市净率（估值因子）：1/db_pb；分母为0或缺失=>NaN",
@@ -281,6 +307,10 @@ def _build_schema(df: pd.DataFrame) -> list[dict[str, Any]]:
             source = "daily_basic_raw"
         elif col_str.startswith("mf_"):
             source = "moneyflow_raw_or_factor"
+        elif col_str.startswith("bb_"):
+            source = "bak_basic_raw"
+        elif col_str.startswith("cp_"):
+            source = "cyq_perf_raw"
         elif col_str.startswith("ae_"):
             source = "ae_factor"
         else:
@@ -408,6 +438,10 @@ def _schema_cols_from_parquet_metadata(path: Path) -> list[dict[str, Any]] | Non
             source = "daily_basic_raw"
         elif name.startswith("mf_"):
             source = "moneyflow_raw_or_factor"
+        elif name.startswith("bb_"):
+            source = "bak_basic_raw"
+        elif name.startswith("cp_"):
+            source = "cyq_perf_raw"
         elif name.startswith("ae_"):
             source = "ae_factor"
         else:
@@ -703,6 +737,8 @@ def main() -> None:
 
     daily_basic_path = snapshot_root / "daily_basic.h5"
     moneyflow_path = snapshot_root / "moneyflow.h5"
+    bak_basic_path = snapshot_root / "bak_basic.h5"
+    cyq_perf_path = snapshot_root / "cyq_perf.h5"
     daily_pv_path = snapshot_root / "daily_pv.h5"
 
     print("[INFO] snapshot_root:", snapshot_root)
@@ -714,6 +750,20 @@ def main() -> None:
 
     print("[INFO] Loading raw moneyflow.h5 ...")
     df_mf_raw = _read_table(moneyflow_path, "moneyflow_raw")
+
+    df_bb_raw = None
+    if bak_basic_path.exists():
+        print("[INFO] Loading raw bak_basic.h5 ...")
+        df_bb_raw = _read_table(bak_basic_path, "bak_basic_raw")
+    else:
+        print(f"[WARN] bak_basic.h5 not found: {bak_basic_path}")
+
+    df_cp_raw = None
+    if cyq_perf_path.exists():
+        print("[INFO] Loading raw cyq_perf.h5 ...")
+        df_cp_raw = _read_table(cyq_perf_path, "cyq_perf_raw")
+    else:
+        print(f"[WARN] cyq_perf.h5 not found: {cyq_perf_path}")
 
     df_pv = None
     if daily_pv_path.exists():
@@ -728,6 +778,10 @@ def main() -> None:
     # Keep raw fields, but to avoid name collisions we keep their existing prefixes.
     dfs.append(df_db_raw)
     dfs.append(df_mf_raw)
+    if df_bb_raw is not None:
+        dfs.append(df_bb_raw)
+    if df_cp_raw is not None:
+        dfs.append(df_cp_raw)
 
     cand_tables: list[tuple[str, Path]] = [
         ("daily_basic_factors", aistock_factors_root / "daily_basic_factors" / "result.pkl"),
@@ -762,10 +816,30 @@ def main() -> None:
     if not df_mf_derived.empty:
         dfs.append(df_mf_derived)
 
-    print("[INFO] Concatenating tables (axis=1) ...")
-    df_merged = pd.concat(dfs, axis=1)
+    # Convert all tables to float32 before merging to reduce memory footprint.
+    for idx in range(len(dfs)):
+        if dfs[idx] is not None and not dfs[idx].empty:
+            for c in dfs[idx].columns:
+                if dfs[idx][c].dtype != np.float32:
+                    dfs[idx][c] = dfs[idx][c].astype(np.float32)
+
+    print("[INFO] Merging tables (sequential join to reduce memory) ...")
+    df_merged = dfs[0].sort_index()
+    for i, df_next in enumerate(dfs[1:], 1):
+        if df_next is None or df_next.empty:
+            continue
+        df_next = df_next.sort_index()
+        # Drop columns already present in merged to avoid duplicates
+        overlap_cols = df_merged.columns.intersection(df_next.columns)
+        if len(overlap_cols) > 0:
+            df_next = df_next.drop(columns=overlap_cols)
+        if df_next.empty:
+            continue
+        print(f"  [INFO] Joining table {i}/{len(dfs)-1}: {len(df_next.columns)} cols, merged so far: {df_merged.shape} ...")
+        df_merged = df_merged.join(df_next, how="left")
     df_merged = df_merged.sort_index()
-    df_merged = df_merged.loc[:, ~df_merged.columns.duplicated(keep="last")]
+    # Free intermediate list
+    del dfs
 
     schema_cols: list[dict[str, Any]]
     if args.schema_only and out_path.exists():
