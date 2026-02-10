@@ -34,7 +34,7 @@ MAX_API_RETRIES = int(os.getenv("MAX_API_RETRIES", 5))
 DEFAULT_NUM_WORKERS = int(os.getenv("DEFAULT_NUM_WORKERS", 2))
 MAX_SOTA_CANDIDATES = int(os.getenv("MAX_SOTA_CANDIDATES", 6))
 
-logger.add("selector.log")
+logger.add("/tmp/selector.log")
 # ==============================================================================
 # ## SOTA Selector Implementations
 # ==============================================================================

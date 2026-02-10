@@ -430,7 +430,7 @@ def _try_get_h5_index_samples(p: Path, n: int = 5) -> list[str]:
     return []
 
 
-def get_file_desc(p: Path, variable_list: list[str] = []) -> str:
+def get_file_desc(p: Path, variable_list: list[str] = [], exclude_columns: set[str] | None = None) -> str:
     """
     Get the description of a file based on its type.
 
@@ -440,6 +440,9 @@ def get_file_desc(p: Path, variable_list: list[str] = []) -> str:
         The path of the file.
     variable_list : list[str]
         Optional list of relevant variables to highlight.
+    exclude_columns : set[str] | None
+        Column names to exclude from the description (used to avoid
+        duplicating fields already described by other data files).
 
     Returns
     -------
@@ -571,7 +574,12 @@ def get_file_desc(p: Path, variable_list: list[str] = []) -> str:
                 pf = pq.ParquetFile(p)
                 arrow_schema = pf.schema_arrow
                 names = [arrow_schema.names[i] for i in range(len(arrow_schema.names))]
-                df_info += "\n### Columns (from parquet metadata)\n"
+                if exclude_columns:
+                    unique_names = [n for n in names if n not in exclude_columns]
+                    df_info += f"\n### Columns (from parquet metadata, {len(names) - len(unique_names)} columns shared with H5 files omitted)\n"
+                    names = unique_names
+                else:
+                    df_info += "\n### Columns (from parquet metadata)\n"
                 shown = names[:120]
                 df_info += ", ".join(shown) + ("\n..." if len(names) > 120 else "\n")
             except Exception as e:
@@ -685,15 +693,43 @@ def get_data_folder_intro(fname_reg: str = ".*", flags: int = 0, variable_mappin
     # corresponding data file (H5/parquet) via _candidate_schema_paths_for_file().
     _SCHEMA_SUFFIX_RE = re.compile(r"^.+_schema\.(csv|json)$", re.IGNORECASE)
 
+    data_dir = Path(FACTOR_COSTEER_SETTINGS.data_folder_debug)
+    all_files = sorted(p for p in data_dir.iterdir() if p.is_file())
+
+    # Two-pass approach: first process H5 files to collect their column names,
+    # then process parquet files with those columns excluded to avoid duplication.
+    h5_described_columns: set[str] = set()
     content_l = []
-    for p in Path(FACTOR_COSTEER_SETTINGS.data_folder_debug).iterdir():
-        if not p.is_file():
-            continue
+
+    # Pass 1: H5 and non-parquet files
+    for p in all_files:
         if _SCHEMA_SUFFIX_RE.match(p.name):
             continue
-        if re.match(fname_reg, p.name, flags) is not None:
-            if variable_mapping:
-                content_l.append(get_file_desc(p, variable_mapping.get(p.stem, [])))
-            else:
-                content_l.append(get_file_desc(p))
+        if p.suffix.lower() == ".parquet":
+            continue
+        if re.match(fname_reg, p.name, flags) is None:
+            continue
+        if variable_mapping:
+            content_l.append(get_file_desc(p, variable_mapping.get(p.stem, [])))
+        else:
+            content_l.append(get_file_desc(p))
+        # Collect H5 column names (strip $ prefix) for dedup
+        if p.suffix.lower() == ".h5":
+            cols = _try_get_h5_columns_dtypes(p)
+            for col in cols:
+                h5_described_columns.add(col.lstrip("$"))
+
+    # Pass 2: Parquet files with H5-described columns excluded
+    for p in all_files:
+        if _SCHEMA_SUFFIX_RE.match(p.name):
+            continue
+        if p.suffix.lower() != ".parquet":
+            continue
+        if re.match(fname_reg, p.name, flags) is None:
+            continue
+        if variable_mapping:
+            content_l.append(get_file_desc(p, variable_mapping.get(p.stem, []), exclude_columns=h5_described_columns or None))
+        else:
+            content_l.append(get_file_desc(p, exclude_columns=h5_described_columns or None))
+
     return "\n----------------- file splitter -------------\n".join(content_l)
