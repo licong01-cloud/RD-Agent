@@ -38,6 +38,8 @@ class LLMHypothesisGen(HypothesisGen):
             scenario=(
                 self.scen.get_scenario_all_desc(filtered_tag=self.targets)
                 if self.targets in ["factor", "model"]
+                else self.scen.get_scenario_all_desc(filtered_tag="hypothesis")
+                if self.targets == "factors"
                 else self.scen.get_scenario_all_desc(filtered_tag="hypothesis_and_experiment")
             ),
             hypothesis_output_format=context_dict["hypothesis_output_format"],
@@ -91,12 +93,14 @@ class LLMHypothesis2Experiment(Hypothesis2Experiment[Experiment]):
 
     @wait_retry(retry_n=5)
     def convert(self, hypothesis: Hypothesis, trace: Trace) -> Experiment:
-        print(f"=== LLMHypothesis2Experiment.convert 被调用 ===")
         context, json_flag = self.prepare_context(hypothesis, trace)
-        print(f"=== prepare_context 完成 ===")
         system_prompt = T(".prompts:hypothesis2experiment.system_prompt").r(
             targets=self.targets,
-            scenario=trace.scen.get_scenario_all_desc(filtered_tag=self.targets),
+            scenario=(
+                trace.scen.get_scenario_all_desc(filtered_tag="experiment_design")
+                if self.targets == "factors"
+                else trace.scen.get_scenario_all_desc(filtered_tag=self.targets)
+            ),
             experiment_output_format=context["experiment_output_format"],
         )
         user_prompt = T(".prompts:hypothesis2experiment.user_prompt").r(
@@ -115,11 +119,9 @@ class LLMHypothesis2Experiment(Hypothesis2Experiment[Experiment]):
             RAG=context["RAG"],
         )
 
-        print(f"=== 准备调用LLM ===")
         resp = APIBackend().build_messages_and_create_chat_completion(
             user_prompt, system_prompt, json_mode=json_flag, json_target_type=dict[str, dict[str, str | dict]]
         )
-        print(f"=== LLM调用完成，准备调用convert_response ===")
 
         return self.convert_response(resp, hypothesis, trace)
 

@@ -81,7 +81,7 @@ class FactorCodeEvaluator(FactorEvaluator):
             scenario=(
                 self.scen.get_scenario_all_desc(
                     target_task,
-                    filtered_tag="feature",
+                    filtered_tag="code_review",
                     simple_background=FACTOR_COSTEER_SETTINGS.simple_background,
                 )
                 if self.scen is not None
@@ -177,7 +177,7 @@ class FactorOutputFormatEvaluator(FactorEvaluator):
         gen_df_info_str = f"The user is currently working on a feature related task.\nThe output dataframe info is:\n{buffer.getvalue()}"
         system_prompt = T(".prompts:evaluator_output_format_system").r(
             scenario=(
-                self.scen.get_scenario_all_desc(implementation.target_task, filtered_tag="feature")
+                self.scen.get_scenario_all_desc(implementation.target_task, filtered_tag="output_format_check")
                 if self.scen is not None
                 else "No scenario description."
             )
@@ -486,7 +486,7 @@ class FactorFinalDecisionEvaluator(FactorEvaluator):
     ) -> Tuple:
         system_prompt = T(".prompts:evaluator_final_decision_v1_system").r(
             scenario=(
-                self.scen.get_scenario_all_desc(target_task, filtered_tag="feature")
+                self.scen.get_scenario_all_desc(target_task, filtered_tag="final_decision")
                 if self.scen is not None
                 else "No scenario description."
             )

@@ -33,7 +33,7 @@ class FactorMultiProcessEvolvingStrategy(MultiProcessEvolvingStrategy):
         queried_similar_error_knowledge_to_render: list,
     ) -> str:
         error_summary_system_prompt = T(".prompts:evolving_strategy_error_summary_v2_system").r(
-            scenario=self.scen.get_scenario_all_desc(target_task),
+            scenario=self.scen.get_scenario_all_desc(target_task, filtered_tag="code_review"),
             factor_information_str=target_task.get_task_information(),
             code_and_feedback=queried_former_failed_knowledge_to_render[-1].get_implementation_and_feedback_str(),
         )
@@ -93,7 +93,7 @@ class FactorMultiProcessEvolvingStrategy(MultiProcessEvolvingStrategy):
             target_factor_task_information
         ][1]
         system_prompt = T(".prompts:evolving_strategy_factor_implementation_v1_system").r(
-            scenario=self.scen.get_scenario_all_desc(target_task, filtered_tag="feature"),
+            scenario=self.scen.get_scenario_all_desc(target_task, filtered_tag="coding"),
             queried_former_failed_knowledge=queried_former_failed_knowledge_to_render,
         )
         queried_similar_successful_knowledge_to_render = queried_similar_successful_knowledge
