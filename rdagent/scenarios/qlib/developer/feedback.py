@@ -8,6 +8,7 @@ from rdagent.core.experiment import Experiment
 from rdagent.core.proposal import Experiment2Feedback, HypothesisFeedback, Trace
 from rdagent.log import rdagent_logger as logger
 from rdagent.oai.llm_utils import APIBackend
+from rdagent.scenarios.qlib.experiment.factor_experiment import QlibFactorScenario
 from rdagent.scenarios.qlib.experiment.quant_experiment import QlibQuantScenario
 from rdagent.utils import convert2bool
 from rdagent.utils.agent.tpl import T
@@ -75,7 +76,7 @@ class QlibFactorExperiment2Feedback(Experiment2Feedback):
         combined_result = process_results(current_result, sota_result)
 
         # Generate the system prompt
-        if isinstance(self.scen, QlibQuantScenario):
+        if isinstance(self.scen, (QlibQuantScenario, QlibFactorScenario)):
             sys_prompt = T("scenarios.qlib.prompts:factor_feedback_generation.system").r(
                 scenario=self.scen.get_scenario_all_desc(filtered_tag="factor_feedback")
             )

@@ -68,7 +68,41 @@ class QlibFactorScenario(Scenario):
     def get_scenario_all_desc(
         self, task: Task | None = None, filtered_tag: str | None = None, simple_background: bool | None = None
     ) -> str:
-        """A static scenario describer"""
+        """A static scenario describer with fine-grained filtered_tag support."""
+
+        def _background_only() -> str:
+            return f"""Background of the scenario:
+{self.background}
+"""
+
+        def _common_desc() -> str:
+            return f"""Background of the scenario:
+{self.background}
+The source data you can use:
+{self.get_source_data_desc(task)}
+"""
+
+        # ===== Fine-grained branches (aligned with QlibQuantScenario) =====
+        if filtered_tag == "hypothesis":
+            return _common_desc() + f"The simulator user can use to test your factor:\n{self.simulator}\n"
+        elif filtered_tag == "experiment_design":
+            return _common_desc() + f"The simulator user can use to test your factor:\n{self.simulator}\n"
+        elif filtered_tag == "coding":
+            return (_common_desc()
+                    + f"The interface you should follow to write the runnable code:\n{self.interface}\n"
+                    + f"The output of your code should be in the format:\n{self.output_format}\n")
+        elif filtered_tag == "code_review":
+            return (_background_only()
+                    + f"The interface you should follow to write the runnable code:\n{self.interface}\n"
+                    + f"The output of your code should be in the format:\n{self.output_format}\n")
+        elif filtered_tag == "output_format_check":
+            return f"The output of your code should be in the format:\n{self.output_format}\n"
+        elif filtered_tag == "final_decision":
+            return _background_only()
+        elif filtered_tag == "factor_feedback":
+            return _background_only() + f"The simulator user can use to test your factor:\n{self.simulator}\n"
+
+        # ===== Original branches (backward compatibility) =====
         if simple_background:
             return f"""Background of the scenario:
 {self.background}"""
