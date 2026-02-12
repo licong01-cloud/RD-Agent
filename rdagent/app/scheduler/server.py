@@ -60,6 +60,7 @@ def _register_dataset_routes(app: FastAPI) -> None:
 
 
 def _register_template_routes(app: FastAPI) -> None:
+    # --- existing ---
     @app.post("/templates/publish")
     def publish_templates(payload: Annotated[dict, DEFAULT_BODY]) -> dict:
         return api_stub.api_publish_templates(payload)
@@ -71,6 +72,67 @@ def _register_template_routes(app: FastAPI) -> None:
     @app.post("/templates/rollback")
     def rollback_template(payload: Annotated[dict, DEFAULT_BODY]) -> dict:
         return api_stub.api_rollback_template(payload)
+
+    # --- P2 new APIs ---
+    @app.get("/templates")
+    def list_templates(scenario: str | None = None) -> dict:
+        return api_stub.api_list_templates(scenario)
+
+    @app.get("/templates/{scenario}/{version}/files")
+    def list_template_files(scenario: str, version: str) -> dict:
+        return api_stub.api_list_template_files(scenario, version)
+
+    @app.get("/templates/{scenario}/{version}/file")
+    def get_template_file(scenario: str, version: str, path: str = "") -> dict:
+        return api_stub.api_get_template_file(scenario, version, path)
+
+    @app.post("/templates/{scenario}/{version}/file")
+    def save_template_file(scenario: str, version: str, payload: Annotated[dict, DEFAULT_BODY]) -> dict:
+        return api_stub.api_save_template_file(
+            scenario, version,
+            payload.get("path", ""),
+            payload.get("content", ""),
+        )
+
+    @app.delete("/templates/{scenario}/{version}")
+    def delete_template(scenario: str, version: str) -> dict:
+        return api_stub.api_delete_template(scenario, version)
+
+    @app.post("/templates/{scenario}/{version}/apply")
+    def apply_template(scenario: str, version: str, payload: Annotated[dict, DEFAULT_BODY]) -> dict:
+        return api_stub.api_apply_template(
+            scenario, version,
+            force=bool(payload.get("force", False)),
+            backup=bool(payload.get("backup", True)),
+        )
+
+    @app.get("/templates/sync-status")
+    def get_sync_status() -> dict:
+        return api_stub.api_get_sync_status()
+
+    @app.post("/templates/{scenario}/{version}/refresh-sha256")
+    def refresh_template_sha256(scenario: str, version: str) -> dict:
+        return api_stub.api_refresh_template_sha256(scenario, version)
+
+    @app.get("/templates/backups")
+    def list_backups() -> dict:
+        return api_stub.api_list_backups()
+
+    @app.post("/templates/backups/rollback")
+    def rollback_from_backup(payload: Annotated[dict, DEFAULT_BODY]) -> dict:
+        backup_id = payload.get("backup_id", "")
+        if not backup_id:
+            return {"error": "backup_id is required"}
+        return api_stub.api_rollback_from_backup(backup_id)
+
+    # --- P3: env-based activation ---
+    @app.post("/templates/{scenario}/{version}/activate-env")
+    def activate_template_env(scenario: str, version: str) -> dict:
+        return api_stub.api_activate_template_env(scenario, version)
+
+    @app.get("/templates/active-env")
+    def get_active_env_template() -> dict:
+        return api_stub.api_get_active_env_template()
 
 
 def _register_config_routes(app: FastAPI) -> None:

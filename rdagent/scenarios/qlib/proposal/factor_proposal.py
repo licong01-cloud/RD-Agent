@@ -35,10 +35,16 @@ class QlibFactorHypothesisGen(FactorHypothesisGen):
         context_dict = {
             "hypothesis_and_feedback": hypothesis_and_feedback,
             "last_hypothesis_and_feedback": last_hypothesis_and_feedback,
+            # [AIstock] 原始代码鼓励ML因子，与因子层禁止ML训练的约束冲突，已注释
+            # "RAG": (
+            #     "Try the easiest and fastest factors to experiment with from various perspectives first."
+            #     if len(trace.hist) < 15
+            #     else "Now, you need to try factors that can achieve high IC (e.g., machine learning-based factors)."
+            # ),
             "RAG": (
                 "Try the easiest and fastest factors to experiment with from various perspectives first."
                 if len(trace.hist) < 15
-                else "Now, you need to try factors that can achieve high IC (e.g., machine learning-based factors)."
+                else "Now, you need to try factors that can achieve high IC (e.g., cross-sectional ranking signals, non-linear price-volume combinations, multi-scale statistical features). Do NOT use machine learning training in factor scripts."
             ),
             "hypothesis_output_format": T("scenarios.qlib.prompts:factor_hypothesis_output_format").r(),
             "hypothesis_specification": T("scenarios.qlib.prompts:factor_hypothesis_specification").r(),

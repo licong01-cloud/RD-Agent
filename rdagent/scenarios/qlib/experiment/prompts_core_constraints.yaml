@@ -13,8 +13,15 @@ qlib_factor_interface_core_constraints: |-
   【统一因子脚本模板（必须遵守，LLM 只能在中间区域写逻辑）】
   - 因子脚本应严格采用如下整体骨架，其中 **仅允许在标记的"FACTOR COMPUTATION AREA"内编写/修改代码**.
     - 在该区域内，你可以根据本轮假设自由设计因子与信号逻辑，不局限于简单的动量/波动率/量价关系；
-    - 说明：Alpha158/AE/daily_basic 等特征通常在 Qlib 训练/回测侧由 DataHandler/YAML 进行拼接并作为模型输入；单个 `factor.py` 的运行时输入默认只保证 `daily_pv.h5`，若需要使用 `daily_basic/moneyflow` 等静态字段，必须显式读取并 join `static_factors.parquet`；
-    - 本轮实验不强制策略必须依赖"量价因子"，重点在于保证数据格式与索引 contract 正确的前提下，充分释放模型与因子的演进空间。
+    - 说明：Alpha158/AE/daily_basic/bak_basic/cyq_perf/moneyflow 等特征通常在 Qlib 训练/回测侧由 DataHandler/YAML 进行拼接并作为模型输入；单个 `factor.py` 的运行时输入默认只保证 `daily_pv.h5`，若需要使用 `daily_basic(db_*)`、`moneyflow(mf_*)`、`bak_basic(bb_*)`、`cyq_perf(cp_*)` 等静态字段，必须显式读取并 join `static_factors.parquet`；本轮实验不强制策略必须依赖"量价因子"，重点在于保证数据格式与索引 contract 正确的前提下，充分释放因子的演进空间。
+    - **【禁止机器学习训练】**（硬约束）：
+      - 严禁 import 或调用 `sklearn`、`lightgbm`、`xgboost`、`catboost`、`torch`、`tensorflow`、`keras` 等 ML 库；
+      - 严禁执行 `.fit()`、`.fit_transform()`、`.fit_predict()`、`.backward()`、`optimizer.step()` 等训练操作；
+      - 严禁使用 `shift(-1)` 构造"未来收益率"作为训练标签或因子输出。
+    - **【计算效率约束】**（硬约束）：
+      - 严禁对全量数据使用纯 Python for 循环逐行遍历（如 `for idx in range(len(group)): ... iloc[idx]`）；
+      - 必须使用 pandas/numpy 向量化操作（`groupby().rolling()`、`groupby().transform()`、`np.where()` 等）；
+      - 自定义滚动窗口计算应使用 `numba.jit` 或 `rolling().apply()` 等高效方式。
 
     ```python
     import pandas as pd

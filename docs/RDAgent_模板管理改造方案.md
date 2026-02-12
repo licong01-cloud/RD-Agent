@@ -80,23 +80,81 @@
 
 ## 三、改造方案
 
-### 3.1 P0：source_data 去重（已实施）
-- 修改 `get_data_folder_intro()` 排除纯 schema 文件
-- 修复 `QlibModelExperiment2Feedback` 重复 LLM 调用
+### 3.1 P0：source_data 去重（已实施 ✓）
 
-### 3.2 P1：基础修复
-- 修复 `aistock_task_runner.py` 中 `app_tpl` 值计算
-- `.gitignore` 补充 `backups/`、`history/`、`.env.backup*` 等
-- 根目录清理
+**修改文件**：`rdagent/scenarios/qlib/experiment/utils.py`
 
-### 3.3 P2：API 统一
-- RDAgent 侧新增模板管理 REST API
-- AIstock 侧改造为调用 RDAgent API
+**修改内容**：
+1. `get_data_folder_intro()` 排除独立 schema 文件（`*_schema.csv`、`*_schema.json`）
+2. 两轮处理：先处理 H5 文件并收集列名，再处理 parquet 时排除已描述的列
+3. 新增 `_extract_schema_column_names()` 辅助函数，从 schema 文件提取列名作为 H5 元数据提取失败时的补充
+4. `get_file_desc()` 新增 `exclude_columns` 参数，parquet 分支（schema 和 metadata 两条路径）均支持列过滤
 
-### 3.4 P3：参数化模板切换
-- 使用 `APP_TPL` 参数替代文件拷贝
-- 统一配置状态管理
+**修改文件**：`rdagent/scenarios/qlib/developer/feedback.py`
 
-### 3.5 P4：备份目录迁移
-- `backups/` → `git_ignore_folder/template_backups/`
+**修改内容**：
+5. 删除 `QlibModelExperiment2Feedback.generate_feedback()` 中对同一 prompt 的第二次重复 LLM 调用
+
+**验证结果**：
+- 文件数：9 → 7（排除 2 个独立 schema 文件）
+- parquet schema 列：92 → 34（排除 58 个与 H5 重复的列）
+- 总输出：7785 字符，7 个文件段
+
+### 3.2 P1：基础修复（已实施 ✓）
+
+**修改文件**：`template_tools/aistock_task_runner.py`
+- 修复 `_resolve_app_tpl()` 路径计算：`app_tpl/{scenario}/{version}` → `../app_tpl/{scenario}/{version}/rdagent`
+- 默认 scenario 从 `qlib` 改为 `all`
+
+**修改文件**：`.gitignore`
+- 补充 `backups/`、`history/`、`scheduler_data/` 目录
+- 补充根目录临时文件模式
+
+**根目录清理**：
+- 临时脚本移至 `debug_tools/`
+- 临时数据文件移至 `debug_tools/`
+
+### 3.3 P2：API 统一（待实施）
+
+**目标**：AIstock 侧所有对 RDAgent 文件的操作改为通过 RDAgent API 完成。
+
+**AIstock 侧直接操作 RDAgent 文件的操作清单**：
+
+| 操作 | 函数/API | 直接文件操作 | 改造方案 |
+|------|---------|-------------|---------|
+| 模板列表 | `_collect_template_items()` | 读取 `app_tpl/manifest.json` | 新增 RDAgent API: `GET /templates/list` |
+| 发布模板 | `publish_template()` | 写入 `app_tpl/` | 已有 RDAgent API: `POST /templates/publish` |
+| 读取文件 | `get_template_file()` | 读取 `app_tpl/{path}` | 新增 RDAgent API: `GET /templates/{sc}/{ver}/file` |
+| 保存文件 | `save_template_file()` | 写入 `app_tpl/{path}` | 新增 RDAgent API: `POST /templates/{sc}/{ver}/file` |
+| 删除模板 | `delete_template()` | 删除 `app_tpl/` 目录 | 新增 RDAgent API: `DELETE /templates/{sc}/{ver}` |
+| 刷新SHA256 | `refresh_template_sha256()` | 读写 manifest | 新增 RDAgent API: `POST /templates/{sc}/{ver}/refresh-sha256` |
+| **应用模板** | `_apply_template_files()` | 拷贝到 `rdagent/` | **P3 替代：设置 APP_TPL 参数** |
+| **创建备份** | `_create_backup()` | 拷贝 `rdagent/` | **P3 替代：APP_TPL 无需备份运行时文件** |
+| **回滚** | `_rollback_from_backup()` | 拷贝到 `rdagent/` | **P3 替代：切换 APP_TPL 参数** |
+| **验证** | `_verify_template_applied()` | 读取 `rdagent/` SHA256 | **P3 替代：APP_TPL 自动加载** |
+| **同步状态** | `get_sync_status()` | 读取 `rdagent/` | **P3 替代：检查 APP_TPL 值** |
+
+**RDAgent 侧需新增 API**：
+1. `GET /templates/list?scenario=xxx` - 列出模板（替代 AIstock 直接扫描 app_tpl/）
+2. `GET /templates/{sc}/{ver}/files` - 文件列表
+3. `GET /templates/{sc}/{ver}/file?path=xxx` - 读取文件
+4. `POST /templates/{sc}/{ver}/file?path=xxx` - 保存文件
+5. `DELETE /templates/{sc}/{ver}` - 删除模板
+6. `POST /templates/{sc}/{ver}/refresh-sha256` - 刷新 SHA256
+7. `GET /templates/active` - 获取当前激活模板（APP_TPL 值）
+8. `POST /templates/activate` - 激活模板（设置 APP_TPL）
+
+### 3.4 P3：参数化模板切换（待实施）
+
+**目标**：使用 `APP_TPL` 参数替代文件拷贝，消除"应用模板"操作。
+
+**改造要点**：
+- "应用模板" = 设置 `RD_AGENT_SETTINGS__APP_TPL=../app_tpl/{sc}/{ver}/rdagent`
+- "回滚" = 切换 APP_TPL 到之前的版本
+- "验证" = 检查 APP_TPL 值是否指向正确目录
+- "备份" = 不再需要（app_tpl/ 目录本身就是版本化的）
+- 激活状态统一存储在 RDAgent 侧（.env 或运行时配置）
+
+### 3.5 P4：备份目录迁移（待实施）
+- `backups/` → `git_ignore_folder/template_backups/`（或直接删除，P3 后不再需要）
 - `history/` → `git_ignore_folder/template_history/`

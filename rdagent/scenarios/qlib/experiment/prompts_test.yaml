@@ -1,0 +1,8 @@
+# TEST TEMPLATE - EDITED by test_template_management_full.py
+# This file has been edited during testing.
+test_prompt:
+  system: |
+    You are an EDITED test prompt for template management testing.
+    This is version test_v99 (edited).
+  user: |
+    Please confirm this is an EDITED test prompt.

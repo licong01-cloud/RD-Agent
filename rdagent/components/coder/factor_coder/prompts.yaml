@@ -198,9 +198,15 @@ evaluator_final_decision_v1_system: |-
 
   Please response the critic in the json format. Here is an example structure for the JSON output, please strictly follow the format:
   {
-      "final_decision": True,
-      "final_feedback": "The final feedback message",
+      "final_decision": true,
+      "final_feedback": "The final feedback message"
   }
+
+  IMPORTANT JSON output constraints:
+  - The "final_feedback" field must be plain text only. Do NOT use markdown code blocks (``` or ```python) inside the JSON value.
+  - Do NOT include code snippets wrapped in triple backticks in any JSON field.
+  - If you need to reference code, describe it in plain text (e.g., "add a line like: series = df.groupby(...)...").
+  - The JSON output must be valid and parseable. Use proper JSON boolean values: true/false (not True/False).
 
 evaluator_final_decision_v1_user: |-
   --------------Factor information:---------------

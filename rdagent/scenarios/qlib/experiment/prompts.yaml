@@ -322,8 +322,12 @@ factor_hypothesis_specification: |-
     - Concisely explain why these factors are expected to work.
     - Avoid complex or combined factors initially.
   3. **Gradual Complexity Increase:**
-    - Introduce more complex factors (e.g. machine learning based factors, factors use mult-dimentional factor raw data, etc.) as more experimental results are gathered.
+    - Introduce more complex factors (e.g. factors use multi-dimensional factor raw data, cross-sectional ranking signals, non-linear price-volume combinations, etc.) as more experimental results are gathered.
     - Combine factors only after simpler ones are tested and validated.
+    - **严禁提出任何涉及机器学习模型训练的因子方案**（包括但不限于 sklearn、LightGBM、XGBoost、PyTorch、TensorFlow 等）。因子应专注于基于数学公式、统计量、技术指标的确定性计算。
+  3a. **计算效率约束:**
+    - 严禁提出需要纯 Python for 循环逐行遍历全量数据的方案，必须使用 pandas/numpy 向量化操作。
+    - 单个因子的计算时间应控制在 **10 分钟以内**。
   4. **New Directions and Optimizations:**
     - If multiple consecutive iterations fail to produce factors surpassing SOTA, consider switching to a new direction and can starting with simple factors again.
     - If optimizing a specific type of factor, proceed from simple to complex.
@@ -343,7 +347,7 @@ factor_experiment_output_format: |-
           }
       },
       "factor name 2": {
-          "description": "description of factor 2, start with its type, e.g. [Machine Learning based Factor]",
+          "description": "description of factor 2, start with its type, e.g. [Money Flow Factor]",
           "formulation": "latex formulation of factor 2",
           "variables": {
               "variable or function name 1": "description of variable or function 1",
@@ -390,8 +394,15 @@ qlib_factor_interface: |-
   【统一因子脚本模板（必须遵守，LLM 只能在中间区域写逻辑）】
   - 因子脚本应严格采用如下整体骨架，其中 **仅允许在标记的“FACTOR COMPUTATION AREA”内编写/修改代码**.
     - 在该区域内，你可以根据本轮假设自由设计因子与信号逻辑，不局限于简单的动量/波动率/量价关系；
-    - 说明：Alpha158/AE/daily_basic 等特征通常在 Qlib 训练/回测侧由 DataHandler/YAML 进行拼接并作为模型输入；单个 `factor.py` 的运行时输入默认只保证 `daily_pv.h5`，若需要使用 `daily_basic/moneyflow` 等静态字段，必须显式读取并 join `static_factors.parquet`；
-    - 本轮实验不强制策略必须依赖“量价因子”，重点在于保证数据格式与索引 contract 正确的前提下，充分释放模型与因子的演进空间。
+    - 说明：Alpha158/AE/daily_basic/bak_basic/cyq_perf/moneyflow 等特征通常在 Qlib 训练/回测侧由 DataHandler/YAML 进行拼接并作为模型输入；单个 `factor.py` 的运行时输入默认只保证 `daily_pv.h5`，若需要使用 `daily_basic(db_*)`、`moneyflow(mf_*)`、`bak_basic(bb_*)`、`cyq_perf(cp_*)` 等静态字段，必须显式读取并 join `static_factors.parquet`；本轮实验不强制策略必须依赖“量价因子”，重点在于保证数据格式与索引 contract 正确的前提下，充分释放因子的演进空间。
+    - **【禁止机器学习训练】**（硬约束）：
+      - 严禁 import 或调用 `sklearn`、`lightgbm`、`xgboost`、`catboost`、`torch`、`tensorflow`、`keras` 等 ML 库；
+      - 严禁执行 `.fit()`、`.fit_transform()`、`.fit_predict()`、`.backward()`、`optimizer.step()` 等训练操作；
+      - 严禁使用 `shift(-1)` 构造"未来收益率"作为训练标签或因子输出。
+    - **【计算效率约束】**（硬约束）：
+      - 严禁对全量数据使用纯 Python for 循环逐行遍历（如 `for idx in range(len(group)): ... iloc[idx]`）；
+      - 必须使用 pandas/numpy 向量化操作（`groupby().rolling()`、`groupby().transform()`、`np.where()` 等）；
+      - 自定义滚动窗口计算应使用 `numba.jit` 或 `rolling().apply()` 等高效方式。
 
     ```python
     import pandas as pd

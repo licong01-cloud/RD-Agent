@@ -2520,14 +2520,17 @@ def create_app() -> FastAPI:
     def get_task_workspaces(task_id: str) -> dict[str, Any]:
         """获取指定task的workspace信息。
         
-        从session pickle文件中读取experiment_workspace.workspace_path，
-        获取git_ignore_folder/RD-Agent_workspace下的真实workspace。
+        双重发现策略：
+        1. 文本扫描：通过正则匹配 log 目录下所有文件中的 workspace ID（覆盖面最广）
+        2. Pickle解析：从 session pickle 中提取 workspace_path（兼容旧逻辑）
+        两种策略结果取并集，确保覆盖所有 workspace。
         """
         import subprocess
         
         try:
             _ensure_task_log_dir(task_id)
             task_dir = (_log_root() / task_id).resolve()
+            ws_root = _workspace_root()
             
             result = {
                 "ok": True,
@@ -2537,49 +2540,54 @@ def create_app() -> FastAPI:
                 "total_size_mb": 0
             }
             
-            # 收集workspace路径信息
-            workspace_paths = set()
+            # ===== 收集 workspace ID（hex32）=====
+            workspace_ids: set[str] = set()
             
-            # 遍历所有Loop_目录，查找pickle文件
-            for loop_dir in task_dir.iterdir():
-                if not loop_dir.is_dir() or not loop_dir.name.startswith("Loop_"):
-                    continue
-                
-                # 在running/runner result目录中查找pickle文件
-                runner_result_dir = loop_dir / "running" / "runner result"
-                if runner_result_dir.exists():
+            # 策略 A：文本扫描（主策略，覆盖面最广）
+            # 复用 _extract_workspace_ids_from_log_dir，扫描 log 目录下所有文件内容
+            # 匹配 RD-Agent_workspace/<hex32> 模式，不依赖 pickle 反序列化
+            try:
+                ids_from_scan = _extract_workspace_ids_from_log_dir(task_id=task_id)
+                workspace_ids.update(ids_from_scan)
+            except Exception:
+                pass
+            
+            # 策略 B：Pickle 解析（补充策略，兼容旧逻辑）
+            try:
+                for loop_dir in task_dir.iterdir():
+                    if not loop_dir.is_dir() or not loop_dir.name.startswith("Loop_"):
+                        continue
+                    runner_result_dir = loop_dir / "running" / "runner result"
+                    if not runner_result_dir.exists():
+                        continue
                     for pkl_file in runner_result_dir.rglob("*.pkl"):
                         try:
                             obj = _pickle_load_compat(pkl_file)
-                            # 尝试从对象中提取workspace_path
                             ws_path = getattr(getattr(obj, "experiment_workspace", None), "workspace_path", None)
                             if ws_path and isinstance(ws_path, (str, Path)):
-                                ws_path_str = str(ws_path).strip()
-                                if ws_path_str:
-                                    workspace_paths.add(ws_path_str)
-                            
-                            # 也检查sub_workspace_list
+                                for m in _ws_re.finditer(str(ws_path)):
+                                    workspace_ids.add(m.group(1).lower())
                             sub_ws_list = getattr(obj, "sub_workspace_list", None) or []
                             for sub_ws in sub_ws_list:
                                 if sub_ws is None:
                                     continue
                                 sub_ws_path = getattr(sub_ws, "workspace_path", None)
                                 if sub_ws_path and isinstance(sub_ws_path, (str, Path)):
-                                    sub_ws_path_str = str(sub_ws_path).strip()
-                                    if sub_ws_path_str:
-                                        workspace_paths.add(sub_ws_path_str)
+                                    for m in _ws_re.finditer(str(sub_ws_path)):
+                                        workspace_ids.add(m.group(1).lower())
                         except Exception:
                             continue
+            except Exception:
+                pass
             
-            # 收集workspace信息并计算大小
+            # ===== 合并结果，构建 workspace 信息列表 =====
             total_size_bytes = 0
-            for ws_path_str in sorted(workspace_paths):
+            for ws_id in sorted(workspace_ids):
                 try:
-                    ws_path = _to_native_path(ws_path_str)
+                    ws_path = ws_root / ws_id
                     if not ws_path.exists() or not ws_path.is_dir():
                         continue
                     
-                    # 使用du命令获取workspace大小
                     ws_size_mb = 0.0
                     try:
                         du_result = subprocess.run(
@@ -2595,16 +2603,14 @@ def create_app() -> FastAPI:
                     except Exception:
                         pass
                     
-                    ws_info = {
-                        "name": ws_path.name,
+                    result["workspaces"].append({
+                        "name": ws_id,
                         "path": str(ws_path),
                         "size_mb": ws_size_mb
-                    }
-                    result["workspaces"].append(ws_info)
+                    })
                 except Exception:
                     continue
             
-            # 计算总大小
             result["total_size_mb"] = round(total_size_bytes / (1024 * 1024), 2)
             
             return result
@@ -2619,12 +2625,19 @@ def create_app() -> FastAPI:
 
     @app.delete("/tasks/{task_id}", summary="删除Task及其所有数据")
     def delete_task(task_id: str) -> dict[str, Any]:
-        """删除指定task的日志目录和所有workspace目录。"""
+        """删除指定task的日志目录和所有workspace目录。
+        
+        双重发现策略（与 get_task_workspaces 一致）：
+        1. 文本扫描：通过正则匹配 log 目录下所有文件中的 workspace ID
+        2. Pickle解析：从 session pickle 中提取 workspace_path
+        两种策略结果取并集，确保删除时不遗漏任何 workspace。
+        """
         import shutil
         import subprocess
         
         try:
             task_dir = (_log_root() / task_id).resolve()
+            ws_root = _workspace_root()
             
             if not task_dir.exists():
                 return {
@@ -2636,32 +2649,45 @@ def create_app() -> FastAPI:
             deleted_items = []
             total_size_mb = 0.0
             
-            # 1. 先获取workspace列表（用于删除）
-            workspace_paths = set()
-            for loop_dir in task_dir.iterdir():
-                if not loop_dir.is_dir() or not loop_dir.name.startswith("Loop_"):
-                    continue
-                
-                runner_result_dir = loop_dir / "running" / "runner result"
-                if runner_result_dir.exists():
+            # ===== 双重发现策略收集 workspace ID =====
+            workspace_ids: set[str] = set()
+            
+            # 策略 A：文本扫描（主策略）
+            try:
+                ids_from_scan = _extract_workspace_ids_from_log_dir(task_id=task_id)
+                workspace_ids.update(ids_from_scan)
+            except Exception:
+                pass
+            
+            # 策略 B：Pickle 解析（补充策略）
+            try:
+                for loop_dir in task_dir.iterdir():
+                    if not loop_dir.is_dir() or not loop_dir.name.startswith("Loop_"):
+                        continue
+                    runner_result_dir = loop_dir / "running" / "runner result"
+                    if not runner_result_dir.exists():
+                        continue
                     for pkl_file in runner_result_dir.rglob("*.pkl"):
                         try:
                             obj = _pickle_load_compat(pkl_file)
                             ws_path = getattr(getattr(obj, "experiment_workspace", None), "workspace_path", None)
                             if ws_path and isinstance(ws_path, (str, Path)):
-                                workspace_paths.add(str(ws_path).strip())
-                            
+                                for m in _ws_re.finditer(str(ws_path)):
+                                    workspace_ids.add(m.group(1).lower())
                             sub_ws_list = getattr(obj, "sub_workspace_list", None) or []
                             for sub_ws in sub_ws_list:
                                 if sub_ws is None:
                                     continue
                                 sub_ws_path = getattr(sub_ws, "workspace_path", None)
                                 if sub_ws_path and isinstance(sub_ws_path, (str, Path)):
-                                    workspace_paths.add(str(sub_ws_path).strip())
+                                    for m in _ws_re.finditer(str(sub_ws_path)):
+                                        workspace_ids.add(m.group(1).lower())
                         except Exception:
                             continue
+            except Exception:
+                pass
             
-            # 2. 计算task目录大小（使用du命令）
+            # ===== 计算 task 目录大小 =====
             task_size_mb = 0.0
             try:
                 du_result = subprocess.run(
@@ -2677,7 +2703,7 @@ def create_app() -> FastAPI:
             except Exception:
                 pass
             
-            # 3. 删除task目录
+            # ===== 删除 task 日志目录 =====
             shutil.rmtree(task_dir)
             deleted_items.append({
                 "type": "task_log",
@@ -2685,12 +2711,12 @@ def create_app() -> FastAPI:
                 "size_mb": task_size_mb
             })
             
-            # 4. 删除workspace目录
-            for ws_path_str in workspace_paths:
+            # ===== 删除所有发现的 workspace 目录 =====
+            ws_deleted_count = 0
+            for ws_id in sorted(workspace_ids):
                 try:
-                    ws_path = _to_native_path(ws_path_str)
+                    ws_path = ws_root / ws_id
                     if ws_path.exists() and ws_path.is_dir():
-                        # 计算workspace大小
                         ws_size_mb = 0.0
                         try:
                             du_result = subprocess.run(
@@ -2706,8 +2732,8 @@ def create_app() -> FastAPI:
                         except Exception:
                             pass
                         
-                        # 删除workspace
                         shutil.rmtree(ws_path)
+                        ws_deleted_count += 1
                         deleted_items.append({
                             "type": "workspace",
                             "path": str(ws_path),
@@ -2721,7 +2747,7 @@ def create_app() -> FastAPI:
                 "task_id": task_id,
                 "deleted_items": deleted_items,
                 "total_size_mb": round(total_size_mb, 2),
-                "message": f"成功删除task {task_id}及{len(workspace_paths)}个workspace，释放空间 {total_size_mb:.2f} MB"
+                "message": f"成功删除task {task_id}及{ws_deleted_count}个workspace，释放空间 {total_size_mb:.2f} MB"
             }
             
         except Exception as e:

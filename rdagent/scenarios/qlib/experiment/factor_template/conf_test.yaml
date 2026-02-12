@@ -1,0 +1,17 @@
+# TEST CONFIG - created by test_template_management_full.py
+qlib_init:
+  provider_uri: "~/.qlib/qlib_data/cn_data"
+  region: cn
+port_analysis_config:
+  strategy:
+    class: TopkDropoutStrategy
+    module_path: qlib.contrib.strategy
+    kwargs:
+      signal: <PRED>
+      topk: 50
+      n_drop: 5
+  backtest:
+    start_time: "2024-01-01"
+    end_time: "2024-12-31"
+    account: 100000000
+    benchmark: SH000300

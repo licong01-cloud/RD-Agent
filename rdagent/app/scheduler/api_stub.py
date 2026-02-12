@@ -19,7 +19,22 @@ from .task_service import (
     read_task_log,
     update_task_status,
 )
-from .template_service import list_template_history, publish_templates, rollback_template
+from .template_service import (
+    activate_template_env,
+    apply_template,
+    delete_template,
+    get_active_env_template,
+    get_sync_status,
+    get_template_file,
+    list_backups,
+    list_template_files,
+    list_template_history,
+    list_templates,
+    publish_templates,
+    refresh_template_sha256,
+    rollback_template,
+    save_template_file,
+)
 
 
 # Task APIs
@@ -86,7 +101,7 @@ def api_create_dataset(payload: dict) -> dict:
     return {"dataset": rec.__dict__}
 
 
-# Template APIs
+# Template APIs (existing)
 def api_publish_templates(payload: dict) -> dict:
     return publish_templates(payload)
 
@@ -99,17 +114,80 @@ def api_rollback_template(payload: dict) -> dict:
     return rollback_template(payload)
 
 
+# Template APIs (P2 new)
+def api_list_templates(scenario: str | None = None) -> dict:
+    return list_templates(scenario)
+
+
+def api_list_template_files(scenario: str, version: str) -> dict:
+    return list_template_files(scenario, version)
+
+
+def api_get_template_file(scenario: str, version: str, rel_path: str) -> dict:
+    return get_template_file(scenario, version, rel_path)
+
+
+def api_save_template_file(scenario: str, version: str, rel_path: str, content: str) -> dict:
+    return save_template_file(scenario, version, rel_path, content)
+
+
+def api_delete_template(scenario: str, version: str) -> dict:
+    return delete_template(scenario, version)
+
+
+def api_apply_template(scenario: str, version: str, force: bool = False, backup: bool = True) -> dict:
+    return apply_template(scenario, version, force=force, backup=backup)
+
+
+def api_get_sync_status() -> dict:
+    return get_sync_status()
+
+
+def api_refresh_template_sha256(scenario: str, version: str) -> dict:
+    return refresh_template_sha256(scenario, version)
+
+
+def api_list_backups() -> dict:
+    return list_backups()
+
+
+def api_rollback_from_backup(backup_id: str) -> dict:
+    from .template_service import _rollback_from_backup
+    return _rollback_from_backup(backup_id)
+
+
+# Template APIs (P3 – env-based activation)
+def api_activate_template_env(scenario: str, version: str) -> dict:
+    return activate_template_env(scenario, version)
+
+
+def api_get_active_env_template() -> dict:
+    return get_active_env_template()
+
+
 __all__ = [
+    "api_activate_template_env",
     "api_append_log",
+    "api_apply_template",
     "api_create_dataset",
     "api_create_task",
+    "api_delete_template",
+    "api_get_active_env_template",
     "api_get_log",
+    "api_get_sync_status",
     "api_get_task",
+    "api_get_template_file",
+    "api_list_backups",
     "api_list_datasets",
     "api_list_results",
     "api_list_tasks",
+    "api_list_template_files",
     "api_list_template_history",
+    "api_list_templates",
     "api_publish_templates",
+    "api_refresh_template_sha256",
+    "api_rollback_from_backup",
     "api_rollback_template",
+    "api_save_template_file",
     "api_update_task_status",
 ]

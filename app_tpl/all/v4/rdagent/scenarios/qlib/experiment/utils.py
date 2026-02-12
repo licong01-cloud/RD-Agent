@@ -183,6 +183,34 @@ def _load_schema_preview(schema_path: Path, data_path: Optional[Path] = None, ma
     return ""
 
 
+def _extract_schema_column_names(p: Path) -> set[str]:
+    """Extract column names from the first available schema file for a data file."""
+    names: set[str] = set()
+    for sp in _candidate_schema_paths_for_file(p):
+        if not sp.exists():
+            continue
+        try:
+            if sp.suffix.lower() == ".csv":
+                df = pd.read_csv(sp)
+                for _, row in df.iterrows():
+                    col = str(row.get("name", "")).strip()
+                    if col and not _is_nan(col):
+                        names.add(col)
+            elif sp.suffix.lower() == ".json":
+                obj = json.loads(sp.read_text(encoding="utf-8"))
+                cols_list = obj.get("columns", []) if isinstance(obj, dict) else []
+                for item in cols_list:
+                    if isinstance(item, dict):
+                        col = str(item.get("name", "")).strip()
+                        if col and not _is_nan(col):
+                            names.add(col)
+            if names:
+                break
+        except Exception:
+            continue
+    return names
+
+
 def _try_get_h5_columns_dtypes(p: Path, key: str = "data") -> dict[str, str]:
     # Avoid loading full HDF5; best-effort extract columns and dtypes.
     cols: list[str] = []
@@ -430,7 +458,7 @@ def _try_get_h5_index_samples(p: Path, n: int = 5) -> list[str]:
     return []
 
 
-def get_file_desc(p: Path, variable_list: list[str] = []) -> str:
+def get_file_desc(p: Path, variable_list: list[str] = [], exclude_columns: set[str] | None = None) -> str:
     """
     Get the description of a file based on its type.
 
@@ -440,6 +468,9 @@ def get_file_desc(p: Path, variable_list: list[str] = []) -> str:
         The path of the file.
     variable_list : list[str]
         Optional list of relevant variables to highlight.
+    exclude_columns : set[str] | None
+        Column names to exclude from the description (used to avoid
+        duplicating fields already described by other data files).
 
     Returns
     -------
@@ -563,7 +594,21 @@ def get_file_desc(p: Path, variable_list: list[str] = []) -> str:
             if sp.exists():
                 schema_preview = _load_schema_preview(sp, data_path=p)
                 if schema_preview:
-                    df_info += f"\n### Schema (from {sp.name})\n" + schema_preview + "\n"
+                    if exclude_columns:
+                        # Filter schema lines to exclude columns already described by H5 files
+                        orig_lines = schema_preview.split("\n")
+                        filtered = [ln for ln in orig_lines if not any(
+                            ln.lstrip("- ").startswith(ec) for ec in exclude_columns
+                        )]
+                        omitted = len(orig_lines) - len(filtered)
+                        if omitted > 0:
+                            df_info += f"\n### Schema (from {sp.name}, {omitted} columns shared with H5 files omitted)\n"
+                        else:
+                            df_info += f"\n### Schema (from {sp.name})\n"
+                        schema_preview = "\n".join(filtered)
+                    else:
+                        df_info += f"\n### Schema (from {sp.name})\n"
+                    df_info += schema_preview + "\n"
                     break
 
         if not schema_preview:
@@ -571,7 +616,12 @@ def get_file_desc(p: Path, variable_list: list[str] = []) -> str:
                 pf = pq.ParquetFile(p)
                 arrow_schema = pf.schema_arrow
                 names = [arrow_schema.names[i] for i in range(len(arrow_schema.names))]
-                df_info += "\n### Columns (from parquet metadata)\n"
+                if exclude_columns:
+                    unique_names = [n for n in names if n not in exclude_columns]
+                    df_info += f"\n### Columns (from parquet metadata, {len(names) - len(unique_names)} columns shared with H5 files omitted)\n"
+                    names = unique_names
+                else:
+                    df_info += "\n### Columns (from parquet metadata)\n"
                 shown = names[:120]
                 df_info += ", ".join(shown) + ("\n..." if len(names) > 120 else "\n")
             except Exception as e:
@@ -680,13 +730,53 @@ def get_data_folder_intro(fname_reg: str = ".*", flags: int = 0, variable_mappin
         # FIXME: (xiao) I think this is writing in a hard-coded way.
         # get data folder intro does not imply that we are generating the data folder.
         generate_data_folder_from_qlib()
+    # Skip standalone schema files (*_schema.csv, *_schema.json) to avoid
+    # duplicating field information that is already attached to the
+    # corresponding data file (H5/parquet) via _candidate_schema_paths_for_file().
+    _SCHEMA_SUFFIX_RE = re.compile(r"^.+_schema\.(csv|json)$", re.IGNORECASE)
+
+    data_dir = Path(FACTOR_COSTEER_SETTINGS.data_folder_debug)
+    all_files = sorted(p for p in data_dir.iterdir() if p.is_file())
+
+    # Two-pass approach: first process H5 files to collect their column names,
+    # then process parquet files with those columns excluded to avoid duplication.
+    h5_described_columns: set[str] = set()
     content_l = []
-    for p in Path(FACTOR_COSTEER_SETTINGS.data_folder_debug).iterdir():
-        if not p.is_file():
+
+    # Pass 1: H5 and non-parquet files
+    for p in all_files:
+        if _SCHEMA_SUFFIX_RE.match(p.name):
             continue
-        if re.match(fname_reg, p.name, flags) is not None:
-            if variable_mapping:
-                content_l.append(get_file_desc(p, variable_mapping.get(p.stem, [])))
-            else:
-                content_l.append(get_file_desc(p))
+        if p.suffix.lower() == ".parquet":
+            continue
+        if re.match(fname_reg, p.name, flags) is None:
+            continue
+        if variable_mapping:
+            content_l.append(get_file_desc(p, variable_mapping.get(p.stem, [])))
+        else:
+            content_l.append(get_file_desc(p))
+        # Collect H5 column names (strip $ prefix) for dedup against parquet.
+        # Use both _try_get_h5_columns_dtypes and schema files as fallback,
+        # since some H5 files have corrupted metadata but valid schema files.
+        if p.suffix.lower() == ".h5":
+            cols = _try_get_h5_columns_dtypes(p)
+            for col in cols:
+                h5_described_columns.add(col.lstrip("$"))
+            if not cols:
+                schema_cols = _extract_schema_column_names(p)
+                h5_described_columns |= schema_cols
+
+    # Pass 2: Parquet files with H5-described columns excluded
+    for p in all_files:
+        if _SCHEMA_SUFFIX_RE.match(p.name):
+            continue
+        if p.suffix.lower() != ".parquet":
+            continue
+        if re.match(fname_reg, p.name, flags) is None:
+            continue
+        if variable_mapping:
+            content_l.append(get_file_desc(p, variable_mapping.get(p.stem, []), exclude_columns=h5_described_columns or None))
+        else:
+            content_l.append(get_file_desc(p, exclude_columns=h5_described_columns or None))
+
     return "\n----------------- file splitter -------------\n".join(content_l)

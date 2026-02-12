@@ -26,44 +26,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 ENV_PATH = PROJECT_ROOT / ".env"
 HISTORY_ROOT = PROJECT_ROOT / "history"
 
-# Qlib template files to manage
-TEMPLATE_FILES = {
-    "factor_baseline": PROJECT_ROOT
-    / "rdagent"
-    / "scenarios"
-    / "qlib"
-    / "experiment"
-    / "factor_template"
-    / "conf_baseline.yaml",
-    "factor_combined": PROJECT_ROOT
-    / "rdagent"
-    / "scenarios"
-    / "qlib"
-    / "experiment"
-    / "factor_template"
-    / "conf_combined_factors.yaml",
-    "factor_combined_sota": PROJECT_ROOT
-    / "rdagent"
-    / "scenarios"
-    / "qlib"
-    / "experiment"
-    / "factor_template"
-    / "conf_combined_factors_sota_model.yaml",
-    "model_baseline": PROJECT_ROOT
-    / "rdagent"
-    / "scenarios"
-    / "qlib"
-    / "experiment"
-    / "model_template"
-    / "conf_baseline_factors_model.yaml",
-    "model_sota": PROJECT_ROOT
-    / "rdagent"
-    / "scenarios"
-    / "qlib"
-    / "experiment"
-    / "model_template"
-    / "conf_sota_factors_model.yaml",
-}
 
 
 def _timestamp() -> str:
@@ -122,45 +84,13 @@ def write_yaml(path: Path, data: Dict, task_id: Optional[str] = None) -> Path:
     return path
 
 
-def list_templates() -> Dict[str, Path]:
-    """Return template name -> path mapping."""
-    return TEMPLATE_FILES
-
-
-def read_template(name: str) -> Dict:
-    path = TEMPLATE_FILES.get(name)
-    if path is None:
-        raise KeyError(f"Unknown template name: {name}")
-    return read_yaml(path)
-
-
-def write_template(name: str, data: Dict, task_id: Optional[str] = None) -> Path:
-    path = TEMPLATE_FILES.get(name)
-    if path is None:
-        raise KeyError(f"Unknown template name: {name}")
-    return write_yaml(path, data, task_id)
-
-
-# History record hook (placeholder for DB integration)
-def record_history(file_name: str, backup_path: Path, task_id: Optional[str] = None, user: Optional[str] = None) -> None:
-    """Hook for storing history metadata. To be integrated with DB/ORM."""
-    append_history(
-        TemplateHistoryRecord(
-            file_name=file_name,
-            backup_path=str(backup_path),
-            task_id=task_id,
-            user=user,
-        )
-    )
-
-
 __all__ = [
+    "PROJECT_ROOT",
     "ENV_PATH",
-    "TEMPLATE_FILES",
-    "list_templates",
+    "HISTORY_ROOT",
     "read_env",
     "write_env",
-    "read_template",
-    "write_template",
+    "read_yaml",
+    "write_yaml",
     "backup_file",
 ]
