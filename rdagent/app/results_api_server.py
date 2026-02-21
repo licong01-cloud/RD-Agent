@@ -64,6 +64,18 @@ def create_app() -> FastAPI:
     # Alpha Baseline Factors API
     from rdagent.app.api_endpoints import alpha_baseline_router
     app.include_router(alpha_baseline_router)
+    
+    # QE File Sync API（AIstock -> RDAgent 实验文件同步）
+    from rdagent.app.api_endpoints import qe_file_sync_router
+    app.include_router(qe_file_sync_router)
+
+    # QE Experiment Setup API（WSL环境中创建实验工作区和链接数据文件）
+    from rdagent.app.api_endpoints import qe_experiment_setup_router
+    app.include_router(qe_experiment_setup_router)
+
+    # QE Evolution API (自动演进闭环的接口：触发回测、查询状态、获取指标、下载资产等)
+    from rdagent.app.api_endpoints.qe_evolution_api import router as qe_evolution_router
+    app.include_router(qe_evolution_router)
 
     # Results API：本期作为 AIstock 初始化/增量同步的主接口。
     # 权威来源：log/<task_id>/ 与 log/<task_id>/__session__/ （不依赖 registry.sqlite / loop / SQLite）。
@@ -1991,6 +2003,42 @@ def create_app() -> FastAPI:
                             loop_info['tested_factors'] = [task.name]
                         else:
                             loop_info['tested_factors'] = []
+
+                        # QuantEvolver: 提取完整Model元数据
+                        loop_info['model_name'] = getattr(task, 'name', None)
+                        loop_info['model_description'] = getattr(task, 'description', None)
+                        loop_info['model_architecture'] = getattr(task, 'architecture', None)
+                        loop_info['model_type_tag'] = getattr(task, 'model_type', None)
+                        _hp = getattr(task, 'hyperparameters', None)
+                        loop_info['model_hyperparameters'] = dict(_hp) if isinstance(_hp, dict) else _hp
+                        _thp = getattr(task, 'training_hyperparameters', None)
+                        loop_info['model_training_hyperparameters'] = dict(_thp) if isinstance(_thp, dict) else _thp
+                        loop_info['model_formulation'] = getattr(task, 'formulation', None)
+                        _vars = getattr(task, 'variables', None)
+                        loop_info['model_variables'] = dict(_vars) if isinstance(_vars, dict) else _vars
+
+                        # 提取假设文本
+                        _hyp_obj = getattr(loop_exp, 'hypothesis', None)
+                        if _hyp_obj is not None:
+                            loop_info['hypothesis_text'] = getattr(_hyp_obj, 'hypothesis', None)
+
+                        # 提取反馈评估
+                        if loop_feedback is not None:
+                            loop_info['feedback_observations'] = getattr(loop_feedback, 'observations', None)
+                            loop_info['feedback_hypothesis_evaluation'] = getattr(loop_feedback, 'hypothesis_evaluation', None)
+                            loop_info['feedback_reason'] = getattr(loop_feedback, 'reason', None)
+                            loop_info['feedback_new_hypothesis'] = getattr(loop_feedback, 'new_hypothesis', None)
+
+                        # 提取模型源代码（从sub_workspace_list的file_dict）
+                        try:
+                            if hasattr(loop_exp, 'sub_workspace_list') and loop_exp.sub_workspace_list:
+                                ws = loop_exp.sub_workspace_list[0]
+                                if hasattr(ws, 'file_dict') and isinstance(ws.file_dict, dict):
+                                    model_code = ws.file_dict.get('model.py', None)
+                                    if model_code:
+                                        loop_info['model_code'] = model_code
+                        except Exception:
+                            pass
                     
                     # 提取回测结果
                     if hasattr(loop_exp, 'result') and loop_exp.result is not None:
@@ -2066,6 +2114,46 @@ def create_app() -> FastAPI:
             "count": len(loops_data),
             "loops": loops_data,
         }
+
+    @app.get("/tasks/{task_id}/loops/{loop_id}/model_code", summary="获取指定Loop的模型源代码")
+    def get_loop_model_code(task_id: str, loop_id: int) -> dict[str, Any]:
+        """从session pickle的sub_workspace.file_dict中提取model.py源代码。"""
+        log_dir = _ensure_task_log_dir(task_id)
+        loop_dir = log_dir / str(loop_id)
+        if not loop_dir.exists():
+            raise HTTPException(status_code=404, detail=f"Loop {loop_id} not found for task {task_id}")
+
+        loop_session_file = loop_dir / "1.pkl"
+        if not loop_session_file.exists():
+            raise HTTPException(status_code=404, detail=f"Session file not found for loop {loop_id}")
+
+        try:
+            with loop_session_file.open("rb") as f:
+                session = PathCompatUnpickler(f).load()
+
+            loop_exp = session.get("loop_exp") or session.get("experiment")
+            if loop_exp is None:
+                raise HTTPException(status_code=404, detail="No experiment data in session")
+
+            model_code = None
+            if hasattr(loop_exp, 'sub_workspace_list') and loop_exp.sub_workspace_list:
+                ws = loop_exp.sub_workspace_list[0]
+                if hasattr(ws, 'file_dict') and isinstance(ws.file_dict, dict):
+                    model_code = ws.file_dict.get('model.py', None)
+
+            if not model_code:
+                raise HTTPException(status_code=404, detail="model.py not found in workspace file_dict")
+
+            return {
+                "ok": True,
+                "task_id": str(task_id),
+                "loop_id": loop_id,
+                "model_code": model_code,
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error extracting model code: {e}")
 
     @app.get("/tasks/{task_id}")
     def task_manifest(task_id: str) -> dict[str, Any]:
