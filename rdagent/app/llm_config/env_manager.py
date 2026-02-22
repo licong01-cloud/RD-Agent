@@ -21,7 +21,7 @@ class EnvManager:
         "DEEPSEEK_API_BASE": "deepseek",
         # Anthropic/Claude
         "ANTHROPIC_API_KEY": "anthropic",
-        "ANTHROPIC_BASE_URL": "anthropic",
+        "ANTHROPIC_API_BASE": "anthropic",
         # OpenAI
         "OPENAI_API_KEY": "openai",
         "OPENAI_API_BASE": "openai",
@@ -36,6 +36,13 @@ class EnvManager:
         "RAG_EMBEDDING_API_KEY": "rag_embedding",
         "RAG_EMBEDDING_API_BASE": "rag_embedding",
     }
+
+    @staticmethod
+    def _strip_wrapping_quotes(value: str) -> str:
+        """Strip matching wrapping single/double quotes from env values."""
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            return value[1:-1]
+        return value
 
     def __init__(self, env_path: str | Path | None = None):
         """Initialize EnvManager with .env file path."""
@@ -61,7 +68,7 @@ class EnvManager:
                     continue
                 if "=" in line:
                     key, value = line.split("=", 1)
-                    env_dict[key.strip()] = value.strip()
+                    env_dict[key.strip()] = self._strip_wrapping_quotes(value.strip())
         return env_dict
 
     def parse_current_config(self) -> dict[str, Any]:

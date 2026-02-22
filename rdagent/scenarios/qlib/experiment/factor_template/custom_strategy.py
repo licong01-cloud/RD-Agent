@@ -36,7 +36,7 @@ class EnhancedTopkDropoutStrategy(TopkDropoutStrategy):
                  signal=None,
                  topk=50,
                  n_drop=5,
-                 min_score=0.10,             # 最低评分阈值
+                 min_score=0.0,             # 最低评分阈值
                  max_position_ratio=0.90,     # 最大仓位比例
                  stop_loss=-0.10,             # 止损阈值：-10%
                  min_trade_price=0.5,
@@ -96,6 +96,8 @@ class EnhancedTopkDropoutStrategy(TopkDropoutStrategy):
             return float(shares)
         if getattr(self.trade_exchange, "trade_w_adj_price", False) or getattr(self.trade_exchange, "trade_unit", None) is None:
             return float(shares)
+        if factor is None or np.isnan(factor):
+            return None
         return float(shares) / float(factor)
 
     def _adjusted_amount_to_shares(self, adjusted_amount: float, factor: float | None) -> float:

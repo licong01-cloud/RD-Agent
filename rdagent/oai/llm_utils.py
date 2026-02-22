@@ -13,11 +13,20 @@ from rdagent.utils import md5_hash  # for compatible with previous import
 def calculate_embedding_distance_between_str_list(
     source_str_list: list[str],
     target_str_list: list[str],
+    batch_size: int = 50,
 ) -> list[list[float]]:
     if not source_str_list or not target_str_list:
         return [[]]
 
-    embeddings = APIBackend().create_embedding(source_str_list + target_str_list)
+    all_strings = source_str_list + target_str_list
+    embeddings = []
+    api_backend = APIBackend()
+    
+    # 分批调用 embedding 接口，避免超过提供商的单次 input batch size 限制
+    for i in range(0, len(all_strings), batch_size):
+        batch_strs = all_strings[i:i + batch_size]
+        batch_emb = api_backend.create_embedding(batch_strs)
+        embeddings.extend(batch_emb)
 
     source_embeddings = embeddings[: len(source_str_list)]
     target_embeddings = embeddings[len(source_str_list) :]

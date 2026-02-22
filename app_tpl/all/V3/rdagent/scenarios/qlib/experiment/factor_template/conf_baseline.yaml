@@ -43,7 +43,7 @@ port_analysis_config: &port_analysis_config
             signal: <PRED>
             topk: 50
             n_drop: 5
-            min_score: 0.1
+            min_score: 0.0
             max_position_ratio: 0.90
             stop_loss: -0.10
     backtest:
