@@ -297,7 +297,7 @@ qlib_model_rich_style_description: |-
 qlib_model_experiment_setting: |-
   | Dataset | Model    | Factors       | Data Split                                    |
   |---------|----------|---------------|-------------------------------------------------|
-  | AIstock A-share (non-ST, non-delisted)  | 例如 GRU_TimeSeries_Model（也可替换为 LGB/MLP/Transformer 等其它模型） | 20 factors (Alpha158)  | Train: 2010-01-07 to 2018-12-31 <br> Valid: 2019-01-01 to 2020-12-31 <br> Test &nbsp;: 2021-01-01 to 2025-12-01 |
+  | AIstock A-share (non-ST, non-delisted)  | 例如 GRU_TimeSeries_Model（也可替换为 LGB/MLP/Transformer 等其它模型） | 20 factors (Alpha158)  | Train: 2018-08-01 to 2022-12-31 <br> Valid: 2023-01-01 to 2024-06-30 <br> Test &nbsp;: 2024-07-01 to 2025-12-01 |
 
   **Important Note: Stock Code Format**
   - Although the dataset name is "AIstock A-share", all data sources in `instrument` are already unified in **Qlib style** (e.g., `000001.SZ`, `600000.SH`).
@@ -360,6 +360,7 @@ factor_experiment_output_format: |-
 model_experiment_output_format: |-
   So far please only design one model to test the hypothesis!
   The output should follow JSON format. The schema is as follows (value in training_hyperparameters is a basic setting for reference, you CAN CHANGE depends on the previous training log):
+  Note on hyperparameters: If you include `attention_key_dim` in hyperparameters, it means the per-head dimension (i.e., embed_dim / num_heads), NOT the `kdim` parameter in PyTorch's `nn.MultiheadAttention`. The coding agent will use `embed_dim` and `num_heads` only; `kdim`/`vdim` must NOT be set for self-attention.
   {
     "model_name (The name of the model)": {
         "description": "A detailed description of the model",
@@ -560,6 +561,18 @@ qlib_model_interface: |-
   Don't write any try-except block in your python code. The user will catch the exception message and provide the feedback to you. Also, don't write main function in your python code. The user will call the forward method in the model_cls to get the output tensor.
 
   Please notice that your model should only use current features as input. The user will provide the input tensor to the model's forward function.
+
+  【PyTorch 常见 API 使用约束（必须遵守）】
+  - **`nn.MultiheadAttention` 自注意力配置**：
+    - 当 query、key、value 来自同一个输入（自注意力）时，**严禁** 设置 `kdim` 和 `vdim` 参数。只需设置 `embed_dim`（等于输入特征维度）和 `num_heads`。
+    - 如果模型描述中提到 `attention_key_dim`，这通常指 **每个注意力头的维度**（即 `embed_dim / num_heads`），PyTorch 会自动处理，无需手动指定。
+    - 正确用法：`nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_heads, batch_first=True)`
+    - 错误用法：`nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_heads, kdim=key_dim, vdim=key_dim)` ← 这会导致权重形状不匹配
+  - **`nn.MultiheadAttention` 输入格式**：
+    - 设置 `batch_first=True` 时，输入形状为 `(batch_size, seq_len, embed_dim)`
+    - 未设置 `batch_first=True` 时，输入形状为 `(seq_len, batch_size, embed_dim)`，需要对输入做 `transpose` 或 `permute`
+  - **维度对齐**：确保各层之间的输入输出维度严格匹配。例如 GRU 的 `hidden_size` 必须等于后续 Attention 层的 `embed_dim`。
+  - **输出形状**：最终输出必须为 `(batch_size, 1)`，注意在全连接层之前正确使用池化（如 `mean`）将序列维度压缩。
 
 qlib_model_output_format: |-
   Your output should be a tensor with shape (batch_size, 1). 

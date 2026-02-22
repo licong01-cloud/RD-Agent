@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"path": ".."
+		},
+		{
+			"path": "../../AIstock"
+		}
+	],
+	"settings": {
+		"git.ignoreLimitWarning": true
+	}
+}

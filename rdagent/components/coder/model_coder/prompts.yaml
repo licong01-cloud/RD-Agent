@@ -38,6 +38,11 @@ evolving_strategy_model_coder:
         2. The user might provide you the failed former code and the corresponding feedback to the code. The feedback contains to the execution, the code and the model output value. You should analyze the feedback and try to correct the latest code.
         3. The user might provide you the suggestion to the latest fail code and some similar fail to correct pairs. Each pair contains the fail code with similar error and the corresponding corrected version code. You should learn from these suggestion to write the correct code.
 
+        【Important PyTorch Implementation Notes】
+        - When using `nn.MultiheadAttention` for self-attention (query, key, value from the same source), do NOT set `kdim` or `vdim`. Only set `embed_dim` and `num_heads`. The per-head dimension is automatically computed as `embed_dim / num_heads`.
+        - If the model description mentions `attention_key_dim`, it refers to the per-head dimension (embed_dim / num_heads), NOT the `kdim` parameter.
+        - Always ensure dimensional consistency between layers (e.g., GRU hidden_size must match Attention embed_dim).
+
         Your must write your code based on your former latest attempt below which consists of your former code and code feedback, you should read the former attempt carefully and must not modify the right part of your former code.
 
         {% if current_code is not none %}

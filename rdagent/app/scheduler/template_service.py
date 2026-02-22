@@ -22,7 +22,7 @@ HISTORY_ROOT = PROJECT_ROOT / "history"
 TEMPLATE_HISTORY_DIR = HISTORY_ROOT / "template_bundles"
 LOCAL_TZ = timezone(timedelta(hours=8))
 
-ALLOWED_SUFFIXES = {".yaml", ".yml", ".json"}
+ALLOWED_SUFFIXES = {".yaml", ".yml", ".json", ".py", ".md", ".txt", ".sh"}
 _JINJA_ENV = Environment(autoescape=True)
 
 
