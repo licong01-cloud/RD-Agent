@@ -377,7 +377,7 @@ model_experiment_output_format: |-
             "hyperparameter_name_3": "value of hyperparameter 3"
         },
         "training_hyperparameters" {  # All values are for reference; you can set them yourself
-            "n_epochs": "300",  # 推荐范围 300~500，可根据需要调整至最大 1000
+            "n_epochs": "30",  # 推荐范围 300~500，可根据需要调整至最大 1000
             "lr": "1e-3",
             "early_stop": 20,  # 建议配合 early_stop: 20~50 使用，防止过拟合
             "batch_size": 256,

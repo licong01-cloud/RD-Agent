@@ -77,7 +77,7 @@ task:
         class: GeneralPTNN
         module_path: qlib.contrib.model.pytorch_general_nn
         kwargs:
-            n_epochs: {{ n_epochs }}
+            n_epochs: 30
             lr: {{ lr }}
             early_stop: {{ early_stop }}
             batch_size: {{ batch_size }}

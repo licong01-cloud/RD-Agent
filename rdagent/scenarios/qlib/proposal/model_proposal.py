@@ -155,5 +155,14 @@ class QlibModelHypothesis2Experiment(ModelHypothesis2Experiment):
                 )
             )
         exp = QlibModelExperiment(tasks, hypothesis=hypothesis)
-        exp.based_experiments = [t[0] for t in trace.hist if t[1] and isinstance(t[0], ModelExperiment)]
+        from rdagent.scenarios.qlib.experiment.factor_experiment import QlibFactorExperiment
+        
+        base_exps = [t[0] for t in trace.hist if t[1] and isinstance(t[0], ModelExperiment)]
+        
+        # Extract the latest successful SOTA factor experiment
+        sota_factors = [t[0] for t in trace.hist if t[1] and isinstance(t[0], QlibFactorExperiment)]
+        if sota_factors:
+            base_exps.append(sota_factors[-1])  # Append the latest SOTA factor experiment
+            
+        exp.based_experiments = base_exps
         return exp
