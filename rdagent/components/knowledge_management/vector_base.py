@@ -193,7 +193,7 @@ class PDVectorBase(VectorBase):
             filtered_df = self.vector_df[self.vector_df["label"].isin(constraint_labels)]
 
         similarities = filtered_df["embedding"].apply(
-            lambda x: 1 - cosine(x, document.embedding)
+            lambda x: 1 - cosine(x[:len(document.embedding)] if len(x) > len(document.embedding) else x + [0] * (len(document.embedding) - len(x)), document.embedding)
         )  # cosine is cosine distance, 1-similarity
 
         searched_similarities = similarities[similarities > similarity_threshold]
