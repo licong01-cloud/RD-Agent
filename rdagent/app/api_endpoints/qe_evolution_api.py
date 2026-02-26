@@ -81,21 +81,24 @@ async def _run_qlib_backtest(task_id: str, loop_id: str, config: Dict[str, Any],
                 file_path.write_text(content, encoding="utf-8")
                 _append_log(loop_dir, f"[INFO] Wrote experiment file: {rel_path}")
 
-        # 构造执行命令
-        # 由于在 RDAgent 中运行，可以直接在 loop_dir 下执行
-        cmd_parts = [f"cd {loop_dir}"]
-        
-        if (loop_dir / "prepare_factors.py").exists():
-            cmd_parts.append("python prepare_factors.py")
-            
-        cmd_parts.append("qrun conf.yaml")
-        
-        # 将环境变量注入
+        # 将环境变量注入，确保 model.py 等模块可被 qrun 导入
         env = os.environ.copy()
         env["PYTHONPATH"] = f"{loop_dir}:{env.get('PYTHONPATH', '')}"
-        
-        final_cmd = " && ".join(cmd_parts)
-        _append_log(loop_dir, f"[INFO] Executing command: {final_cmd}")
+        env.setdefault("PYTHONUNBUFFERED", "1")
+
+        # 构造执行命令
+        if wsl_command:
+            # AIstock 传入的自定义 WSL 命令（已包含 cd、conda activate 等）
+            final_cmd = wsl_command
+            _append_log(loop_dir, f"[INFO] Using wsl_command: {final_cmd}")
+        else:
+            # 默认命令链：cd → prepare_factors → qrun
+            cmd_parts = [f"cd {loop_dir}"]
+            if (loop_dir / "prepare_factors.py").exists():
+                cmd_parts.append("python prepare_factors.py")
+            cmd_parts.append("qrun conf.yaml")
+            final_cmd = " && ".join(cmd_parts)
+            _append_log(loop_dir, f"[INFO] Executing command: {final_cmd}")
         
         # 执行子进程
         process = await asyncio.create_subprocess_shell(
@@ -193,7 +196,10 @@ async def create_and_run_loop(task_id: str, request: LoopRunRequest, background_
     
     try:
         # 启动后台回测任务
-        background_tasks.add_task(_run_qlib_backtest, task_id, loop_id, request.config)
+        background_tasks.add_task(
+            _run_qlib_backtest, task_id, loop_id, request.config,
+            request.experiment_files, request.wsl_command,
+        )
         
         return LoopRunResponse(
             loop_id=loop_id,
@@ -302,3 +308,22 @@ async def cleanup_task_workspace(task_id: str):
             logger.error(f"Failed to clean up workspace {task_id}: {e}")
             raise HTTPException(status_code=500, detail=str(e))
     return {"status": "success", "message": f"Workspace {task_id} not found, assumed clean"}
+
+
+@router.get("/config")
+async def get_workspace_config():
+    """
+    返回 RDAgent 侧的工作区配置信息，供 AIstock 动态获取路径。
+    消除 AIstock 对 RDAgent 内部路径的硬编码依赖。
+    """
+    return {
+        "workspace_base": str(WORKSPACE_BASE),
+        "factor_data_dir": os.environ.get(
+            "RDAGENT_FACTOR_DATA_DIR",
+            "/mnt/f/Dev/RD-Agent-main/git_ignore_folder/factor_implementation_source_data",
+        ),
+        "qlib_data_path": os.environ.get(
+            "QLIB_DATA_PATH",
+            "/mnt/f/Dev/AIstock/qlib_bin/qlib_bin_20251209",
+        ),
+    }

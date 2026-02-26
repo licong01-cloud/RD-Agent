@@ -213,7 +213,7 @@ class QlibModelRunner(CachedRunner[QlibModelExperiment]):
                     "n_epochs": str(training_hyperparameters.get("n_epochs", "100")),
                     "lr": str(training_hyperparameters.get("lr", "2e-4")),
                     "early_stop": str(training_hyperparameters.get("early_stop", 10)),
-                    "batch_size": str(training_hyperparameters.get("batch_size", 256)),
+                    "batch_size": str(training_hyperparameters.get("batch_size", 16384)),
                     "weight_decay": str(training_hyperparameters.get("weight_decay", 0.0001)),
                 }
             )
@@ -225,7 +225,7 @@ class QlibModelRunner(CachedRunner[QlibModelExperiment]):
                     "n_epochs": "20",
                     "lr": "1e-3",
                     "early_stop": "5",
-                    "batch_size": "256",
+                    "batch_size": "16384",
                     "weight_decay": "1e-4",
                 }
             )

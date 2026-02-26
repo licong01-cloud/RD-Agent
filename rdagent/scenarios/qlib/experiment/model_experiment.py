@@ -7,17 +7,34 @@ from rdagent.components.coder.model_coder.model import (
     ModelFBWorkspace,
     ModelTask,
 )
+from rdagent.core.conf import RD_AGENT_SETTINGS
 from rdagent.core.experiment import Task
 from rdagent.core.scenario import Scenario
+from rdagent.log import rdagent_logger as logger
 from rdagent.scenarios.qlib.experiment.workspace import QlibFBWorkspace
 from rdagent.scenarios.shared.get_runtime_info import get_runtime_environment_by_env
-from rdagent.utils.agent.tpl import T
+from rdagent.utils.agent.tpl import PROJ_PATH, T
+
+
+def _resolve_template_folder(default_path: Path) -> Path:
+    """Resolve template folder with app_tpl override (mirrors tpl.py logic)."""
+    if RD_AGENT_SETTINGS.app_tpl is not None:
+        try:
+            rel = default_path.relative_to(PROJ_PATH)
+            override = (PROJ_PATH / RD_AGENT_SETTINGS.app_tpl / rel).resolve()
+            if override.is_dir():
+                logger.info(f"[TemplateFolderOverride] Using app_tpl: {override}")
+                return override
+        except (ValueError, OSError):
+            pass
+    return default_path
 
 
 class QlibModelExperiment(ModelExperiment[ModelTask, QlibFBWorkspace, ModelFBWorkspace]):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.experiment_workspace = QlibFBWorkspace(template_folder_path=Path(__file__).parent / "model_template")
+        tpl_folder = _resolve_template_folder(Path(__file__).parent / "model_template")
+        self.experiment_workspace = QlibFBWorkspace(template_folder_path=tpl_folder)
         self.stdout = ""
 
 

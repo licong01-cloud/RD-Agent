@@ -77,15 +77,20 @@ task:
         class: GeneralPTNN
         module_path: qlib.contrib.model.pytorch_general_nn
         kwargs:
-            n_epochs: 30
+            n_epochs: {{ n_epochs }}
             lr: {{ lr }}
             early_stop: {{ early_stop }}
-            batch_size: {{ batch_size }}
+            batch_size: {{ batch_size | default(16384) }}
             weight_decay: {{ weight_decay }}
             metric: loss
             loss: mse
-            n_jobs: 20
+            n_jobs: 12
             GPU: 0
+            use_amp: true
+            gradient_accumulation_steps: 1
+            pin_memory: true
+            prefetch_factor: 4
+            persistent_workers: true
             pt_model_uri: "model.model_cls"
             pt_model_kwargs: {
                 "num_features": {{ num_features }}{% if num_timesteps %}, "num_timesteps": {{ num_timesteps }}{% endif %}

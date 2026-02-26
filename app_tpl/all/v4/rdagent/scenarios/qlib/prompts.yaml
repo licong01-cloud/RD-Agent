@@ -163,10 +163,10 @@ model_experiment_output_format: |-
             "hyperparameter_name_3": "value of hyperparameter 3"
         },
         "training_hyperparameters" {  # All values are for reference; you can set them yourself
-            "n_epochs": "300",  # 推荐范围 300~500，可根据需要调整至最大 1000
+            "n_epochs": "100",  # 默认100，可根据需要调高至 300~500，配合 early_stop 防止过拟合
             "lr": "1e-3",
             "early_stop": 20,  # 建议配合 early_stop: 20~50 使用，防止过拟合
-            "batch_size": 256,
+            "batch_size": 16384,  # 大 batch 充分利用 GPU 算力，推荐 8192~16384
             "weight_decay": 1e-4,
         }
         "model_type": "Tabular or TimeSeries"  # Should be one of "Tabular" or "TimeSeries"

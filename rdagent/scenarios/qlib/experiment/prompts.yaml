@@ -214,8 +214,8 @@ qlib_factor_experiment_setting: |-
 
   #### Computing Resources and Training Load Suggestions (Please prioritize meeting the following requirements to fully utilize local 12-core 24-thread + GPU)
   - **Training Rounds and Batch Size**:
-    - 对于主要实验，避免使用过于小的配置（例如 `n_epochs < 100`，`batch_size < 256`）。
-    - 推荐配置范围：`n_epochs` 在 **300~500**；`batch_size` 优先 **512**（如果内存不足，可以降低至 256）。
+    - 对于主要实验，避免使用过于小的配置（例如 `n_epochs < 100`，`batch_size < 4096`）。
+    - 推荐配置范围：`n_epochs` 在 **300~500**；`batch_size` 优先 **16384**（充分利用GPU算力，如果显存不足可降低至 8192）。
     - 可根据需要调整 `n_epochs` 至最大 1000，建议配合 `early_stop: 20~50` 使用以防止过拟合。
   - **Parallelism Settings (CPU)**:
     - For components supporting `n_jobs`, prioritize setting to `n_jobs: 12` (close to the number of physical cores).
@@ -377,10 +377,10 @@ model_experiment_output_format: |-
             "hyperparameter_name_3": "value of hyperparameter 3"
         },
         "training_hyperparameters" {  # All values are for reference; you can set them yourself
-            "n_epochs": "30",  # 推荐范围 300~500，可根据需要调整至最大 1000
+            "n_epochs": "100",  # 默认100，可根据需要调高至 300~500，配合 early_stop 防止过拟合
             "lr": "1e-3",
             "early_stop": 20,  # 建议配合 early_stop: 20~50 使用，防止过拟合
-            "batch_size": 256,
+            "batch_size": 16384,  # 大 batch 充分利用 GPU 算力，推荐 8192~16384
             "weight_decay": 1e-4,
         }
         "model_type": "Tabular or TimeSeries"  # Should be one of "Tabular" or "TimeSeries"
