@@ -220,7 +220,9 @@ sota_asset_scan_full.json
 sota_model_types_analysis.json
 backfill_check_before.json
 
-# QuantEvolver独立日志和工作空间目录
+# QuantEvolver独立日志、工作空间、实验运行目录
 qe_logs/
 qe_workspace/
 qe_data/
+qe_programs/
+qe_2*/
