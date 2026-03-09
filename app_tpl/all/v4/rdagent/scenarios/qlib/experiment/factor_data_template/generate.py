@@ -5,7 +5,7 @@ import os
 provider_uri = (
     os.environ.get("QLIB_PROVIDER_URI", "").strip()
     or os.environ.get("AISTOCK_QLIB_PROVIDER_URI", "").strip()
-    or "/mnt/f/Dev/AIstock/qlib_bin/qlib_bin_20251209"
+    or "/home/lc999/data/qlib_bin"
 )
 provider_uri = provider_uri.strip() or "~/.qlib/qlib_data/cn_data"
 

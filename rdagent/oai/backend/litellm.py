@@ -173,30 +173,48 @@ class LiteLLMAPIBackend(APIBackend):
         """
         Call the chat completion function
         """
-        model_for_schema_check = LITELLM_SETTINGS.chat_model
+        # Resolve stage-specific model FIRST (fixes bug: was using global default)
+        complete_kwargs = self.get_complete_kwargs()
+        model = complete_kwargs["model"]
 
-        # NOTE: DeepSeek 官方已经支持 response_format=json_object，但当前 LiteLLM
-        # 的 supports_response_schema 对 deepseek/* 仍返回 False。
-        # 这里对 deepseek/* 做特判：
-        # - deepseek/*: 直接放行 response_format 交给 DeepSeek 处理；
-        # - 其他模型：仍严格依赖 supports_response_schema 判断。
-        is_deepseek_model = isinstance(model_for_schema_check, str) and model_for_schema_check.startswith("deepseek/")
+        # Check for explicit json_mode override in chat_model_map.
+        # Allows per-stage control: "json_mode": "false" to disable for reasoning models.
+        json_mode_override = None  # None = auto-detect, True = force on, False = force off
+        if LITELLM_SETTINGS.chat_model_map:
+            for t, mc in LITELLM_SETTINGS.chat_model_map.items():
+                if t in logger._tag:
+                    if "json_mode" in mc:
+                        json_mode_override = mc["json_mode"].lower() not in ("false", "0", "no", "off")
+                    break
 
-        if response_format and not is_deepseek_model and not supports_response_schema(model=model_for_schema_check):
-            logger.warning(
-                f"{LogColors.YELLOW}Model {model_for_schema_check} does not support response schema, ignoring response_format argument.{LogColors.END}",
-                tag="llm_messages",
-            )
-            response_format = None
+        if json_mode_override is False:
+            # Explicitly disabled via chat_model_map — strip response_format
+            if response_format:
+                logger.info(
+                    f"{LogColors.YELLOW}json_mode explicitly disabled for model {model}, "
+                    f"ignoring response_format argument.{LogColors.END}",
+                    tag="llm_messages",
+                )
+                response_format = None
+        elif json_mode_override is None:
+            # Auto-detect: DeepSeek special case + litellm.supports_response_schema
+            # NOTE: DeepSeek 官方已支持 response_format=json_object，但 LiteLLM
+            # 的 supports_response_schema 对 deepseek/* 仍返回 False，故做特判。
+            is_deepseek_model = isinstance(model, str) and model.startswith("deepseek/")
+            if response_format and not is_deepseek_model and not supports_response_schema(model=model):
+                logger.warning(
+                    f"{LogColors.YELLOW}Model {model} does not support response schema, "
+                    f"ignoring response_format argument.{LogColors.END}",
+                    tag="llm_messages",
+                )
+                response_format = None
+        # else: json_mode_override is True — keep response_format as-is
 
         if response_format:
             kwargs["response_format"] = response_format
 
         if LITELLM_SETTINGS.log_llm_chat_content:
             logger.info(self._build_log_messages(messages), tag="llm_messages")
-
-        complete_kwargs = self.get_complete_kwargs()
-        model = complete_kwargs["model"]
 
         response = completion(
             messages=messages,

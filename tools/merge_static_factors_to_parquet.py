@@ -15,11 +15,11 @@ def _load_dotenv_if_available() -> None:
 
 当前合并来源：
 - workspace 下的 combined_factors_df.parquet（如果存在）
-- AE 因子：/mnt/f/Dev/AIstock/factors/ae_recon_error_10d/result.pkl
-- daily_basic 因子：/mnt/f/Dev/AIstock/factors/daily_basic_factors/result.pkl
+- AE 因子：/home/lc999/data/aistock_factors/ae_recon_error_10d/result.pkl
+- daily_basic 因子：/home/lc999/data/aistock_factors/daily_basic_factors/result.pkl
 
 输出：
-- /mnt/f/Dev/AIstock/factors/combined_static_factors.parquet
+- /home/lc999/data/aistock_factors/combined_static_factors.parquet
 
 使用方式（在 WSL 中）：
 
@@ -41,7 +41,7 @@ def _get_factors_root() -> Path:
     root = (
         os.environ.get("AISTOCK_FACTORS_ROOT", "")
         or os.environ.get("AIstock_FACTORS_ROOT", "")
-        or "/mnt/f/Dev/AIstock/factors"
+        or "/home/lc999/data/aistock_factors"
     )
     return Path(root)
 

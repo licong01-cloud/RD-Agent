@@ -76,11 +76,11 @@ def _to_unix_path(p: str) -> str:
 
 
 def _guess_snapshot_root() -> str:
-    return os.environ.get("AIstock_SNAPSHOT_ROOT", r"/mnt/f/Dev/AIstock/qlib_snapshots/qlib_export_20251209")
+    return os.environ.get("AIstock_SNAPSHOT_ROOT", r"/home/lc999/data/qlib_snapshots")
 
 
 def _guess_provider_uri() -> str:
-    return os.environ.get("AIstock_Qlib_PROVIDER_URI", "/mnt/f/Dev/AIstock/qlib_bin/qlib_bin_20251209")
+    return os.environ.get("AIstock_Qlib_PROVIDER_URI", "/home/lc999/data/qlib_bin")
 
 
 def _safe_ratio(mask: pd.Series) -> float:
@@ -886,7 +886,7 @@ def main() -> None:
     parser.add_argument("--snapshot-root", default=_guess_snapshot_root())
     parser.add_argument("--provider-uri", default=_guess_provider_uri())
     parser.add_argument("--region", default=os.environ.get("AIstock_Qlib_REGION", "cn"))
-    parser.add_argument("--out-dir", default=os.environ.get("AIstock_GOVERNANCE_OUT", r"/mnt/f/Dev/AIstock/data_governance"))
+    parser.add_argument("--out-dir", default=os.environ.get("AIstock_GOVERNANCE_OUT", r"/home/lc999/data/data_governance"))
     parser.add_argument("--max-rows", type=int, default=200000)
 
     args = parser.parse_args()

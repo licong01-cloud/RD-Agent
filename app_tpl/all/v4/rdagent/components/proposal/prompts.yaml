@@ -60,5 +60,8 @@ hypothesis2experiment:
     The SOTA hypothesis and the corresponding feedback are as follows:
     {{ sota_hypothesis_and_feedback }}
     {% endif %}
+    {% if RAG %}
+    {{ RAG }}
+    {% endif %}
 
     Please generate the new {{ targets }} based on the information above.

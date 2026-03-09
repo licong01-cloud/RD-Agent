@@ -1,5 +1,5 @@
 qlib_init:
-    provider_uri: "/mnt/f/Dev/AIstock/qlib_bin/qlib_bin_20251209"
+    provider_uri: "/home/lc999/data/qlib_bin"
     region: cn
 
 market: &market all
@@ -41,7 +41,7 @@ data_handler_config: &data_handler_config
               fields_group: feature
               clip_outlier: true
               fit_start_time: 2018-08-01
-              fit_end_time: 2020-12-31
+              fit_end_time: 2022-12-31
         - class: Fillna
           kwargs:
               fields_group: feature
@@ -68,8 +68,8 @@ port_analysis_config: &port_analysis_config
         exchange_kwargs:
             limit_threshold: 0.095
             deal_price: close
-            open_cost: 0.0005
-            close_cost: 0.0015
+            open_cost: 0.0001
+            close_cost: 0.0001
             min_cost: 5
 
 task:
@@ -84,8 +84,12 @@ task:
             weight_decay: {{ weight_decay }}
             metric: loss
             loss: mse
-            n_jobs: 20
+            n_jobs: 4
             GPU: 0
+            use_amp: true
+            pin_memory: true
+            prefetch_factor: 2
+            persistent_workers: true
             pt_model_uri: "model.model_cls"
             pt_model_kwargs: {
                 "num_features": {{ num_features }}{% if num_timesteps %}, "num_timesteps": {{ num_timesteps }}{% endif %}

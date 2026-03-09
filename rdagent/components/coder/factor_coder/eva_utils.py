@@ -532,19 +532,42 @@ class FactorFinalDecisionEvaluator(FactorEvaluator):
                         json_target_type=Dict[str, str | bool | int],
                     ),
                 )
-                final_decision = final_evaluation_dict["final_decision"]
-                final_feedback = final_evaluation_dict["final_feedback"]
+                # Defensive: LLM may misspell key names (e.g. "final_eedback" instead of "final_decision")
+                final_decision = final_evaluation_dict.get("final_decision")
+                if final_decision is None:
+                    # Fuzzy match: find any key containing "decision"
+                    for k, v in final_evaluation_dict.items():
+                        if "decision" in k.lower() or "decisi" in k.lower():
+                            final_decision = v
+                            break
+                    if final_decision is None:
+                        # Look for any boolean value that's not the feedback
+                        for k, v in final_evaluation_dict.items():
+                            if isinstance(v, bool) and "feedback" not in k.lower():
+                                final_decision = v
+                                break
+                    if final_decision is None:
+                        final_decision = False  # safe fallback: reject
+
+                final_feedback = final_evaluation_dict.get("final_feedback")
+                if final_feedback is None:
+                    for k, v in final_evaluation_dict.items():
+                        if "feedback" in k.lower() and isinstance(v, str):
+                            final_feedback = v
+                            break
+                    if final_feedback is None:
+                        final_feedback = "No feedback provided by LLM."
 
                 final_decision = str(final_decision).lower() in ["true", "1"]
                 return final_decision, final_feedback
 
             except json.JSONDecodeError as e:
-                raise ValueError("Failed to decode JSON response from API.") from e
-            except KeyError as e:
                 attempts += 1
                 if attempts >= max_attempts:
-                    raise KeyError(
-                        "Response from API is missing 'final_decision' or 'final_feedback' key after multiple attempts."
-                    ) from e
+                    raise ValueError("Failed to decode JSON response from API after multiple attempts.") from e
+            except Exception as e:
+                attempts += 1
+                if attempts >= max_attempts:
+                    raise
 
         return None, None

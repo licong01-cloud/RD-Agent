@@ -1,5 +1,5 @@
 qlib_init:
-    provider_uri: "/mnt/f/Dev/AIstock/qlib_bin/qlib_bin_20251209"
+    provider_uri: "/home/lc999/data/qlib_bin"
     region: cn
 
 market: &market all
@@ -9,7 +9,7 @@ data_handler_config: &data_handler_config
     start_time: 2018-08-01
     end_time: 2025-12-01
     fit_start_time: 2018-08-01
-    fit_end_time: 2020-12-31
+    fit_end_time: 2022-12-31
     instruments: *market
     infer_processors:
         - class: FilterCol
@@ -29,7 +29,7 @@ data_handler_config: &data_handler_config
               fields_group: feature
     learn_processors:
         - class: DropnaLabel
-        - class: CSRankNorm
+        - class: CSZScoreNorm
           kwargs:
               fields_group: label
     label: ["Ref($close, -2) / Ref($close, -1) - 1"]
@@ -51,8 +51,8 @@ port_analysis_config: &port_analysis_config
         exchange_kwargs:
             limit_threshold: 0.095
             deal_price: close
-            open_cost: 0.0005
-            close_cost: 0.0015
+            open_cost: 0.0001
+            close_cost: 0.0001
             min_cost: 5
 
 task:

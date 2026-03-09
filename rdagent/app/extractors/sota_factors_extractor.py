@@ -734,6 +734,160 @@ class SOTAFactorsExtractor:
 
         return result
 
+    def extract_loop_factors(self, task_id: str, loop_index: int) -> Dict[str, Any]:
+        """从指定 Loop 提取所有通过 final_decision 的因子信息。
+
+        与 extract_aligned_sota_factors 逻辑类似，但只提取单个 Loop 的因子，
+        不走 based_experiments 链。
+
+        Args:
+            task_id: Task ID
+            loop_index: trace.hist 中的索引（0-based）
+
+        Returns:
+            dict: {
+                "task_id": str,
+                "loop_index": int,
+                "success": bool,
+                "factors": OrderedDict[str, dict],
+                "factor_count": int,
+                "loop_metrics": dict,
+                "error": str | None,
+            }
+        """
+        result: Dict[str, Any] = {
+            "task_id": task_id,
+            "loop_index": loop_index,
+            "success": False,
+            "factors": OrderedDict(),
+            "factor_count": 0,
+            "loop_metrics": {},
+            "error": None,
+        }
+
+        try:
+            session = self.load_session(task_id)
+            if not session:
+                result["error"] = "无法加载session文件"
+                return result
+
+            if not hasattr(session, "trace") or not hasattr(session.trace, "hist"):
+                result["error"] = "session没有trace.hist属性"
+                return result
+
+            hist = session.trace.hist
+            if loop_index < 0 or loop_index >= len(hist):
+                result["error"] = f"loop_index={loop_index} 超出范围 (共 {len(hist)} 个 Loop)"
+                return result
+
+            exp, feedback = hist[loop_index]
+
+            if not self._is_factor_experiment(exp):
+                result["error"] = f"Loop {loop_index} 不是因子实验 (type={type(exp).__name__})"
+                return result
+
+            # 提取该 Loop 的整体回测指标
+            loop_result = getattr(exp, "result", None)
+            result["loop_metrics"] = self._extract_metrics_from_result(loop_result)
+
+            # 遍历该 Loop 的所有因子
+            sub_count = len(exp.sub_tasks) if hasattr(exp, "sub_tasks") and exp.sub_tasks else 0
+            if sub_count == 0:
+                result["error"] = f"Loop {loop_index} 没有 sub_tasks"
+                return result
+
+            factors = OrderedDict()
+            for si in range(sub_count):
+                fname, fd = self._get_factor_info_from_exp(exp, si)
+                if not fname:
+                    continue
+                # 只提取 final_decision=True 的因子
+                if fd is not True:
+                    continue
+
+                normalized_name = self._normalize_factor_name(fname)
+                if normalized_name in factors:
+                    continue
+
+                source_code = self._get_factor_source_code(exp, si)
+                formulation, description, variables = self._get_factor_task_details(exp, si)
+
+                factors[normalized_name] = {
+                    "factor_name": normalized_name,
+                    "original_name": fname,
+                    "source_code": source_code,
+                    "source_code_length": len(source_code) if source_code else 0,
+                    "factor_formulation": formulation,
+                    "factor_description": description,
+                    "variables": variables,
+                }
+
+            result["success"] = True
+            result["factors"] = factors
+            result["factor_count"] = len(factors)
+
+            logger.info(
+                f"[{task_id}] Loop {loop_index} 提取完成: {len(factors)} 个因子 "
+                f"(final_decision=True)"
+            )
+
+        except Exception as e:
+            result["error"] = str(e)
+            logger.error(f"[{task_id}] Loop {loop_index} 提取因子失败: {e}", exc_info=True)
+
+        return result
+
+    def get_loop_parquet_path(self, task_id: str, loop_index: int) -> Path:
+        """获取指定 Loop 的 combined_factors_df.parquet 路径。
+
+        每个 Loop 执行时都会在 experiment_workspace 中生成 parquet，
+        无论该 Loop 是否成为 SOTA。
+
+        Args:
+            task_id: Task ID
+            loop_index: trace.hist 中的索引 (0-based)
+
+        Returns:
+            parquet 文件的 Path
+
+        Raises:
+            FileNotFoundError: session 不存在或 parquet 不存在
+            ValueError: loop_index 越界或非因子实验
+        """
+        session = self.load_session(task_id)
+        if not session:
+            raise FileNotFoundError(f"无法加载 task {task_id} 的 session")
+
+        if not hasattr(session, "trace") or not hasattr(session.trace, "hist"):
+            raise ValueError(f"task {task_id} 的 session 缺少 trace.hist")
+
+        hist = session.trace.hist
+        if loop_index < 0 or loop_index >= len(hist):
+            raise ValueError(f"loop_index={loop_index} 超出范围 (共 {len(hist)} 个 Loop)")
+
+        exp, _ = hist[loop_index]
+
+        if not self._is_factor_experiment(exp):
+            raise ValueError(f"Loop {loop_index} 不是因子实验 (type={type(exp).__name__})")
+
+        if not hasattr(exp, "experiment_workspace"):
+            raise ValueError(f"Loop {loop_index} 没有 experiment_workspace")
+
+        ws = exp.experiment_workspace
+        if not hasattr(ws, "workspace_path") or not ws.workspace_path:
+            raise ValueError(f"Loop {loop_index} 的 workspace_path 为空")
+
+        from ..path_utils import normalize_path
+        ws_path = normalize_path(ws.workspace_path)
+        parquet_file = ws_path / "combined_factors_df.parquet"
+
+        if not parquet_file.exists():
+            raise FileNotFoundError(
+                f"Loop {loop_index} 的 parquet 不存在: {parquet_file}"
+            )
+
+        return parquet_file
+
     def extract_task_sota_factors_v2(self, task_id: str) -> Dict:
         """
         V2版本的完整SOTA因子提取（兼容旧接口格式，内部使用aligned方法）

@@ -69,14 +69,29 @@ class ModelMultiProcessEvolvingStrategy(MultiProcessEvolvingStrategy):
             elif len(queried_similar_successful_knowledge_to_render) > 1:
                 queried_similar_successful_knowledge_to_render = queried_similar_successful_knowledge_to_render[1:]
 
-        code = json.loads(
+        resp_dict = json.loads(
             APIBackend(use_chat_cache=CoSTEER_SETTINGS.coder_use_cache).build_messages_and_create_chat_completion(
                 user_prompt=user_prompt,
                 system_prompt=system_prompt,
                 json_mode=True,
                 json_target_type=Dict[str, str],
             ),
-        )["code"]
+        )
+        code = resp_dict.get("code")
+        if code is None:
+            # Fuzzy match: find any key containing "code" (e.g. "Code", "python_code")
+            for k, v in resp_dict.items():
+                if "code" in k.lower() and isinstance(v, str):
+                    code = v
+                    break
+            if code is None:
+                # Last resort: use the first string value
+                for k, v in resp_dict.items():
+                    if isinstance(v, str) and len(v) > 20:
+                        code = v
+                        break
+            if code is None:
+                code = ""  # empty code will be caught by downstream evaluation
         return code
 
     def assign_code_list_to_evo(self, code_list, evo):

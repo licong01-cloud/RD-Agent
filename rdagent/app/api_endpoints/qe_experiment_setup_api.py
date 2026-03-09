@@ -47,15 +47,31 @@ def _get_qe_workspace_root() -> Path:
 
 
 def _get_factor_data_root() -> Path:
-    """获取因子数据目录根路径"""
-    from rdagent.components.coder.factor_coder.config import FACTOR_COSTEER_SETTINGS
-    return Path(FACTOR_COSTEER_SETTINGS.data_folder)
+    """获取因子数据目录根路径（通过环境变量配置，不依赖RD-Agent内部模块）"""
+    env_val = os.environ.get("QE_FACTOR_DATA_DIR")
+    if env_val:
+        return Path(env_val)
+    # 回退：尝试从RD-Agent配置读取（兼容过渡期）
+    try:
+        from rdagent.components.coder.factor_coder.config import FACTOR_COSTEER_SETTINGS
+        return Path(FACTOR_COSTEER_SETTINGS.data_folder)
+    except ImportError:
+        repo_root = Path(__file__).resolve().parents[3]
+        return repo_root / "git_ignore_folder" / "factor_implementation_source_data"
 
 
 def _get_factor_data_debug_root() -> Path:
-    """获取因子数据调试目录根路径"""
-    from rdagent.components.coder.factor_coder.config import FACTOR_COSTEER_SETTINGS
-    return Path(FACTOR_COSTEER_SETTINGS.data_folder_debug)
+    """获取因子数据调试目录根路径（通过环境变量配置，不依赖RD-Agent内部模块）"""
+    env_val = os.environ.get("QE_FACTOR_DATA_DEBUG_DIR")
+    if env_val:
+        return Path(env_val)
+    # 回退：尝试从RD-Agent配置读取（兼容过渡期）
+    try:
+        from rdagent.components.coder.factor_coder.config import FACTOR_COSTEER_SETTINGS
+        return Path(FACTOR_COSTEER_SETTINGS.data_folder_debug)
+    except ImportError:
+        repo_root = Path(__file__).resolve().parents[3]
+        return repo_root / "git_ignore_folder" / "factor_implementation_source_data_debug"
 
 
 QE_WORKSPACE_ROOT = _get_qe_workspace_root()

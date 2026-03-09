@@ -136,9 +136,6 @@ def create_app() -> FastAPI:
         except Exception:
             return None
 
-    _hex32_re = re.compile(r"\b[0-9a-f]{32}\b", flags=re.IGNORECASE)
-    _ws_re = re.compile(r"RD-Agent_workspace/([0-9a-f]{32})", flags=re.IGNORECASE)
-
     # pickle 序列化时的旧 (module, class_name) → 新 module 映射
     # 只有确实已迁移到 quant_experiment 的类才做重映射；
     # QlibFactorScenario / QlibModelScenario 仍留在各自原模块中，不能重映射。
@@ -764,39 +761,158 @@ def create_app() -> FastAPI:
             out.append({"task_id": name, "updated_at_utc": datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()})
         return out
 
+    def _ws_id_from_path(ws_path: str | Path | None) -> str | None:
+        """从 workspace_path 提取 hex32 workspace ID（取路径最后一段）。
+
+        仅当最后一段是合法的 32 位十六进制字符串时返回，否则返回 None。
+        不使用正则推测，直接解析路径结构。
+        """
+        if ws_path is None:
+            return None
+        name = Path(ws_path).name
+        if len(name) == 32:
+            try:
+                int(name, 16)
+                return name.lower()
+            except ValueError:
+                pass
+        return None
+
+    def _collect_ws_ids_from_object(obj: Any, out: set[str], _depth: int = 0) -> None:
+        """从反序列化对象中提取所有 workspace ID。
+
+        支持多种 pkl 结构：
+        - Experiment 对象：读取 experiment_workspace.workspace_path + sub_workspace_list + based_experiments
+        - FBWorkspace 对象：直接读取 workspace_path
+        - list：逐项递归提取
+        """
+        if obj is None or _depth > 10:
+            return
+        # 如果是 list，逐项递归
+        if isinstance(obj, list):
+            for item in obj:
+                _collect_ws_ids_from_object(item, out, _depth + 1)
+            return
+        # 直接 workspace_path（FBWorkspace / FactorFBWorkspace）
+        wp = getattr(obj, "workspace_path", None)
+        if wp is not None:
+            ws_id = _ws_id_from_path(wp)
+            if ws_id:
+                out.add(ws_id)
+        # experiment_workspace.workspace_path（Experiment 对象）
+        ew = getattr(getattr(obj, "experiment_workspace", None), "workspace_path", None)
+        ws_id = _ws_id_from_path(ew)
+        if ws_id:
+            out.add(ws_id)
+        # sub_workspace_list（Experiment 对象的子 workspace）
+        for sub in getattr(obj, "sub_workspace_list", None) or []:
+            if sub is None:
+                continue
+            sp = getattr(sub, "workspace_path", None)
+            ws_id = _ws_id_from_path(sp)
+            if ws_id:
+                out.add(ws_id)
+        # based_experiments（历史 SOTA 实验，每个都含自己的 experiment_workspace）
+        for be in getattr(obj, "based_experiments", None) or []:
+            _collect_ws_ids_from_object(be, out, _depth + 1)
+
+    def _collect_ws_ids_from_session(obj: Any, out: set[str]) -> None:
+        """从反序列化的 LoopBase/QuantRDLoop session 对象中提取 workspace ID。
+
+        session pickle 的顶层是循环控制器，workspace 引用嵌套在
+        loop_prev_out[N][step_name] 中。step_name 对应的值可能是：
+        - Experiment 对象（直接包含 workspace）
+        - dict（如 direct_exp_gen → {"exp_gen": Experiment}，需递归）
+        """
+        loop_prev_out = getattr(obj, "loop_prev_out", None)
+        if not isinstance(loop_prev_out, dict):
+            return
+        for _loop_idx, step_dict in loop_prev_out.items():
+            if not isinstance(step_dict, dict):
+                continue
+            for _step_name, step_obj in step_dict.items():
+                if step_obj is None:
+                    continue
+                if isinstance(step_obj, dict):
+                    # 嵌套 dict（如 direct_exp_gen → {"exp_gen": Experiment}）
+                    for _k, v in step_obj.items():
+                        _collect_ws_ids_from_object(v, out)
+                else:
+                    _collect_ws_ids_from_object(step_obj, out)
+
     def _extract_workspace_ids_from_log_dir(*, task_id: str) -> list[str]:
+        """从 task 日志目录提取所有关联的 workspace ID。
+
+        通过 pickle 反序列化读取真实对象属性，不使用字节正则推测。
+        扫描范围：
+          1. Loop_*/coding/coder result/**/*.pkl — Experiment 对象（最终编码结果）
+          2. Loop_*/running/runner result/**/*.pkl — Experiment 对象（仅完成的 loop）
+          3. __session__/* — LoopBase 对象（嵌套包含 Experiment）
+          4. Loop_*/coding/evo_loop_*/evolving code/**/*.pkl — CoSTEER 中间迭代的 Experiment 对象
+             （每次进化迭代都可能创建新的 FBWorkspace，只有最终迭代保留在 coder result 中，
+              中间迭代的 workspace 会成为孤儿目录，必须额外扫描）
+        """
         log_dir = _log_root() / str(task_id)
         if not log_dir.exists() or not log_dir.is_dir():
             return []
 
         found: set[str] = set()
-        max_files = 200
-        max_read_bytes = 256 * 1024
-        scanned = 0
-        for p in log_dir.rglob("*"):
-            if not p.is_file():
-                continue
-            scanned += 1
-            if scanned > max_files:
-                break
+
+        # ── 阶段 1：coder result（最终编码结果，覆盖面最广）──
+        for pkl in log_dir.glob("Loop_*/coding/coder result/**/*.pkl"):
             try:
-                bs = p.read_bytes()[:max_read_bytes]
-            except OSError:
-                continue
-            try:
-                text = bs.decode("utf-8", errors="ignore")
+                obj = _pickle_load_compat(pkl)
+                _collect_ws_ids_from_object(obj, found)
             except Exception:
                 continue
-            for m in _ws_re.finditer(text):
-                found.add(m.group(1).lower())
 
-        # 过滤掉不存在的 workspace
+        # ── 阶段 2：runner result（仅完成的 loop，可能包含额外 workspace）──
+        for pkl in log_dir.glob("Loop_*/running/runner result/**/*.pkl"):
+            try:
+                obj = _pickle_load_compat(pkl)
+                _collect_ws_ids_from_object(obj, found)
+            except Exception:
+                continue
+
+        # ── 阶段 3：session 快照（LoopBase 对象，嵌套结构）──
+        session_dir = log_dir / "__session__"
+        try:
+            if session_dir.is_dir():
+                for p in session_dir.rglob("*"):
+                    try:
+                        if not p.is_file():
+                            continue
+                        obj = _pickle_load_compat(p)
+                        _collect_ws_ids_from_session(obj, found)
+                    except Exception:
+                        continue
+        except Exception:
+            pass  # session 目录损坏或不可访问，跳过
+
+        # ── 阶段 4：CoSTEER 中间迭代（evo_loop_N/evolving code/*.pkl）──
+        # CoSTEER 每次进化迭代 (evo_loop_0, evo_loop_1, ...) 都会保存 Experiment 到 pkl，
+        # 其中 sub_workspace_list 包含独立 UUID 的 FBWorkspace。
+        # 只有最终迭代的 workspace 被写入 coder result，中间迭代的 workspace 在
+        # assign_code_list_to_evo() 中被替换后成为孤儿目录。
+        for pkl in log_dir.glob("Loop_*/coding/evo_loop_*/evolving code/**/*.pkl"):
+            try:
+                obj = _pickle_load_compat(pkl)
+                _collect_ws_ids_from_object(obj, found)
+            except Exception:
+                continue
+
+        # ── 阶段 4b：CoSTEER evolving feedback（可能包含 workspace 引用）──
+        for pkl in log_dir.glob("Loop_*/coding/evo_loop_*/evolving feedback/**/*.pkl"):
+            try:
+                obj = _pickle_load_compat(pkl)
+                # feedback 对象可能是 list，_collect_ws_ids_from_object 会递归处理
+                _collect_ws_ids_from_object(obj, found)
+            except Exception:
+                continue
+
+        # 过滤掉磁盘上不存在的 workspace
         ws_root = _workspace_root()
-        out: list[str] = []
-        for ws in sorted(found):
-            if (ws_root / ws).exists():
-                out.append(ws)
-        return out
+        return [ws for ws in sorted(found) if (ws_root / ws).exists()]
 
     def _ensure_task_log_dir(task_id: str) -> Path:
         tid = str(task_id).strip()
@@ -1603,7 +1719,7 @@ def create_app() -> FastAPI:
                 _provider_uri = (
                     _os.environ.get("QLIB_PROVIDER_URI", "").strip()
                     or _os.environ.get("AISTOCK_QLIB_PROVIDER_URI", "").strip()
-                    or "/mnt/f/Dev/AIstock/qlib_bin/qlib_bin_20251209"
+                    or "/home/lc999/data/qlib_bin"
                 )
                 _provider_uri = _provider_uri.strip() or "~/.qlib/qlib_data/cn_data"
                 try:
@@ -2155,6 +2271,112 @@ def create_app() -> FastAPI:
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error extracting model code: {e}")
 
+    @app.get("/tasks/{task_id}/loops/{loop_id}/training_diagnostics",
+             summary="获取指定Loop的模型训练诊断数据")
+    def get_loop_training_diagnostics(task_id: str, loop_id: int) -> dict[str, Any]:
+        """从 Qlib_execute_log pkl 中解析训练诊断数据。
+
+        返回 best_epoch, total_epochs, convergence_ratio, overfit_ratio,
+        final_train_loss, final_val_loss, train_loss_curve, val_loss_curve 等。
+        """
+        import re as _re
+
+        log_dir = _ensure_task_log_dir(task_id)
+        qlib_log_dir = log_dir / f"Loop_{loop_id}" / "running" / "Qlib_execute_log"
+
+        if not qlib_log_dir.exists():
+            raise HTTPException(status_code=404,
+                                detail=f"No training log for task {task_id} loop {loop_id}")
+
+        # 读取 pkl 文件中的训练日志文本
+        log_text = ""
+        for pid_dir in qlib_log_dir.iterdir():
+            if pid_dir.is_dir():
+                for pkl_file in pid_dir.glob("*.pkl"):
+                    try:
+                        import pickle
+                        with open(pkl_file, "rb") as fh:
+                            data = pickle.load(fh)
+                        if isinstance(data, str):
+                            log_text = data
+                            break
+                    except Exception:
+                        continue
+                if log_text:
+                    break
+
+        if not log_text:
+            raise HTTPException(status_code=404,
+                                detail=f"No parseable training log for task {task_id} loop {loop_id}")
+
+        # 解析 epoch 数据
+        # PyTorch: Epoch{N}: train {loss}, valid {loss}
+        re_epoch_pt = _re.compile(r"Epoch(\d+):\s+train\s+([\d.]+),?\s+valid\s+([\d.]+)")
+        # best score: {score} @ {epoch} epoch
+        re_best_pt = _re.compile(r"best score:\s+([\d.]+)\s*@\s*(\d+)\s*epoch")
+        # LGBModel: [N] train's l2: {loss}   valid's l2: {loss}
+        re_epoch_lgb = _re.compile(r"\[(\d+)\]\s+train's l2:\s+([\d.]+)\s+valid's l2:\s+([\d.]+)")
+
+        epochs = []
+        best_epoch = None
+        best_score = None
+        is_lgb = False
+
+        for line in log_text.split("\n"):
+            m = re_epoch_pt.search(line)
+            if m:
+                epochs.append({"epoch": int(m.group(1)),
+                               "train_loss": float(m.group(2)),
+                               "val_loss": float(m.group(3))})
+                continue
+            m = re_epoch_lgb.search(line)
+            if m:
+                is_lgb = True
+                epochs.append({"epoch": int(m.group(1)),
+                               "train_loss": float(m.group(2)),
+                               "val_loss": float(m.group(3))})
+                continue
+            m = re_best_pt.search(line)
+            if m:
+                best_score = float(m.group(1))
+                best_epoch = int(m.group(2))
+
+        if not epochs:
+            raise HTTPException(status_code=404,
+                                detail=f"No epoch data in training log for task {task_id} loop {loop_id}")
+
+        total_epochs = len(epochs)
+
+        if best_epoch is None:
+            min_val = min(epochs, key=lambda e: e["val_loss"])
+            best_epoch = min_val["epoch"]
+
+        final_train = epochs[-1]["train_loss"]
+        final_val = epochs[-1]["val_loss"]
+        init_train = epochs[0]["train_loss"]
+        init_val = epochs[0]["val_loss"]
+
+        convergence_ratio = best_epoch / total_epochs if total_epochs > 0 else 0
+        train_improve = init_train - final_train
+        val_improve = init_val - final_val
+        overfit_ratio = max(0, (train_improve - val_improve) / train_improve) if train_improve > 0 else 0
+        training_failed = (best_epoch == 0 and total_epochs > 1)
+
+        return {
+            "ok": True,
+            "task_id": task_id,
+            "loop_id": loop_id,
+            "best_epoch": best_epoch,
+            "total_epochs": total_epochs,
+            "convergence_ratio": round(convergence_ratio, 4),
+            "overfit_ratio": round(overfit_ratio, 4),
+            "training_failed": training_failed,
+            "final_train_loss": final_train,
+            "final_val_loss": final_val,
+            "train_loss_curve": [e["train_loss"] for e in epochs],
+            "val_loss_curve": [e["val_loss"] for e in epochs],
+        }
+
     @app.get("/tasks/{task_id}")
     def task_manifest(task_id: str) -> dict[str, Any]:
         return _build_task_manifest(task_id)
@@ -2607,19 +2829,17 @@ def create_app() -> FastAPI:
     @app.get("/tasks/{task_id}/workspaces", summary="获取Task的workspace信息")
     def get_task_workspaces(task_id: str) -> dict[str, Any]:
         """获取指定task的workspace信息。
-        
-        双重发现策略：
-        1. 文本扫描：通过正则匹配 log 目录下所有文件中的 workspace ID（覆盖面最广）
-        2. Pickle解析：从 session pickle 中提取 workspace_path（兼容旧逻辑）
-        两种策略结果取并集，确保覆盖所有 workspace。
+
+        通过 pickle 反序列化读取 coder result / runner result / session 中的
+        Experiment 对象属性，获取确定性的 workspace 路径。
         """
         import subprocess
-        
+
         try:
             _ensure_task_log_dir(task_id)
-            task_dir = (_log_root() / task_id).resolve()
             ws_root = _workspace_root()
-            
+            task_dir = (_log_root() / task_id).resolve()
+
             result = {
                 "ok": True,
                 "task_id": task_id,
@@ -2627,48 +2847,10 @@ def create_app() -> FastAPI:
                 "workspaces": [],
                 "total_size_mb": 0
             }
-            
-            # ===== 收集 workspace ID（hex32）=====
-            workspace_ids: set[str] = set()
-            
-            # 策略 A：文本扫描（主策略，覆盖面最广）
-            # 复用 _extract_workspace_ids_from_log_dir，扫描 log 目录下所有文件内容
-            # 匹配 RD-Agent_workspace/<hex32> 模式，不依赖 pickle 反序列化
-            try:
-                ids_from_scan = _extract_workspace_ids_from_log_dir(task_id=task_id)
-                workspace_ids.update(ids_from_scan)
-            except Exception:
-                pass
-            
-            # 策略 B：Pickle 解析（补充策略，兼容旧逻辑）
-            try:
-                for loop_dir in task_dir.iterdir():
-                    if not loop_dir.is_dir() or not loop_dir.name.startswith("Loop_"):
-                        continue
-                    runner_result_dir = loop_dir / "running" / "runner result"
-                    if not runner_result_dir.exists():
-                        continue
-                    for pkl_file in runner_result_dir.rglob("*.pkl"):
-                        try:
-                            obj = _pickle_load_compat(pkl_file)
-                            ws_path = getattr(getattr(obj, "experiment_workspace", None), "workspace_path", None)
-                            if ws_path and isinstance(ws_path, (str, Path)):
-                                for m in _ws_re.finditer(str(ws_path)):
-                                    workspace_ids.add(m.group(1).lower())
-                            sub_ws_list = getattr(obj, "sub_workspace_list", None) or []
-                            for sub_ws in sub_ws_list:
-                                if sub_ws is None:
-                                    continue
-                                sub_ws_path = getattr(sub_ws, "workspace_path", None)
-                                if sub_ws_path and isinstance(sub_ws_path, (str, Path)):
-                                    for m in _ws_re.finditer(str(sub_ws_path)):
-                                        workspace_ids.add(m.group(1).lower())
-                        except Exception:
-                            continue
-            except Exception:
-                pass
-            
-            # ===== 合并结果，构建 workspace 信息列表 =====
+
+            workspace_ids = _extract_workspace_ids_from_log_dir(task_id=task_id)
+
+            # ===== 构建 workspace 信息列表 =====
             total_size_bytes = 0
             for ws_id in sorted(workspace_ids):
                 try:
@@ -2714,11 +2896,9 @@ def create_app() -> FastAPI:
     @app.delete("/tasks/{task_id}", summary="删除Task及其所有数据")
     def delete_task(task_id: str) -> dict[str, Any]:
         """删除指定task的日志目录和所有workspace目录。
-        
-        双重发现策略（与 get_task_workspaces 一致）：
-        1. 文本扫描：通过正则匹配 log 目录下所有文件中的 workspace ID
-        2. Pickle解析：从 session pickle 中提取 workspace_path
-        两种策略结果取并集，确保删除时不遗漏任何 workspace。
+
+        通过 pickle 反序列化读取 coder result / runner result / session 中的
+        Experiment 对象属性来确定关联的 workspace ID，不使用字节正则推测。
         """
         import shutil
         import subprocess
@@ -2737,43 +2917,12 @@ def create_app() -> FastAPI:
             deleted_items = []
             total_size_mb = 0.0
             
-            # ===== 双重发现策略收集 workspace ID =====
-            workspace_ids: set[str] = set()
-            
-            # 策略 A：文本扫描（主策略）
+            # ===== 通过 pickle 反序列化收集 workspace ID =====
             try:
-                ids_from_scan = _extract_workspace_ids_from_log_dir(task_id=task_id)
-                workspace_ids.update(ids_from_scan)
-            except Exception:
-                pass
-            
-            # 策略 B：Pickle 解析（补充策略）
-            try:
-                for loop_dir in task_dir.iterdir():
-                    if not loop_dir.is_dir() or not loop_dir.name.startswith("Loop_"):
-                        continue
-                    runner_result_dir = loop_dir / "running" / "runner result"
-                    if not runner_result_dir.exists():
-                        continue
-                    for pkl_file in runner_result_dir.rglob("*.pkl"):
-                        try:
-                            obj = _pickle_load_compat(pkl_file)
-                            ws_path = getattr(getattr(obj, "experiment_workspace", None), "workspace_path", None)
-                            if ws_path and isinstance(ws_path, (str, Path)):
-                                for m in _ws_re.finditer(str(ws_path)):
-                                    workspace_ids.add(m.group(1).lower())
-                            sub_ws_list = getattr(obj, "sub_workspace_list", None) or []
-                            for sub_ws in sub_ws_list:
-                                if sub_ws is None:
-                                    continue
-                                sub_ws_path = getattr(sub_ws, "workspace_path", None)
-                                if sub_ws_path and isinstance(sub_ws_path, (str, Path)):
-                                    for m in _ws_re.finditer(str(sub_ws_path)):
-                                        workspace_ids.add(m.group(1).lower())
-                        except Exception:
-                            continue
-            except Exception:
-                pass
+                workspace_ids = _extract_workspace_ids_from_log_dir(task_id=task_id)
+            except Exception as e:
+                logger.warning(f"收集 workspace ID 失败（不影响 task 删除）: {e}")
+                workspace_ids = []
             
             # ===== 计算 task 目录大小 =====
             task_size_mb = 0.0
@@ -2844,6 +2993,189 @@ def create_app() -> FastAPI:
                 "task_id": task_id,
                 "error": f"删除失败: {str(e)}"
             }
+
+    # ────────────────────────────────────────────────────────────────────
+    #  Workspace 管理 API: 统计、分类、清理孤儿 workspace
+    # ────────────────────────────────────────────────────────────────────
+
+    _WS_META_FILES = frozenset({
+        "experiment_summary.json", "manifest.json",
+        "workspace_meta.json", "strategy_meta.json",
+    })
+
+    def _classify_workspace(ws_dir: Path) -> str:
+        """根据目录内原始文件（排除后期元数据标签）判断 workspace 类型。"""
+        files = set(f.name for f in ws_dir.iterdir() if f.is_file())
+        orig = files - _WS_META_FILES
+        if not orig:
+            return "empty_meta_only"
+        if orig == {"runtime_info.py"}:
+            return "runtime_info_orphan"
+        if "factor.py" in orig:
+            return "factor_workspace"
+        if "conf.yaml" in orig or "conf_baseline.yaml" in orig or "conf_combined_factors_dynamic.yaml" in orig:
+            return "qlib_experiment"
+        if "model.py" in orig:
+            return "model_workspace"
+        if "combined_factors_df.parquet" in orig:
+            return "qlib_experiment"
+        return "other"
+
+    @app.get("/workspace/stats")
+    def workspace_stats() -> Dict[str, Any]:
+        """统计所有 workspace 目录的分类和数量。
+
+        返回:
+        - total: 总目录数
+        - by_type: 按类型分组计数
+        - tracked: 被 pkl 追溯到的 workspace 数量
+        - orphan: 未追溯到的 workspace 数量
+        """
+        import collections
+
+        ws_root = _workspace_root()
+        if not ws_root.exists():
+            return {"total": 0, "by_type": {}, "tracked": 0, "orphan": 0}
+
+        type_counts: dict[str, int] = collections.defaultdict(int)
+        all_ws_ids: set[str] = set()
+
+        for d in ws_root.iterdir():
+            if not d.is_dir() or len(d.name) != 32:
+                continue
+            try:
+                int(d.name, 16)
+            except ValueError:
+                continue
+            all_ws_ids.add(d.name.lower())
+            ws_type = _classify_workspace(d)
+            type_counts[ws_type] += 1
+
+        # 收集所有 task 能追溯的 workspace IDs
+        tracked_ids: set[str] = set()
+        log_root = _log_root()
+        if log_root.exists():
+            for task_dir in log_root.iterdir():
+                if task_dir.is_dir() and not task_dir.name.startswith("."):
+                    try:
+                        ids = _extract_workspace_ids_from_log_dir(task_id=task_dir.name)
+                        tracked_ids.update(i.lower() for i in ids)
+                    except Exception:
+                        continue
+
+        orphan_ids = all_ws_ids - tracked_ids
+
+        return {
+            "total": len(all_ws_ids),
+            "by_type": dict(sorted(type_counts.items(), key=lambda x: -x[1])),
+            "tracked": len(tracked_ids & all_ws_ids),
+            "orphan": len(orphan_ids),
+            "orphan_by_type": _count_types_for_ids(ws_root, orphan_ids),
+        }
+
+    def _count_types_for_ids(ws_root: Path, ws_ids: set[str]) -> dict[str, int]:
+        """对给定的 workspace ID 集合按类型统计。"""
+        import collections
+        counts: dict[str, int] = collections.defaultdict(int)
+        for ws_id in ws_ids:
+            d = ws_root / ws_id
+            if d.is_dir():
+                counts[_classify_workspace(d)] += 1
+        return dict(sorted(counts.items(), key=lambda x: -x[1]))
+
+    @app.post("/workspace/cleanup")
+    def workspace_cleanup(
+        mode: str = Query(
+            "runtime_info_only",
+            description="清理模式: runtime_info_only=仅删runtime_info孤儿, all_orphans=所有未追溯的孤儿"
+        ),
+        dry_run: bool = Query(True, description="试运行模式，仅统计不实际删除"),
+        limit: int = Query(0, description="最多删除多少个目录（0=不限制）"),
+    ) -> Dict[str, Any]:
+        """安全清理孤儿 workspace 目录。
+
+        - runtime_info_only: 仅清理只含 runtime_info.py 的孤儿（最安全，约占 95%）
+        - all_orphans: 清理所有未被 pkl 追溯到的 workspace（需谨慎）
+        - dry_run=true: 默认仅统计不删除
+
+        两种模式都会先收集所有 task 的 tracked workspace IDs，确保不会误删任何
+        与现有 task 关联的 workspace。
+        """
+        import shutil
+
+        ws_root = _workspace_root()
+        if not ws_root.exists():
+            return {"ok": True, "deleted": 0, "freed_mb": 0.0, "message": "workspace 目录不存在"}
+
+        # 无论哪种模式，都先收集所有 task 能追溯的 workspace IDs，防止误删
+        tracked_ids: set[str] = set()
+        log_root = _log_root()
+        if log_root.exists():
+            for task_dir in log_root.iterdir():
+                if task_dir.is_dir() and not task_dir.name.startswith("."):
+                    try:
+                        ids = _extract_workspace_ids_from_log_dir(task_id=task_dir.name)
+                        tracked_ids.update(i.lower() for i in ids)
+                    except Exception:
+                        continue
+
+        to_delete: list[Path] = []
+        skipped_tracked = 0
+        for d in ws_root.iterdir():
+            if not d.is_dir() or len(d.name) != 32:
+                continue
+            try:
+                int(d.name, 16)
+            except ValueError:
+                continue
+
+            ws_id = d.name.lower()
+
+            # 安全守卫：被任何 task pkl 追溯到的 workspace 绝不删除
+            if ws_id in tracked_ids:
+                skipped_tracked += 1
+                continue
+
+            if mode == "runtime_info_only":
+                ws_type = _classify_workspace(d)
+                if ws_type in ("runtime_info_orphan", "empty_meta_only"):
+                    to_delete.append(d)
+            elif mode == "all_orphans":
+                to_delete.append(d)
+
+            if limit > 0 and len(to_delete) >= limit:
+                break
+
+        deleted_count = 0
+        freed_bytes = 0
+        errors: list[str] = []
+
+        if not dry_run:
+            for d in to_delete:
+                try:
+                    dir_size = sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+                    shutil.rmtree(d)
+                    deleted_count += 1
+                    freed_bytes += dir_size
+                except Exception as e:
+                    errors.append(f"{d.name}: {e}")
+
+        freed_mb = round(freed_bytes / (1024 * 1024), 2)
+        return {
+            "ok": True,
+            "mode": mode,
+            "dry_run": dry_run,
+            "candidates": len(to_delete),
+            "skipped_tracked": skipped_tracked,
+            "deleted": deleted_count,
+            "freed_mb": freed_mb,
+            "errors": errors[:20] if errors else [],
+            "message": (
+                f"试运行: 发现 {len(to_delete)} 个可清理 workspace（跳过 {skipped_tracked} 个被追溯的）"
+                if dry_run
+                else f"已删除 {deleted_count} 个 workspace，释放 {freed_mb} MB（跳过 {skipped_tracked} 个被追溯的）"
+            ),
+        }
 
     @app.get("/tasks/{task_id}/complete_assets")
     def get_task_complete_assets(task_id: str) -> Dict[str, Any]:

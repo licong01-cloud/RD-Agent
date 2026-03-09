@@ -8,7 +8,7 @@ qlib_factor_interface_error_prevention: |-
   - **总原则**：严禁为缺失字段"编造/猜测/假设"一个固定值或常数分母来把公式凑出来.
   - 在实现依赖特定字段的因子前，必须先做列存在性检查：
     ```python
-    required_cols = ["close", "volume", "db_circ_mv"]
+    required_cols = ["<field_1>", "<field_2>", "<field_3>"]
     missing = [c for c in required_cols if c not in df.columns]
 
     if missing:
@@ -39,11 +39,11 @@ qlib_factor_interface_error_prevention: |-
     - 正确代码：
       ```python
       # 正确：只使用实际存在的字段名
-      required_cols = ["close", "volume"]
+      required_cols = ["<field_a>", "<field_b>"]
       missing = [c for c in required_cols if c not in df.columns]
       if missing:
           raise ValueError(f"缺少必要字段: {missing}")
-      series = df["close"] / df["close"].shift(1)
+      series = df["<field_a>"] / df["<field_b>"]
       ```
 
   - **错误3：修改 df.index 结构**

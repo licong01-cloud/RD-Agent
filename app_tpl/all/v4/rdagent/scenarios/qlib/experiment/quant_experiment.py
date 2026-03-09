@@ -137,6 +137,11 @@ class QlibQuantScenario(Scenario):
 {self.get_source_data_desc()}
 """
 
+        def background_only(action: str | None = None) -> str:
+            return f"""\n------Background of the scenario------
+{self.background(action)}
+"""
+
         # TODO: There are still some issues with handling source_data here
         def source_data() -> str:
             return f"""
@@ -162,7 +167,31 @@ class QlibQuantScenario(Scenario):
 {self.simulator(tag)}
 """
 
-        if simple_background:
+        # ===== Fine-grained branches for factor workflow stages =====
+        # Stage 1: Hypothesis Generation — background + source_data + simulator
+        if filtered_tag == "hypothesis":
+            return common_description("factor") + simulator("factor")
+        # Stage 2: Experiment Design — background + source_data + simulator
+        elif filtered_tag == "experiment_design":
+            return common_description("factor") + simulator("factor")
+        # Stage 3: Code Generation — background + source_data + interface + output (no simulator)
+        elif filtered_tag == "coding":
+            return common_description("factor") + interface("factor") + output("factor")
+        # Stage 4: Code Review — background + interface + output (no source_data, no simulator)
+        elif filtered_tag == "code_review":
+            return background_only("factor") + interface("factor") + output("factor")
+        # Stage 5: Output Format Check — output only
+        elif filtered_tag == "output_format_check":
+            return output("factor")
+        # Stage 6: Final Decision — background only
+        elif filtered_tag == "final_decision":
+            return background_only("factor")
+        # Stage 7: Feedback Generation — background + simulator (no interface, no output, no source_data)
+        elif filtered_tag == "factor_feedback":
+            return background_only("factor") + simulator("factor")
+
+        # ===== Original coarse-grained branches (backward compatibility) =====
+        elif simple_background:
             return common_description()
         elif filtered_tag == "hypothesis_and_experiment" or filtered_tag == "feedback":
             return common_description() + simulator(None)

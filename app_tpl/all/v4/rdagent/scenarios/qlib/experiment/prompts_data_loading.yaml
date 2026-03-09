@@ -7,7 +7,7 @@ qlib_factor_interface_data_loading: |-
     - 如果因子定义依赖这些字段（例如流通市值、流通股本、换手率、资金净流入等），**必须**显式读取并 join。为节省内存，**严禁全量加载**，必须通过 `columns` 参数仅读取必要的列：
       ```python
       # 必须：仅读取计算所需的列，以避免 OOM (static_factors.parquet 很大)
-      required_static_cols = ["db_circ_mv", "mf_net_amt"] # 示例：按需替换为实际所需列名
+      required_static_cols = ["<col_1>", "<col_2>"] # 按需替换为实际所需列名（从 schema 中选择任意 db_*/mf_*/bb_*/cp_* 字段）
       static_df = pd.read_parquet("static_factors.parquet", columns=required_static_cols).sort_index()
       
       # 注意：当前数据源的 instrument 已经是 Qlib 风格（600000.SH/000001.SZ），与 static_factors.parquet 完全对齐.

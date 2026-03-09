@@ -7,18 +7,35 @@ from rdagent.components.coder.factor_coder.factor import (
     FactorFBWorkspace,
     FactorTask,
 )
+from rdagent.core.conf import RD_AGENT_SETTINGS
 from rdagent.core.experiment import Task
 from rdagent.core.scenario import Scenario
+from rdagent.log import rdagent_logger as logger
 from rdagent.scenarios.qlib.experiment.utils import get_data_folder_intro
 from rdagent.scenarios.qlib.experiment.workspace import QlibFBWorkspace
 from rdagent.scenarios.shared.get_runtime_info import get_runtime_environment_by_env
-from rdagent.utils.agent.tpl import T
+from rdagent.utils.agent.tpl import PROJ_PATH, T
+
+
+def _resolve_template_folder(default_path: Path) -> Path:
+    """Resolve template folder with app_tpl override (mirrors model_experiment.py logic)."""
+    if RD_AGENT_SETTINGS.app_tpl is not None:
+        try:
+            rel = default_path.relative_to(PROJ_PATH)
+            override = (PROJ_PATH / RD_AGENT_SETTINGS.app_tpl / rel).resolve()
+            if override.is_dir():
+                logger.info(f"[TemplateFolderOverride] Using app_tpl: {override}")
+                return override
+        except (ValueError, OSError):
+            pass
+    return default_path
 
 
 class QlibFactorExperiment(FactorExperiment[FactorTask, QlibFBWorkspace, FactorFBWorkspace]):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.experiment_workspace = QlibFBWorkspace(template_folder_path=Path(__file__).parent / "factor_template")
+        tpl_folder = _resolve_template_folder(Path(__file__).parent / "factor_template")
+        self.experiment_workspace = QlibFBWorkspace(template_folder_path=tpl_folder)
         self.stdout = ""
 
 
@@ -68,7 +85,41 @@ class QlibFactorScenario(Scenario):
     def get_scenario_all_desc(
         self, task: Task | None = None, filtered_tag: str | None = None, simple_background: bool | None = None
     ) -> str:
-        """A static scenario describer"""
+        """A static scenario describer with fine-grained filtered_tag support."""
+
+        def _background_only() -> str:
+            return f"""Background of the scenario:
+{self.background}
+"""
+
+        def _common_desc() -> str:
+            return f"""Background of the scenario:
+{self.background}
+The source data you can use:
+{self.get_source_data_desc(task)}
+"""
+
+        # ===== Fine-grained branches (aligned with QlibQuantScenario) =====
+        if filtered_tag == "hypothesis":
+            return _common_desc() + f"The simulator user can use to test your factor:\n{self.simulator}\n"
+        elif filtered_tag == "experiment_design":
+            return _common_desc() + f"The simulator user can use to test your factor:\n{self.simulator}\n"
+        elif filtered_tag == "coding":
+            return (_common_desc()
+                    + f"The interface you should follow to write the runnable code:\n{self.interface}\n"
+                    + f"The output of your code should be in the format:\n{self.output_format}\n")
+        elif filtered_tag == "code_review":
+            return (_background_only()
+                    + f"The interface you should follow to write the runnable code:\n{self.interface}\n"
+                    + f"The output of your code should be in the format:\n{self.output_format}\n")
+        elif filtered_tag == "output_format_check":
+            return f"The output of your code should be in the format:\n{self.output_format}\n"
+        elif filtered_tag == "final_decision":
+            return _background_only()
+        elif filtered_tag == "factor_feedback":
+            return _background_only() + f"The simulator user can use to test your factor:\n{self.simulator}\n"
+
+        # ===== Original branches (backward compatibility) =====
         if simple_background:
             return f"""Background of the scenario:
 {self.background}"""

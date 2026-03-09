@@ -67,7 +67,7 @@ class QuantRDLoop(RDLoop):
 
     async def direct_exp_gen(self, prev_out: dict[str, Any]):
         while True:
-            if self.get_unfinished_loop_cnt(self.loop_idx) < RD_AGENT_SETTINGS.get_max_parallel():
+            if self.get_unfinished_loop_cnt(self.loop_idx) < RD_AGENT_SETTINGS.get_max_pending_loops():
                 hypo = self._propose()
                 assert hypo.action in ["factor", "model"]
                 if hypo.action == "factor":

@@ -1,4 +1,5 @@
 import json
+import logging
 from typing import List, Tuple
 
 from rdagent.components.coder.model_coder.model import ModelExperiment, ModelTask
@@ -7,6 +8,8 @@ from rdagent.core.proposal import Hypothesis, Scenario, Trace
 from rdagent.scenarios.qlib.experiment.model_experiment import QlibModelExperiment
 from rdagent.scenarios.qlib.experiment.quant_experiment import QlibQuantScenario
 from rdagent.utils.agent.tpl import T
+
+logger = logging.getLogger(__name__)
 
 QlibModelHypothesis = Hypothesis
 
@@ -51,7 +54,7 @@ class QlibModelHypothesisGen(ModelHypothesisGen):
             "hypothesis_and_feedback": hypothesis_and_feedback,
             "last_hypothesis_and_feedback": last_hypothesis_and_feedback,
             "SOTA_hypothesis_and_feedback": sota_hypothesis_and_feedback,
-            "RAG": "1. In Quantitative Finance, market data could be time-series, and GRU model/LSTM model are suitable for them. Do not generate GNN model as for now.\n2. The training data consists of less than 1 million samples for the training set and approximately 250,000 samples for the validation set. Please design the hyperparameters accordingly and control the model size. This has a significant impact on the training results. If you believe that the previous model itself is good but the training hyperparameters or model hyperparameters are not optimal, you can return the same model and adjust these parameters instead.",
+            "RAG": "1. In Quantitative Finance, market data could be time-series, and GRU model/LSTM model are suitable for them. Do not generate GNN model as for now.\n2. The training data consists of approximately 3,700,000 samples for the training set and approximately 1,200,000 samples for the validation set (A-share all market, 2018-2022 train, 2023-2024 valid). Please design the hyperparameters accordingly and control the model size. This has a significant impact on the training results. If you believe that the previous model itself is good but the training hyperparameters or model hyperparameters are not optimal, you can return the same model and adjust these parameters instead.",
             "hypothesis_output_format": T("scenarios.qlib.prompts:hypothesis_output_format").r(),
             "hypothesis_specification": T("scenarios.qlib.prompts:model_hypothesis_specification").r(),
         }
@@ -128,20 +131,24 @@ class QlibModelHypothesis2Experiment(ModelHypothesis2Experiment):
             "SOTA_hypothesis_and_feedback": sota_hypothesis_and_feedback,
             "experiment_output_format": experiment_output_format,
             "target_list": [],
-            "RAG": "Note, the training data consists of less than 1 million samples for the training set and approximately 250,000 samples for the validation set. Please design the hyperparameters accordingly and control the model size. This has a significant impact on the training results. If you believe that the previous model itself is good but the training hyperparameters or model hyperparameters are not optimal, you can return the same model and adjust these parameters instead.",
+            "RAG": "Note, the training data consists of approximately 3,700,000 samples for the training set and about 1,200,000 samples for the validation set (A-share all market, 2018-2022 train, 2023-2024 valid). Please design the hyperparameters accordingly and control the model size. This has a significant impact on the training results. If you believe that the previous model itself is good but the training hyperparameters or model hyperparameters are not optimal, you can return the same model and adjust these parameters instead.",
         }, True
 
     def convert_response(self, response: str, hypothesis: Hypothesis, trace: Trace) -> ModelExperiment:
         response_dict = json.loads(response)
         tasks = []
         for model_name in response_dict:
-            description = response_dict[model_name]["description"]
-            formulation = response_dict[model_name]["formulation"]
-            architecture = response_dict[model_name]["architecture"]
-            variables = response_dict[model_name]["variables"]
-            hyperparameters = response_dict[model_name]["hyperparameters"]
-            training_hyperparameters = response_dict[model_name]["training_hyperparameters"]
-            model_type = response_dict[model_name]["model_type"]
+            model_info = response_dict[model_name]
+            if not isinstance(model_info, dict):
+                logger.warning(f"[convert_response] Unexpected value type for model '{model_name}': {type(model_info)}. Skipping.")
+                continue
+            description = model_info.get("description", "No description provided")
+            formulation = model_info.get("formulation", "")
+            architecture = model_info.get("architecture", "")
+            variables = model_info.get("variables", {})
+            hyperparameters = model_info.get("hyperparameters", {})
+            training_hyperparameters = model_info.get("training_hyperparameters", {})
+            model_type = model_info.get("model_type", "Tabular")
             tasks.append(
                 ModelTask(
                     name=model_name,

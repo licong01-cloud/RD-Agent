@@ -1,6 +1,6 @@
 """
 增强版TopkDropoutStrategy策略
-支持分阶段止盈、低分清仓、动态权重分配等功能
+支持止损、低分清仓、动态权重分配等功能
 """
 
 import logging
@@ -19,14 +19,10 @@ class EnhancedTopkDropoutStrategy(TopkDropoutStrategy):
     增强版TopkDropoutStrategy，支持：
     1. 止损机制：
        - 亏损达到10%立刻清仓
-    2. 分阶段止盈：
-       - 盈利15%抛出持仓份额的30%
-       - 盈利超25%，再抛出持仓份额的30%（累计60%）
-       - 盈利超过35%抛出全部持仓股票
-    3. 备选列表清仓：
-       - 最低评分阈值0.1
+    2. 备选列表清仓：
+       - 最低评分阈值0.0
        - 持仓股票不在备选列表（评分前50名）中，直接清仓
-    4. 动态权重分配：
+    3. 动态权重分配：
        - 按评分分配权重，评分越高仓位越高
        - 最大仓位控制在90%
        - 最大持仓股票数量50只
@@ -36,7 +32,7 @@ class EnhancedTopkDropoutStrategy(TopkDropoutStrategy):
                  signal=None,
                  topk=50,
                  n_drop=5,
-                 min_score=0.10,             # 最低评分阈值
+                 min_score=0.0,             # 最低评分阈值
                  max_position_ratio=0.90,     # 最大仓位比例
                  stop_loss=-0.10,             # 止损阈值：-10%
                  min_trade_price=0.5,
@@ -55,7 +51,6 @@ class EnhancedTopkDropoutStrategy(TopkDropoutStrategy):
         self.max_single_order_amount = float(max_single_order_amount)
         self.lot_size = float(lot_size)
         self.entry_prices = {}  # 记录买入价格 {stock_id: price}，持仓期间永不删除
-        self.entry_amounts = {}  # 记录初始持仓数量 {stock_id: amount}
         self._last_diag_date = None
         self._buy_skip_stats = {}
         self._warn_missing_entry_prices = set()
@@ -96,6 +91,8 @@ class EnhancedTopkDropoutStrategy(TopkDropoutStrategy):
             return float(shares)
         if getattr(self.trade_exchange, "trade_w_adj_price", False) or getattr(self.trade_exchange, "trade_unit", None) is None:
             return float(shares)
+        if factor is None or np.isnan(factor):
+            return None
         return float(shares) / float(factor)
 
     def _adjusted_amount_to_shares(self, adjusted_amount: float, factor: float | None) -> float:
@@ -188,7 +185,6 @@ class EnhancedTopkDropoutStrategy(TopkDropoutStrategy):
                 amt = None
             if amt is not None and amt <= 0:
                 self.entry_prices.pop(stock_id, None)
-                self.entry_amounts.pop(stock_id, None)
 
         for stock_id in current_holdings:
             if stock_id not in self.entry_prices and stock_id not in self._warn_missing_entry_prices:
@@ -236,83 +232,11 @@ class EnhancedTopkDropoutStrategy(TopkDropoutStrategy):
                 sell_orders.append(
                     Order(stock_id, amount, OrderDir.SELL, trade_start_time, trade_end_time)
                 )
-                # 注意：不能在下单时就删除 entry_prices/entry_amounts。
+                # 注意：不能在下单时就删除 entry_prices。
                 # 订单可能因为涨跌停/停牌/价格NaN等原因未成交，实际仍持仓。
-                # 清理由每日开头的“持仓对账”统一处理：确认持仓量为0才清理。
-        
-        # 3. 止盈检查（分阶段止盈）
-        for stock_id in current_holdings:
-            if stock_id not in self.entry_prices:
-                continue  # 没有成本价无法计算收益率，跳过
-            
-            entry_price = self.entry_prices[stock_id]
-            current_price = self._get_current_price(stock_id, trade_step, OrderDir.SELL)
-            
-            if current_price is None or current_price <= 0:
-                continue
-            
-            return_rate = (current_price - entry_price) / entry_price
-            
-            # 分阶段止盈逻辑（阈值调整为15%、25%、35%）
-            if return_rate >= 0.35:
-                # 盈利超过35%，抛出全部持仓
-                amount = self.trade_position.get_stock_amount(stock_id)
-                sell_orders.append(
-                    Order(stock_id, amount, OrderDir.SELL, trade_start_time, trade_end_time)
-                )
-                # 注意：不能在下单时就删除 entry_prices/entry_amounts。
-                # 订单可能因为涨跌停/停牌/价格NaN等原因未成交，实际仍持仓。
-                # 清理由每日开头的"持仓对账"统一处理：确认持仓量为0才清理。
-                    
-            elif return_rate >= 0.25:
-                # 盈利超过25%，再抛出持仓份额的30%（累计60%）
-                current_amount = self.trade_position.get_stock_amount(stock_id)
-                if stock_id in self.entry_amounts:
-                    original_amount = self.entry_amounts[stock_id]
-                    # 如果已经卖出过30%，当前持有量应该是70%
-                    # 再卖出30%意味着卖出 0.3 * original_amount
-                    sell_amount = 0.3 * original_amount
-                    if sell_amount > current_amount:
-                        sell_amount = current_amount
-                else:
-                    # 第一次达到25%盈利，卖出30%
-                    sell_amount = 0.3 * current_amount
-                    self.entry_amounts[stock_id] = current_amount  # 记录初始持仓
-                
-                if sell_amount > 0:
-                    sell_orders.append(
-                        Order(
-                            stock_id,
-                            sell_amount,
-                            OrderDir.SELL,
-                            trade_start_time,
-                            trade_end_time,
-                        )
-                    )
-                    if sell_amount >= current_amount:
-                        # 如果卖出全部，entry_amounts 清理由每日开头的持仓对账统一处理
-                        pass
-                    
-            elif return_rate >= 0.15:
-                # 盈利15%，抛出持仓份额的30%
-                current_amount = self.trade_position.get_stock_amount(stock_id)
-                if stock_id not in self.entry_amounts:
-                    # 第一次达到15%盈利，卖出30%
-                    sell_amount = 0.3 * current_amount
-                    self.entry_amounts[stock_id] = current_amount  # 记录初始持仓
-                    
-                    if sell_amount > 0:
-                        sell_orders.append(
-                            Order(
-                                stock_id,
-                                sell_amount,
-                                OrderDir.SELL,
-                                trade_start_time,
-                                trade_end_time,
-                            )
-                        )
-        
-        # 4. 备选股票列表检查
+                # 清理由每日开头的”持仓对账”统一处理：确认持仓量为0才清理。
+
+        # 3. 备选股票列表检查
         # 选择评分最高的topk只股票作为备选列表
         qualified_stocks = all_pred_scores[all_pred_scores >= self.min_score]
         if len(qualified_stocks) > 0:
@@ -331,11 +255,11 @@ class EnhancedTopkDropoutStrategy(TopkDropoutStrategy):
                 sell_orders.append(
                     Order(stock_id, amount, OrderDir.SELL, trade_start_time, trade_end_time)
                 )
-                # 注意：不能在下单时就删除 entry_prices/entry_amounts。
+                # 注意：不能在下单时就删除 entry_prices。
                 # 订单可能因为涨跌停/停牌/价格NaN等原因未成交，实际仍持仓。
-                # 清理由每日开头的“持仓对账”统一处理：确认持仓量为0才清理。
-        
-        # 5. 买入逻辑
+                # 清理由每日开头的”持仓对账”统一处理：确认持仓量为0才清理。
+
+        # 4. 买入逻辑
         # 筛选评分高于0.1的股票
         qualified_stocks = all_pred_scores[all_pred_scores >= self.min_score]
         
@@ -363,11 +287,11 @@ class EnhancedTopkDropoutStrategy(TopkDropoutStrategy):
         if current_position_count >= self.topk:
             return TradeDecisionWO(sell_orders, self)
         
-        # 6. 计算动态权重
+        # 5. 计算动态权重
         target_weights = self._calculate_dynamic_weights(selected_stocks)
         self._buy_skip_stats["candidate_count"] = int(len(target_weights))
         
-        # 7. 计算可投资金额
+        # 6. 计算可投资金额
         total_cash = self.trade_position.get_cash()
         
         # 最大仓位控制在90%
@@ -378,7 +302,7 @@ class EnhancedTopkDropoutStrategy(TopkDropoutStrategy):
         if stocks_to_buy <= 0:
             return TradeDecisionWO(sell_orders, self)
         
-        # 8. 生成买入订单
+        # 7. 生成买入订单
         buy_orders = []
         bought_count = 0
         for stock_id, weight in target_weights.items():
@@ -473,7 +397,7 @@ class EnhancedTopkDropoutStrategy(TopkDropoutStrategy):
             else:
                 self._buy_skip_stats["skipped_non_positive_target"] += 1
         
-        # 9. 合并所有订单
+        # 8. 合并所有订单
         all_orders = sell_orders + buy_orders
         if cur_dt is not None:
             logger.info(
@@ -485,3 +409,76 @@ class EnhancedTopkDropoutStrategy(TopkDropoutStrategy):
                 self._buy_skip_stats,
             )
         return TradeDecisionWO(all_orders, self)
+
+
+class SoftmaxWeightedStrategy(EnhancedTopkDropoutStrategy):
+    """
+    基于 Softmax 的分数加权策略。
+
+    继承 EnhancedTopkDropoutStrategy 的全部功能（止损、价格验证、手数取整），
+    仅替换权重计算方法：用 Softmax + 温度参数替代 scores² 加权。
+
+    温度参数效果：
+      T = 0.5  → 高集中度（高分股权重远大于低分股）
+      T = 1.0  → 适中（默认）
+      T = 2.0  → 接近等权
+      T → ∞   → 完全等权（退化为 TopkDropoutStrategy）
+
+    单票仓位上限 max_weight 防止过度集中（默认 5%）。
+    """
+
+    def __init__(self,
+                 signal=None,
+                 topk=50,
+                 n_drop=5,
+                 temperature=1.0,
+                 max_weight=0.05,
+                 min_score=0.0,
+                 max_position_ratio=0.90,
+                 stop_loss=-0.10,
+                 min_trade_price=0.5,
+                 max_trade_price=5000.0,
+                 max_single_order_value=5_000_000.0,
+                 max_single_order_amount=5_000_000.0,
+                 lot_size=100.0,
+                 **kwargs):
+        super().__init__(
+            signal=signal, topk=topk, n_drop=n_drop,
+            min_score=min_score, max_position_ratio=max_position_ratio,
+            stop_loss=stop_loss, min_trade_price=min_trade_price,
+            max_trade_price=max_trade_price,
+            max_single_order_value=max_single_order_value,
+            max_single_order_amount=max_single_order_amount,
+            lot_size=lot_size, **kwargs,
+        )
+        self.temperature = max(temperature, 1e-6)
+        self.max_weight = max_weight
+
+    def _calculate_dynamic_weights(self, selected_scores):
+        """Softmax 加权 + 单票仓位上限。"""
+        if selected_scores is None or len(selected_scores) == 0:
+            return pd.Series(dtype=float)
+
+        scores = selected_scores.values.astype(float)
+
+        # Softmax with temperature
+        scaled = scores / self.temperature
+        scaled -= scaled.max()  # 数值稳定性
+        exp_scores = np.exp(scaled)
+        weights = exp_scores / exp_scores.sum()
+
+        # 仓位上限裁剪 + 重新归一化（迭代直到收敛）
+        for _ in range(10):
+            capped = np.minimum(weights, self.max_weight)
+            if np.allclose(capped, weights):
+                break
+            excess = weights.sum() - capped.sum()
+            uncapped_mask = capped < self.max_weight
+            if uncapped_mask.sum() == 0:
+                break
+            capped[uncapped_mask] += excess * (capped[uncapped_mask] / capped[uncapped_mask].sum())
+            weights = capped
+
+        weights = weights / weights.sum()
+
+        return pd.Series(weights, index=selected_scores.index)

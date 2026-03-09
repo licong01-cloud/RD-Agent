@@ -94,7 +94,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--provider-uri",
         type=str,
-        default="/mnt/f/Dev/AIstock/qlib_bin/qlib_bin_20251209",
+        default="/home/lc999/data/qlib_bin",
         help="qlib provider_uri pointing to your bin (default: current qlib_bin_20251209)",
     )
     parser.add_argument(

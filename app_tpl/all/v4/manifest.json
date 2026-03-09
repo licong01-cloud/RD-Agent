@@ -4,8 +4,27 @@
   "created_at": "2026-02-02T20:27:10.474443",
   "description": "基于v0目标，修正结论阶段重复提示词问题；同步当前生产环境提示词（含bb_*/cp_*四数据集支持和README引导）",
   "base_version": "v0",
-  "changed_files": [],
+  "changed_files": [
+    "rdagent/components/coder/model_coder/prompts.yaml",
+    "rdagent/components/coder/CoSTEER/prompts.yaml",
+    "rdagent/components/coder/factor_coder/prompts.yaml"
+  ],
   "files": [
+    {
+      "path": "rdagent/components/coder/model_coder/prompts.yaml",
+      "size": 11824,
+      "sha256": "5b20eacfc552fe8bbda9276e2ecd2d0ea3b43f8fa6f108a27e1719b4f2c07cf1"
+    },
+    {
+      "path": "rdagent/components/coder/CoSTEER/prompts.yaml",
+      "size": 507,
+      "sha256": "be5f0813f7d70d035078abd500b32ae2666c70acb4817c866fa2a201630b589c"
+    },
+    {
+      "path": "rdagent/components/coder/factor_coder/prompts.yaml",
+      "size": 13397,
+      "sha256": "38090c771b9ac1d33a9f275242b1d755c819fee7de6e039d3ed35ede248f8e00"
+    },
     {
       "path": "rdagent/scenarios/qlib/experiment/__init__.py",
       "size": 26,
@@ -28,8 +47,8 @@
     },
     {
       "path": "rdagent/scenarios/qlib/experiment/factor_experiment.py",
-      "size": 3297,
-      "sha256": "100a3f66be5288a478365f71fe42292601653f632d25e6db2126672af2e54162"
+      "size": 5817,
+      "sha256": "2cc47118aa39091ce7b44c2e313016d6258bca9d0b9dc60cdba7e929a5d24641"
     },
     {
       "path": "rdagent/scenarios/qlib/experiment/factor_from_report_experiment.py",
@@ -44,17 +63,17 @@
     {
       "path": "rdagent/scenarios/qlib/experiment/factor_template/conf_baseline.yaml",
       "size": 3478,
-      "sha256": "9618ffcebe4128d1294538ae865f5e851308f34e0e536c296befe509293dc1b5"
+      "sha256": "50c49099aca9e499faaa0b8f3b6428b07dca2d2a74a024bd2a7c437304a574b5"
     },
     {
       "path": "rdagent/scenarios/qlib/experiment/factor_template/conf_combined_factors_dynamic.yaml",
       "size": 4300,
-      "sha256": "f70d9bff7db7962581c8cb72a68e6849b8c110c039317c7558a505dbaa1c6220"
+      "sha256": "e5f2b18a545e05b0b54df56858a0e8780ac5baa1eac7a58fc84a05a0b21f47a5"
     },
     {
       "path": "rdagent/scenarios/qlib/experiment/factor_template/conf_combined_factors_sota_model.yaml",
-      "size": 4833,
-      "sha256": "a42d6f6fd34309a5ca94c6a519f7a2f203790e8b471dfc1de8be617ac4f42544"
+      "size": 4959,
+      "sha256": "abbbe783f25eb00d6e0f7a84466d1140a3fc1e70a54a87f89f52559f93e5778e"
     },
     {
       "path": "rdagent/scenarios/qlib/experiment/factor_template/conf_combined_factors.yaml",
@@ -63,13 +82,13 @@
     },
     {
       "path": "rdagent/scenarios/qlib/experiment/factor_template/custom_strategy.py",
-      "size": 22580,
-      "sha256": "f9138fbcc78fbd236680a06e13b89b000dd147450517953e0058cf8309c59004"
+      "size": 22652,
+      "sha256": "2de878d7ce6535b058c71c8ac119ec82bbc06f2999911f91724b8f0bde170850"
     },
     {
       "path": "rdagent/scenarios/qlib/experiment/factor_template/read_exp_res.py",
-      "size": 10860,
-      "sha256": "d0b9e02d035cd5f5d6b5cd59855de05fb72f6836e3e16ac5c10196526e670d09"
+      "size": 29846,
+      "sha256": "fa72c280a532b44f8106ed1b22e661127972fd4c11b83cc7418fc9723a206972"
     },
     {
       "path": "rdagent/scenarios/qlib/experiment/factor_template/README.md",
@@ -78,8 +97,8 @@
     },
     {
       "path": "rdagent/scenarios/qlib/experiment/model_experiment.py",
-      "size": 2882,
-      "sha256": "79c0fac12503f8e9dc2de210a68284f9ac662f782517fb90f323332df07d808e"
+      "size": 3625,
+      "sha256": "fbf106a79b742c9da7546975c2a35ff87302fec0ac1be8f521f47ff91136fd2e"
     },
     {
       "path": "rdagent/scenarios/qlib/experiment/model_template/conf_baseline_factors_model_standalone.yaml",
@@ -88,18 +107,18 @@
     },
     {
       "path": "rdagent/scenarios/qlib/experiment/model_template/conf_baseline_factors_model.yaml",
-      "size": 3410,
-      "sha256": "bf4603ed140e642772b0cc40a1c5720dbe0f3c2f8cffb035c47760f4ce6f76e8"
+      "size": 3597,
+      "sha256": "77405fdb15c992314c1a779fa1f2b53fbb94e0a5f0cbcd8ed1d1fdcda6079a3d"
     },
     {
       "path": "rdagent/scenarios/qlib/experiment/model_template/conf_sota_factors_model.yaml",
-      "size": 4914,
-      "sha256": "f1bab3d16040b15c62b9df0e09d7a7a833e42e6ee13290e6dd5832bc25bdb18e"
+      "size": 5101,
+      "sha256": "f8491322676ce0ebc42af83bcacfe73f84ecdf9295bf194427e21f77ee9e9edf"
     },
     {
       "path": "rdagent/scenarios/qlib/experiment/model_template/read_exp_res.py",
-      "size": 10860,
-      "sha256": "d0b9e02d035cd5f5d6b5cd59855de05fb72f6836e3e16ac5c10196526e670d09"
+      "size": 29846,
+      "sha256": "fa72c280a532b44f8106ed1b22e661127972fd4c11b83cc7418fc9723a206972"
     },
     {
       "path": "rdagent/scenarios/qlib/experiment/model_template/README.md",
@@ -108,8 +127,8 @@
     },
     {
       "path": "rdagent/scenarios/qlib/experiment/prompts_core_constraints.yaml",
-      "size": 5305,
-      "sha256": "14ed6c625773255bd4ff36a915387c12ee368ab145c71a2679b0a05cf16258df"
+      "size": 6192,
+      "sha256": "091214427965746eb60083f4df03790f05806d6430f37081508ed743cf5b7f2a"
     },
     {
       "path": "rdagent/scenarios/qlib/experiment/prompts_data_loading.yaml",
@@ -133,18 +152,18 @@
     },
     {
       "path": "rdagent/scenarios/qlib/experiment/prompts.yaml",
-      "size": 49632,
-      "sha256": "1518c4bd3d50e14c567e9709cc753b02c48255e4749e9efdec5439d1a178695a"
+      "size": 52787,
+      "sha256": "783013c20e6d1f3948917dfd140fafd1f622e3251fc1d47b4dc6e2b21c9c2390"
     },
     {
       "path": "rdagent/scenarios/qlib/experiment/quant_experiment.py",
-      "size": 8122,
-      "sha256": "3f3f8e3686391151fafd5a070886a0a1b161d2bc0795ca24a7c44335a509e743"
+      "size": 9822,
+      "sha256": "d3298b15d0a309d91d325eb6009b6880c88e34f365d578bcc9ab557376845725"
     },
     {
       "path": "rdagent/scenarios/qlib/experiment/utils.py",
-      "size": 28294,
-      "sha256": "206ba660db2e5445d30917cd1696e035eb76f06811b946fc2dd397056e4b7f91"
+      "size": 32686,
+      "sha256": "fb9af64370b1e0e4d0fd38ea3d499b94c8a65d5f8afffe9791923abc0e409a07"
     },
     {
       "path": "rdagent/scenarios/qlib/experiment/workspace.py",
@@ -183,9 +202,9 @@
     },
     {
       "path": "rdagent/scenarios/qlib/prompts.yaml",
-      "size": 22985,
-      "sha256": "e7942a130729be8d8d8b71bf51a9856b5a0c7e0e180b56f69fabf101ae3362a9"
+      "size": 28692,
+      "sha256": "32f6091ecbf19cd0afa8273433871ac5b8e1b4f830a3897333faad42d16c0cc7"
     }
   ],
-  "updated_at": "2026-02-11T00:55:14.390107+08:00"
+  "updated_at": "2026-02-28T16:25:48.004366+08:00"
 }

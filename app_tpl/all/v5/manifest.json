@@ -44,12 +44,12 @@
     {
       "path": "rdagent/scenarios/qlib/experiment/factor_template/conf_baseline.yaml",
       "size": 4030,
-      "sha256": "675fb807be28342f0059c1c1a067d7e5ca328234a1a57b2c368a62224ab0a0c4"
+      "sha256": "d6e19535c92bcfaebead0aa713f1b6c95b1d109d3c65d8b8cbaa5f661d6f6985"
     },
     {
       "path": "rdagent/scenarios/qlib/experiment/factor_template/conf_combined_factors_dynamic.yaml",
       "size": 4300,
-      "sha256": "45f083f9263abe7331035fea0cf1048a39dd6ae9733ccf86a40790b00e236091"
+      "sha256": "d3a6912d3f4abdb91560a700cbab734ebbb1ed5a5e89ecc6113f00926e3c82ed"
     },
     {
       "path": "rdagent/scenarios/qlib/experiment/factor_template/conf_combined_factors_sota_model.yaml",
@@ -133,8 +133,8 @@
     },
     {
       "path": "rdagent/scenarios/qlib/experiment/prompts.yaml",
-      "size": 63857,
-      "sha256": "6f21452d9e50b0fa2da19bd63d10cc926882befc86d0e0f3505ff25bcec3e23e"
+      "size": 58378,
+      "sha256": "5240553470a5f348a36cf4bcbafae892acc928d603cd262556006ef0dfdd7153"
     },
     {
       "path": "rdagent/scenarios/qlib/experiment/quant_experiment.py",
@@ -183,8 +183,8 @@
     },
     {
       "path": "rdagent/scenarios/qlib/prompts.yaml",
-      "size": 32396,
-      "sha256": "1ab3ed3a85e95696d86acc9a1d807da5088be42dc96a03313b9a7e73368b99b6"
+      "size": 20865,
+      "sha256": "f04c709a330faef83b9bfbdcbdd82252d0db59d840e04725d03fb1421739ccab"
     }
   ]
 }

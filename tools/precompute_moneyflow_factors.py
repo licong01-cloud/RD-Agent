@@ -44,7 +44,7 @@ def main() -> None:
     snapshot_root = Path(
         os.environ.get("AIstock_SNAPSHOT_ROOT", "")
         or os.environ.get("AISTOCK_SNAPSHOT_ROOT", "")
-        or "F:/Dev/AIstock/qlib_snapshots/qlib_export_20251209"
+        or "/home/lc999/data/qlib_snapshots"
     )
     moneyflow_path = snapshot_root / "moneyflow.h5"
     daily_pv_path = snapshot_root / "daily_pv.h5"
@@ -53,7 +53,7 @@ def main() -> None:
     factors_root = Path(
         os.environ.get("AISTOCK_FACTORS_ROOT", "")
         or os.environ.get("AIstock_FACTORS_ROOT", "")
-        or "F:/Dev/AIstock/factors"
+        or "/home/lc999/data/aistock_factors"
     )
     factors_root = factors_root / "moneyflow_factors"
     output_path = factors_root / "result.pkl"

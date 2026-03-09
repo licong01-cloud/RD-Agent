@@ -425,8 +425,11 @@ qlib_factor_interface: |-
         # - 你可以根据当前任务需要，灵活组合价格、成交量、AE 因子、daily_basic 等多种信号，探索不同的因子形态与策略风格；
         # - 不要求本区域实现的因子一定是“简单收益率”或“纯量价指标”，可以是截面打分、分位数信号、非线性组合等。
 
-        # 示意：以下只是一个占位示例，请在实际任务中用你的真实逻辑完全替换掉该 Series 的构造。
-        series = df["close"] / df["close"].groupby(level="instrument").shift(1) - 1
+        # 示意：以下只是占位示例，请用你根据当前假设设计的真实逻辑**完全替换**。
+        # 因子可使用 schema 中的任意字段，不限于价量。典型方向举例：
+        # 因子可使用 schema 中的任意字段，不限于价量。请查阅 source data 中的 schema 选择字段。
+        # 常见模式：单字段变换、双字段比率、groupby+rolling、跨数据集交叉组合等。
+        series = df["<your_field>"]  # ← 占位，必须替换为你的真实因子逻辑
 
         # 对于 groupby+rolling 的典型模式，请使用：
         # s = df["x"].groupby(level="instrument").rolling(window=K, min_periods=K).func(...)
@@ -467,7 +470,7 @@ qlib_factor_interface: |-
     - 如果你的因子定义确实依赖这些字段（例如流通市值、流通股本、换手率、资金净流入等），你 **必须** 显式读取并 join。为了节省内存，**严禁全量加载**，必须通过 `columns` 参数仅读取必要的列：
       ```python
       # 必须：仅读取计算所需的列，以避免 OOM (static_factors.parquet 很大)
-      required_static_cols = ["db_circ_mv", "mf_net_amt"] # 示例：按需替换为实际所需列名
+      required_static_cols = ["<col_1>", "<col_2>"] # 按需替换为实际所需列名（可从 schema 中选择任意 db_*/mf_*/bb_*/cp_* 字段）
       static_df = pd.read_parquet("static_factors.parquet", columns=required_static_cols).sort_index()
       
       # 注意：当前数据源的 instrument 已经是 Qlib 风格（600000.SH/000001.SZ），与 static_factors.parquet 完全对齐.
@@ -494,7 +497,7 @@ qlib_factor_interface: |-
     }
     df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
     ```
-  - **后续所有代码中，只能使用不带 `$` 的字段名**，例如：`df["close"]`、`df["volume"]`、`df["db_turnover_rate"]`、`df["mf_lg_buy_amt"]`。严禁混用 `df["$close"]` 和 `df["close"]`.
+  - **后续所有代码中，只能使用不带 `$` 的字段名**，例如：`df["close"]`、`df["volume"]`、以及 schema 中的任意静态字段如 `df["<db_*字段>"]`、`df["<mf_*字段>"]` 等。严禁混用 `df["$close"]` 和 `df["close"]`.
 
   【严禁硬编码替代变量（必须严格遵守）】
   - 如果核心价量字段（例如 `close/open/high/low/volume/amount`）缺失：
@@ -505,7 +508,7 @@ qlib_factor_interface: |-
   - **总原则**：严禁为缺失字段“编造/猜测/假设”一个固定值或常数分母来把公式凑出来.
   - 在实现依赖特定字段的因子前，必须先做列存在性检查：
     ```python
-    required_cols = ["close", "volume", "db_circ_mv"]
+    required_cols = ["<field_1>", "<field_2>", "<field_3>"]
     missing = [c for c in required_cols if c not in df.columns]
 
     if missing:

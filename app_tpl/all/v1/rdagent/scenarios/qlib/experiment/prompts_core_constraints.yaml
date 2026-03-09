@@ -36,8 +36,10 @@ qlib_factor_interface_core_constraints: |-
         # - 你可以根据当前任务需要，灵活组合价格、成交量、AE 因子、daily_basic 等多种信号，探索不同的因子形态与策略风格；
         # - 不要求本区域实现的因子一定是"简单收益率"或"纯量价指标"，可以是截面打分、分位数信号、非线性组合等。
 
-        # 示意：以下只是一个占位示例，请在实际任务中用你的真实逻辑完全替换掉该 Series 的构造。
-        series = df["close"] / df["close"].groupby(level="instrument").shift(1) - 1
+        # 示意：以下只是占位示例，请用你根据当前假设设计的真实逻辑**完全替换**。
+        # 因子可使用 schema 中的任意字段，不限于价量。请查阅 source data 中的 schema 选择字段。
+        # 常见模式：单字段变换、双字段比率、groupby+rolling、跨数据集交叉组合等。
+        series = df["<your_field>"]  # ← 占位，必须替换为你的真实因子逻辑
 
         # 对于 groupby+rolling 的典型模式，请使用：
         # s = df["x"].groupby(level="instrument").rolling(window=K, min_periods=K).func(...)

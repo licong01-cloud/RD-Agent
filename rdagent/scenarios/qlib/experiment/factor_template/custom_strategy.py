@@ -487,3 +487,76 @@ class EnhancedTopkDropoutStrategy(TopkDropoutStrategy):
                 self._buy_skip_stats,
             )
         return TradeDecisionWO(all_orders, self)
+
+
+class SoftmaxWeightedStrategy(EnhancedTopkDropoutStrategy):
+    """
+    基于 Softmax 的分数加权策略。
+
+    继承 EnhancedTopkDropoutStrategy 的全部功能（止损、价格验证、手数取整），
+    仅替换权重计算方法：用 Softmax + 温度参数替代 scores² 加权。
+
+    温度参数效果：
+      T = 0.5  → 高集中度（高分股权重远大于低分股）
+      T = 1.0  → 适中（默认）
+      T = 2.0  → 接近等权
+      T → ∞   → 完全等权（退化为 TopkDropoutStrategy）
+
+    单票仓位上限 max_weight 防止过度集中（默认 5%）。
+    """
+
+    def __init__(self,
+                 signal=None,
+                 topk=50,
+                 n_drop=5,
+                 temperature=1.0,
+                 max_weight=0.05,
+                 min_score=0.0,
+                 max_position_ratio=0.90,
+                 stop_loss=-0.10,
+                 min_trade_price=0.5,
+                 max_trade_price=5000.0,
+                 max_single_order_value=5_000_000.0,
+                 max_single_order_amount=5_000_000.0,
+                 lot_size=100.0,
+                 **kwargs):
+        super().__init__(
+            signal=signal, topk=topk, n_drop=n_drop,
+            min_score=min_score, max_position_ratio=max_position_ratio,
+            stop_loss=stop_loss, min_trade_price=min_trade_price,
+            max_trade_price=max_trade_price,
+            max_single_order_value=max_single_order_value,
+            max_single_order_amount=max_single_order_amount,
+            lot_size=lot_size, **kwargs,
+        )
+        self.temperature = max(temperature, 1e-6)
+        self.max_weight = max_weight
+
+    def _calculate_dynamic_weights(self, selected_scores):
+        """Softmax 加权 + 单票仓位上限。"""
+        if selected_scores is None or len(selected_scores) == 0:
+            return pd.Series(dtype=float)
+
+        scores = selected_scores.values.astype(float)
+
+        # Softmax with temperature
+        scaled = scores / self.temperature
+        scaled -= scaled.max()  # 数值稳定性
+        exp_scores = np.exp(scaled)
+        weights = exp_scores / exp_scores.sum()
+
+        # 仓位上限裁剪 + 重新归一化（迭代直到收敛）
+        for _ in range(10):
+            capped = np.minimum(weights, self.max_weight)
+            if np.allclose(capped, weights):
+                break
+            excess = weights.sum() - capped.sum()
+            uncapped_mask = capped < self.max_weight
+            if uncapped_mask.sum() == 0:
+                break
+            capped[uncapped_mask] += excess * (capped[uncapped_mask] / capped[uncapped_mask].sum())
+            weights = capped
+
+        weights = weights / weights.sum()
+
+        return pd.Series(weights, index=selected_scores.index)

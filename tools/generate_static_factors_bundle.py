@@ -619,7 +619,7 @@ def main() -> None:
         "--snapshot-root",
         default=os.environ.get(
             "AIstock_SNAPSHOT_ROOT",
-            r"F:/Dev/AIstock/qlib_snapshots/qlib_export_20251209",
+            r"/home/lc999/data/qlib_snapshots",
         ),
         help="Snapshot root containing daily_basic.h5 and moneyflow.h5 (Windows or WSL path).",
     )
@@ -628,7 +628,7 @@ def main() -> None:
         "--aistock-factors-root",
         default=os.environ.get(
             "AIstock_FACTORS_ROOT",
-            r"F:/Dev/AIstock/factors",
+            r"/home/lc999/data/aistock_factors",
         ),
         help="AIstock factors root containing precomputed factor outputs (daily_basic_factors, moneyflow_factors, ae_recon_error_10d...).",
     )

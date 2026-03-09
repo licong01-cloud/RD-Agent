@@ -108,6 +108,13 @@ class QlibFBWorkspace(FBWorkspace):
                 )
         logger.log_object(execute_qlib_log, tag="Qlib_execute_log")
 
+        # Save qrun stdout to workspace so that read_exp_res.py can parse training diagnostics
+        try:
+            stdout_log_path = self.workspace_path / "stdout.log"
+            stdout_log_path.write_text(execute_qlib_log or "", encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"[QlibFBWorkspace] Failed to save stdout.log: {e}")
+
         execute_log = qtde.check_output(
             local_path=str(self.workspace_path),
             entry="python read_exp_res.py",
@@ -128,7 +135,7 @@ class QlibFBWorkspace(FBWorkspace):
             logger.info(
                 f"[QlibFBWorkspace] Reading qlib results from: {qlib_res_path} (mtime={qlib_res_path.stat().st_mtime})"
             )
-            pattern = r"(Epoch\d+: train -[0-9\.]+, valid -[0-9\.]+|best score: -[0-9\.]+ @ \d+ epoch)"
+            pattern = r"(Epoch\d+: train -?[0-9\.]+, valid -?[0-9\.]+|best score: -?[0-9\.]+ @ \d+ epoch)"
             matches = re.findall(pattern, execute_qlib_log)
             execute_qlib_log = "\n".join(matches)
             return pd.read_csv(qlib_res_path, index_col=0).iloc[:, 0], execute_qlib_log

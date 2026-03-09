@@ -1,4 +1,5 @@
 import json
+import logging
 from typing import Dict, Tuple
 
 import numpy as np
@@ -9,6 +10,8 @@ from rdagent.core.experiment import Task, Workspace
 from rdagent.oai.llm_conf import LLM_SETTINGS
 from rdagent.oai.llm_utils import APIBackend
 from rdagent.utils.agent.tpl import T
+
+logger = logging.getLogger(__name__)
 
 
 # This shape evaluator is also used in data_science
@@ -156,11 +159,37 @@ class ModelFinalEvaluator(CoSTEEREvaluator):
                 json_target_type=Dict[str, str | bool | int],
             ),
         )
-        if isinstance(final_evaluation_dict["final_decision"], str) and final_evaluation_dict[
-            "final_decision"
-        ].lower() in ("true", "false"):
-            final_evaluation_dict["final_decision"] = bool(final_evaluation_dict["final_decision"])
+        # Defensive: LLM (especially deepseek) may misspell key names or use variants.
+        # Real case: returned "final_eedback" instead of "final_decision".
+        final_decision = final_evaluation_dict.get("final_decision")
+        if final_decision is None:
+            # Fuzzy match: find any key containing "decision" or "decisi"
+            for k, v in final_evaluation_dict.items():
+                if "decision" in k.lower() or "decisi" in k.lower():
+                    final_decision = v
+                    break
+            if final_decision is None:
+                # Last resort: if there's a boolean value that's not the feedback, use it
+                for k, v in final_evaluation_dict.items():
+                    if isinstance(v, bool) and k != "final_feedback":
+                        final_decision = v
+                        break
+            if final_decision is None:
+                logger.warning(f"[ModelFinalEvaluator] Fuzzy match failed for 'final_decision'. "
+                               f"LLM response keys: {list(final_evaluation_dict.keys())}. Falling back to False.")
+                final_decision = False  # safe fallback: reject
+        if isinstance(final_decision, str):
+            final_decision = final_decision.lower().strip() in ("true", "1", "yes")
+        final_feedback = final_evaluation_dict.get("final_feedback", "")
+        if not final_feedback:
+            # Fuzzy match for feedback field too
+            for k, v in final_evaluation_dict.items():
+                if "feedback" in k.lower() and isinstance(v, str):
+                    final_feedback = v
+                    break
+            if not final_feedback:
+                final_feedback = "No feedback provided by LLM."
         return (
-            final_evaluation_dict["final_feedback"],
-            final_evaluation_dict["final_decision"],
+            final_feedback,
+            final_decision,
         )

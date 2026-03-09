@@ -214,9 +214,11 @@ qlib_factor_experiment_setting: |-
 
   #### Computing Resources and Training Load Suggestions (Please prioritize meeting the following requirements to fully utilize local 12-core 24-thread + GPU)
   - **Training Rounds and Batch Size**:
-    - 对于主要实验，避免使用过于小的配置（例如 `n_epochs < 100`，`batch_size < 4096`）。
-    - 推荐配置范围：`n_epochs` 在 **300~500**；`batch_size` 优先 **16384**（充分利用GPU算力，如果显存不足可降低至 8192）。
-    - 可根据需要调整 `n_epochs` 至最大 1000，建议配合 `early_stop: 20~50` 使用以防止过拟合。
+    - 对于主要实验，避免使用过于小的配置（例如 `n_epochs < 50`，Tabular 模型 `batch_size < 2048`）。
+    - **超参数应根据模型类型合理调整：**
+      - **Tabular 模型** (DatasetH): `batch_size: 4096-16384`，`n_epochs: 100-200`
+      - **TimeSeries 模型** (TSDatasetH): `batch_size: 2048-8192`（小模型<1MB在16GB GPU上内存充裕，大batch可充分利用GPU并行能力），`n_epochs: 200-300`
+    - 建议配合 `early_stop: 10-30` 使用以防止过拟合。
   - **Parallelism Settings (CPU)**:
     - For components supporting `n_jobs`, prioritize setting to `n_jobs: 12` (close to the number of physical cores).
     - If YAML contains `workers` / `num_workers` / `processes` fields, set them between `8~12`, avoiding far exceeding the number of CPU cores.
@@ -234,16 +236,10 @@ qlib_factor_experiment_setting: |-
     - Before adding new factors, ensure the basic factor set no longer exhibits systemic collapse (e.g., all NaN or significantly negative returns) in IC and backtest stability.
 
   #### Strategy Evolution Priority (When IC is consistently NaN or returns are significantly negative)
-  - If in recent rounds of experiments, **cross-sectional IC is mostly NaN/close to 0, and portfolio annualized returns are significantly negative, with large maximum drawdowns**, prioritize checking and evolving the following directions rather than blindly switching to more complex time-series structures:
-    1. **First, refine factors and labels (signal quality priority)**:
-       - Check if factors are approximately constant, overly sparse, or if alignment/merge/dropna causes effective sample collapse.
-       - Check and optimize labels: reasonably select the prediction window (e.g., 1D/5D/10D returns), and clearly define whether it's absolute return or excess return, ensuring evaluation metrics and label formats are consistent.
-    2. **Use basic factors for robustness and risk purposes**:
-       - `daily_basic` (valuation/market value/liquidity) prioritizes exposure control and stability constraints (filtering only when necessary).
-       - `ae_recon_error_10d` is more suitable as an anomaly detection/risk factor participating in punishment or filtering, rather than solely bearing the main stock selection signal.
-    3. **Control factor quantity and correlation, first run stable Tabular baseline**:
-       - Avoid a large number of highly correlated or extremely sparse new factors.
-       - First, verify in LightGBM/CatBoost/simple MLP, etc., Tabular baseline that IC is no longer NaN and returns are no longer systemically negative, then consider introducing more complex time-series structures.
+  - If IC is mostly NaN/~0 and returns are significantly negative with large drawdowns, prioritize:
+    1. **Signal quality first**: Check if factors are constant/sparse or if alignment/merge/dropna causes sample collapse. Optimize labels (1D/5D/10D returns, absolute vs excess).
+    2. **Basic factor robustness**: Use `daily_basic` for exposure control. `ae_recon_error_10d` is for anomaly/risk, not main stock selection signal.
+    3. **Stable baseline first**: Avoid many correlated/sparse new factors. Verify IC is not NaN in Tabular baseline (LightGBM/MLP) before introducing complex time-series models.
 
 qlib_model_background: |-
   The model is a machine learning or deep learning structure used in quantitative investment to predict the returns and risks of a portfolio or a single asset. Models are employed by investors to generate forecasts based on historical data and identified factors, which are central to many quantitative investment strategies.
@@ -308,10 +304,42 @@ model_hypothesis_specification: |-
   2. Second, `last_hypothesis_and_feedback` and `sota_hypothesis_and_feedback` are key references you should pay close attention to. You can choose to optimize based on either of them or generate new ideas to form hypotheses and experiments.
   3. If there is no prior experiment or result available at the beginning, you can start by implementing a simple and small architecture.
   4. If a series of attempts fail to achieve SOTA, consider exploring entirely new directions; at this point, it is acceptable to return to simple architectures.
-  5. Focus exclusively on the architecture of PyTorch models. Each hypothesis should specifically address architectural decisions, such as layer configurations, activation functions, regularization methods, and overall model structure. DO NOT do any feature-specific processing. Instead, you can propose innovative transformations on the input time-series data to enhance model training effectiveness.
-  6. Avoid including aspects unrelated to architecture, such as input features or optimization strategies.
-  7. Sometimes, when training performance is poor, adjusting hyperparameters can also be an effective strategy for improvement.
-  8. Use standard libraries for baseline models, but also explore custom architecture designs to investigate novel structures. After sufficient trials with traditional models, aim for innovation comparable to top-tier AI conferences (NeurIPS, ICLR, ICML, SIGKDD, etc.) in time series modeling.
+  5. Focus exclusively on the architecture of PyTorch models. Each hypothesis should specifically address architectural decisions along the following EVOLUTION DIMENSIONS (explore them progressively, one at a time). When proposing a hypothesis, you MUST reference the dimension by its ID (e.g. "A1", "B2"):
+     **Category A — Architecture Dimensions:**
+     - **A1 Temporal Modeling**: RNN/LSTM/GRU → Temporal Attention → Multi-scale temporal convolution
+     - **A2 Attention Mechanisms**: Self-attention → Cross-attention → Sparse/Linear attention
+     - **A3 Cross-sectional Modeling**: Stock-level features → Cross-stock attention → Graph-based interaction
+     - **A4 Positional/Temporal Encoding**: Learnable position embedding → Sinusoidal → Relative position encoding
+     **Category B — Regularization & Stability Dimensions:**
+     - **B1 Regularization**: Dropout → LayerNorm/BatchNorm → Residual connections → Stochastic depth
+     - **B2 Non-stationarity Handling**: Adaptive normalization → Instance normalization → RevIN
+     - **B3 Training Stability**: Gradient clipping (recommend max_norm=1.0) → LR warmup (recommend 5-10 epochs linear warmup) → Mixed precision (already enabled via use_amp=true). When targeting B3, specify the exact technique and its parameter values.
+     **Category C — Hyperparameter Tuning:**
+     - **C1 Learning Rate & Schedule**: Adjust lr, consider cosine annealing or warmup+decay
+     - **C2 Regularization Strength**: Adjust weight_decay, dropout rate
+     - **C3 Training Duration**: Adjust n_epochs, early_stop, batch_size
+     DO NOT do any feature-specific processing. Instead, you can propose innovative transformations on the input time-series data to enhance model training effectiveness.
+  6. Avoid including aspects unrelated to architecture, such as input features or optimization strategies. When proposing a hypothesis, explicitly state which EVOLUTION DIMENSION ID (e.g. A1, B2, C1) from item 5 it targets.
+  7. Sometimes, when training performance is poor, adjusting hyperparameters (Category C dimensions) can also be an effective strategy for improvement.
+  8. **模型规模与超参数约束：**
+    - hidden_dim 推荐 64-128，不超过 256。Transformer/Attention 层数推荐 1-2 层，不超过 3 层。
+    - 总参数量控制在 1MB 以内。量化场景中简单模型（GRU/LSTM）往往比深层 Transformer 更实用。
+    - 避免极小模型（hidden_dim<32, 单层）。
+    - **超参数应根据模型类型 (model_type) 合理调整：**
+      - **Tabular 模型** (DatasetH): `batch_size: 4096-16384`，`n_epochs: 100-200`，`early_stop: 10-20`
+      - **TimeSeries 模型** (TSDatasetH): `batch_size: 2048-8192`（小模型<1MB在16GB GPU上内存充裕，应充分利用GPU并行能力），`n_epochs: 200-300`，`early_stop: 20-30`
+      - **Learning Rate**: GRU/LSTM 推荐 `2e-4 ~ 5e-4`，Transformer 推荐 `1e-4 ~ 5e-4`，MLP/Tabular 推荐 `5e-4 ~ 1e-3`
+      - **Weight Decay**: 小模型(<0.5MB) 推荐 `1e-5`，较大模型 推荐 `1e-4 ~ 1e-3`
+    - 选择超参数时，请在 hypothesis 中简要说明理由（如"TSDatasetH step_len=20，模型0.16MB，16GB GPU内存充裕，batch_size 选择 4096 以提高GPU利用率"）。
+  9. Use standard libraries for baseline models, but also explore custom architecture designs to investigate novel structures. After sufficient trials with traditional models, aim for innovation comparable to top-tier AI conferences (NeurIPS, ICLR, ICML, SIGKDD, etc.) in time series modeling.
+     COMPLEXITY CONTROL RULES:
+     - Each new hypothesis should introduce AT MOST ONE new architectural component compared to the best-performing previous model.
+     - New components must be well-defined and independently testable.
+     - Do NOT combine multiple untested innovations in a single hypothesis.
+     - Progression example: Linear → +A2(Attention) → +B1(Residual) → +A1(MultiScale) (one new component per step, not all at once).
+  10. **模型代码质量要求：**
+    - 所有 `nn.Module`（如 `nn.Linear`, `nn.LayerNorm`, `nn.GRU`）必须在 `__init__` 中创建，禁止在 `forward()` 中动态创建。在 `forward()` 中创建的模块不会被优化器更新，导致训练完全失效。
+    - 残差连接的投影层 (`residual_proj`) 必须在 `__init__` 中预定义，不能在 `forward()` 中通过 `nn.Linear(...).to(x.device)` 动态创建。
 
 factor_hypothesis_specification: |-
   1. **Factors per Generation:**
@@ -376,12 +404,12 @@ model_experiment_output_format: |-
             "hyperparameter_name_2": "value of hyperparameter 2",
             "hyperparameter_name_3": "value of hyperparameter 3"
         },
-        "training_hyperparameters" {  # All values are for reference; you can set them yourself
-            "n_epochs": "100",  # 默认100，可根据需要调高至 300~500，配合 early_stop 防止过拟合
-            "lr": "1e-3",
-            "early_stop": 20,  # 建议配合 early_stop: 20~50 使用，防止过拟合
-            "batch_size": 16384,  # 大 batch 充分利用 GPU 算力，推荐 8192~16384
-            "weight_decay": 1e-4,
+        "training_hyperparameters": {  # All values are for reference; you SHOULD ADJUST them based on model_type and training log
+            "n_epochs": "100",  # Tabular: 100-200, TimeSeries: 200-300, 配合 early_stop 防过拟合
+            "lr": "1e-3",  # GRU/LSTM: 2e-4~5e-4, Transformer: 1e-4~5e-4, MLP: 5e-4~1e-3
+            "early_stop": 20,  # Tabular: 10-20, TimeSeries: 20-30
+            "batch_size": 16384,  # Tabular(DatasetH): 4096-16384, TimeSeries(TSDatasetH): 2048-8192
+            "weight_decay": 1e-4,  # 小模型: 1e-5, 大模型: 1e-4~1e-3
         }
         "model_type": "Tabular or TimeSeries"  # Should be one of "Tabular" or "TimeSeries"
     },
@@ -399,13 +427,13 @@ qlib_factor_interface: |-
     - **【禁止机器学习训练】**（硬约束）：
       - 严禁 import 或调用 `sklearn`、`lightgbm`、`xgboost`、`catboost`、`torch`、`tensorflow`、`keras` 等 ML 库；
       - 严禁执行 `.fit()`、`.fit_transform()`、`.fit_predict()`、`.backward()`、`optimizer.step()` 等训练操作；
-      - 严禁使用 `shift(-1)` 构造“未来收益率”作为训练标签或因子输出。
+      - 严禁使用 `shift(-1)` 构造"未来收益率"作为训练标签或因子输出。
     - **【计算效率约束】**（硬约束）：
       - 严禁对全量数据使用纯 Python for 循环逐行遍历（如 `for idx in range(len(group)): ... iloc[idx]`）；
       - 必须使用 pandas/numpy 向量化操作（`groupby().rolling()`、`groupby().transform()`、`np.where()` 等）；
       - 自定义滚动窗口计算应使用 `numba.jit` 或 `rolling().apply()` 等高效方式。
 
-    [代码开始]
+    ```python
     import pandas as pd
     import numpy as np
 
@@ -416,6 +444,7 @@ qlib_factor_interface: |-
         df = pd.read_hdf("daily_pv.h5", key="data").sort_index()
 
         # 2. 数据已使用标准字段名: open, high, low, close, volume, amount, factor
+        # 直接使用这些字段名进行计算即可
 
         # 4. ==== BEGIN FACTOR COMPUTATION AREA ====
         # 在此区域内，你可以自由使用 df 计算出一个或多个与 df.index 对齐的 Series/列：
@@ -424,8 +453,10 @@ qlib_factor_interface: |-
         # - 你可以根据当前任务需要，灵活组合价格、成交量、AE 因子、daily_basic 等多种信号，探索不同的因子形态与策略风格；
         # - 不要求本区域实现的因子一定是“简单收益率”或“纯量价指标”，可以是截面打分、分位数信号、非线性组合等。
 
-        # 示意：以下只是一个占位示例，请在实际任务中用你的真实逻辑完全替换掉该 Series 的构造。
-        series = df["close"] / df["close"].groupby(level="instrument").shift(1) - 1
+        # 示意：以下只是占位示例，请用你根据当前假设设计的真实逻辑**完全替换**。
+        # 因子可使用 schema 中的任意字段，不限于价量。请查阅 source data 中的 schema 选择字段。
+        # 常见模式：单字段变换、双字段比率、groupby+rolling、跨数据集交叉组合等。
+        series = df["<your_field>"]  # ← 占位，必须替换为你的真实因子逻辑
 
         # 对于 groupby+rolling 的典型模式，请使用：
         # s = df["x"].groupby(level="instrument").rolling(window=K, min_periods=K).func(...)
@@ -448,7 +479,7 @@ qlib_factor_interface: |-
 
     if __name__ == "__main__":
         calculate_{function_name}()
-    [代码结束]
+    ```
   - **严禁** 在上述模板之外随意增删“读取/输出/索引处理”代码:
     - 不要重写 `result_df = pd.DataFrame(index=df.index)` 这一行的模式；
     - 不要手工写 `result_df.index.names = ["datetime", "instrument"]`，而是始终使用 `df.index.names`；
@@ -464,23 +495,28 @@ qlib_factor_interface: |-
   - **可选静态字段**：当前工作目录下可能存在 `static_factors.parquet`（由上游数据准备阶段复制到因子执行目录），其索引同样为 MultiIndex(`datetime`, `instrument`)，包含 `db_*`（每日基本面）、`mf_*`（资金流向）、`bb_*`（历史基本面）、`cp_*`（筹码分布）四类字段。各数据集的完整字段名、中文说明和单位请参考数据目录中的 `README.md` 文件（已在"source data"部分提供）。
     - **列名白名单（硬约束）**：你只能使用 `static_factors_schema.csv` / `static_factors_schema.json` 或数据目录 `README.md` 中列出的字段名。严禁凭经验"编造/猜测"字段名（例如 `mf_net_inflow_1d`、`mf_large_buy_ratio` 等）。
     - 如果你的因子定义确实依赖这些字段（例如流通市值、流通股本、换手率、资金净流入等），你 **必须** 显式读取并 join。为了节省内存，**严禁全量加载**，必须通过 `columns` 参数仅读取必要的列：
-      [代码示例开始]
+      ```python
       # 必须：仅读取计算所需的列，以避免 OOM (static_factors.parquet 很大)
-      required_static_cols = ["db_circ_mv", "mf_net_amt"] # 示例：按需替换为实际所需列名
+      required_static_cols = ["<col_1>", "<col_2>"] # 按需替换为实际所需列名（从 schema 中选择任意 db_*/mf_*/bb_*/cp_* 字段）
       static_df = pd.read_parquet("static_factors.parquet", columns=required_static_cols).sort_index()
+      
       # 注意：当前数据源的 instrument 已经是 Qlib 风格（600000.SH/000001.SZ），与 static_factors.parquet 完全对齐.
       # 直接执行 join 即可，无需进行格式转换.
+      # 使用 join 将所需列合并到主 DataFrame 中
       df = df.sort_index().join(static_df, how="left")
-      [代码示例结束]
+      ```
     - **资金净流入等派生量（推荐做法）**：如果你需要“资金净流入/净流入占比/5日净流入”等字段，但 schema 中没有直接提供，请基于 `mf_*_buy_amt` / `mf_*_sell_amt` 组合自行派生（例如把 `sm/md/lg/elg` 四档买入金额相加减去卖出金额），并可进一步除以 `amount` 或 `db_circ_mv` 做归一化，再做 rolling 聚合。
     - 若 `static_factors.parquet` 不存在或缺少所需列，请直接报错并在下一轮改写因子定义（见下文约束），严禁用硬编码常数“拍脑袋补齐”。
   - 在你的 `factor.py` 中，直接使用标准字段名进行计算:
-    [代码示例开始]
+    ```python
     import pandas as pd
+
     df = pd.read_hdf("daily_pv.h5", key="data").sort_index()
-    # 直接使用标准字段名，例如: df["close"], df["volume"], df["open"] 等
-    [代码示例结束]
-  - **所有代码中，使用标准字段名**，例如：`df["close"]`、`df["volume"]`、`df["open"]`、`df["high"]`、`df["low"]`、`df["amount"]`、`df["db_turnover_rate"]`、`df["mf_lg_buy_amt"]`。
+    
+    # 直接使用标准字段名
+    # 例如: df["close"], df["volume"], df["open"] 等
+    ```
+  - **所有代码中，使用标准字段名**，例如：`df["close"]`、`df["volume"]`、`df["open"]`、`df["high"]`、`df["low"]`、`df["amount"]`、以及 schema 中的任意静态字段如 `df["<db_*字段>"]`、`df["<mf_*字段>"]` 等。
 
   【严禁硬编码替代变量（必须严格遵守）】
   - 如果核心价量字段（例如 `close/open/high/low/volume/amount`）缺失：
@@ -490,15 +526,18 @@ qlib_factor_interface: |-
     - 或在不破坏输出 contract 的前提下采用“降级版本”（例如退回到纯价量信号），但严禁用常数/拍脑袋值把公式凑出来.
   - **总原则**：严禁为缺失字段“编造/猜测/假设”一个固定值或常数分母来把公式凑出来.
   - 在实现依赖特定字段的因子前，必须先做列存在性检查：
-    [代码示例开始]
-    required_cols = ["close", "volume", "db_circ_mv"]
+    ```python
+    required_cols = ["<field_1>", "<field_2>", "<field_3>"]
     missing = [c for c in required_cols if c not in df.columns]
+
     if missing:
         raise ValueError(f"Missing columns: {missing}. Please redesign factor using available fields.")
-    [代码示例结束]
+    ```
 
   - 因子结果必须保持索引为 MultiIndex(`datetime`, `instrument`)，`index.names == ["datetime", "instrument"]`，并通过：
+    ```python
     result_df.to_hdf("result.h5", key="data", mode="w")
+    ```
     写入同一目录下的 `result.h5` 文件，列为一个或多个 `float32` 类型的因子列.
   - 在 Qlib 回测与联合因子实验的 YAML 模板中，还会通过 `StaticDataLoader/NestedDataLoader` 自动加载若干**预计算因子表**（无需在每个 `factor.py` 中重复计算），例如：
     - 全局自编码器异常检测因子表：`ae_recon_error_10d`（10 日重构误差），路径类似 `.../factors/ae_recon_error_10d/result.h5`；
@@ -610,7 +649,6 @@ factor_feedback_generation:
 
     Consider Changing Direction for Significant Gaps with SOTA:
       - If the new results significantly differ from the SOTA, consider exploring a new direction (write new type factors).
-      - Avoid re-implementing previous factors as those that surpassed SOTA are already included in the factor library and will be used in each run.
 
     Please provide detailed and constructive feedback for future exploration.
     Respond in JSON format. Example JSON structure for Result Analysis:
@@ -654,14 +692,22 @@ model_feedback_generation:
     All narrative parts of your feedback and final summary should be written in **Chinese** (concise professional Chinese), while JSON structure and field names must remain in English.
 
     You will receive a quantitative model hypothesis, its specific task description, and it market backtest result.
-    Your feedback should specify whether the current result supports or refutes the hypothesis, compare it with previous SOTA results, examine the model's training logs to analyze whether there are issues with hyperparameter settings, and suggest improvements or new directions.
+    Your feedback should:
+    1. Specify whether the current result supports or refutes the hypothesis
+    2. Compare with previous SOTA results using MULTIPLE metrics (not just annualized return)
+    3. Examine the model's training logs for hyperparameter issues (overfitting, underfitting, learning rate)
+    4. Analyze which EVOLUTION DIMENSION the hypothesis targeted and whether it was effective
+    5. Suggest improvements or new directions
 
     Please provide detailed and constructive feedback.
     Example JSON Structure for Result Analysis:
     {
-      "Observations": "First analyze the model's training logs to determine whether there are any issues with its parameter settings. Then clearly summarize the current results and the SOTA results with exact scores and any notable patterns. Limit your summary to no more than three concise, data-focused sentences.",
+      "Training Diagnostics": "Analyze training log: (1) Overfitting — valid loss ↑ while train loss ↓, report divergence epoch; (2) Underfitting — both losses plateau high; (3) LR issues — oscillation/explosion; (4) Early stopping — too early (best epoch << n_epochs) or too late. Cite specific numbers.",
+      "Observations": "Summarize key findings from diagnostics. State current vs SOTA metric values. Limit to three sentences.",
+      "Metric Analysis": "Compare key metrics: (1) IC/Rank IC and ICIR — signal quality; (2) Annualized Return and Max Drawdown — portfolio performance; (3) Sharpe Ratio — risk-adjusted return. Identify which metrics improved and which degraded vs SOTA.",
+      "Dimension Analysis": "Identify which evolution dimension ID (A1-A4, B1-B3, C1-C3) this hypothesis targeted. Assess whether the architectural change in that dimension was effective. If ineffective, suggest whether to retry with different parameters or abandon this dimension.",
       "Feedback for Hypothesis": "Explicitly confirm or refute the hypothesis based on specific data points or performance trends. Limit to two sentences.",
-      "New Hypothesis": "Propose a revised hypothesis, considering observed patterns and limitations in the current one. Limit to no more than two sentences.",
+      "New Hypothesis": "Propose a revised hypothesis, considering observed patterns and limitations in the current one. Explicitly state which evolution dimension ID (A1-A4, B1-B3, C1-C3) to explore next. Limit to two sentences.",
       "Reasoning": "Explain the rationale for the new hypothesis using specific trends or performance shifts. Be concise but technically complete. Limit to two sentences.",
       "Decision": <true or false>,
     }

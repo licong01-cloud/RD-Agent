@@ -10,6 +10,10 @@ from rdagent.log import rdagent_logger as logger
 from rdagent.oai.llm_utils import APIBackend
 from rdagent.scenarios.qlib.experiment.factor_experiment import QlibFactorScenario
 from rdagent.scenarios.qlib.experiment.quant_experiment import QlibQuantScenario
+from rdagent.scenarios.qlib.proposal.field_utils import (
+    collect_used_fields,
+    format_unused_field_whitelist,
+)
 from rdagent.utils import convert2bool
 from rdagent.utils.agent.tpl import T
 
@@ -75,6 +79,35 @@ class QlibFactorExperiment2Feedback(Experiment2Feedback):
         # Process the results to filter important metrics
         combined_result = process_results(current_result, sota_result)
 
+        # --- 2C: 历史因子摘要 ---
+        history_factor_summary = ""
+        if len(trace.hist) > 0:
+            lines = ["## 历史因子摘要 (New Hypothesis 须避免重复以下方向)"]
+            for idx, (hist_exp, hist_fb) in enumerate(trace.hist):
+                # 跳过模型轮（Quant 混合任务中 trace.hist 包含因子+模型）
+                if getattr(getattr(hist_exp, "hypothesis", None), "action", None) == "model":
+                    continue
+                briefs = []
+                for task in getattr(hist_exp, "sub_tasks", []):
+                    fname = getattr(task, "factor_name", None)
+                    if not fname:
+                        continue  # 跳过非因子任务
+                    variables = getattr(task, "variables", None)
+                    vars_str = ", ".join(variables.keys()) if isinstance(variables, dict) else ""
+                    briefs.append(f"{fname}({vars_str})")
+                if briefs:
+                    decision = "ACCEPTED" if hist_fb.decision else "rejected"
+                    lines.append(f"  Trial {idx+1} [{decision}]: {'; '.join(briefs)}")
+            if len(lines) > 1:
+                history_factor_summary = "\n".join(lines)
+
+        # --- 4A: 追加未使用字段白名单到反馈上下文 ---
+        if len(trace.hist) > 0:
+            prefix_fields = collect_used_fields(trace.hist, factor_only=True)
+            unused_whitelist = format_unused_field_whitelist(prefix_fields, language="zh")
+            if unused_whitelist:
+                history_factor_summary += "\n" + unused_whitelist
+
         # Generate the system prompt
         if isinstance(self.scen, (QlibQuantScenario, QlibFactorScenario)):
             sys_prompt = T("scenarios.qlib.prompts:factor_feedback_generation.system").r(
@@ -90,6 +123,7 @@ class QlibFactorExperiment2Feedback(Experiment2Feedback):
             hypothesis_text=hypothesis_text,
             task_details=tasks_factors,
             combined_result=combined_result,
+            history_factor_summary=history_factor_summary,
         )
 
         # Call the APIBackend to generate the response for hypothesis feedback
@@ -103,12 +137,30 @@ class QlibFactorExperiment2Feedback(Experiment2Feedback):
         # Parse the JSON response to extract the feedback
         response_json = json.loads(response)
 
-        # Extract fields from JSON response
-        observations = response_json.get("Observations", "No observations provided")
-        hypothesis_evaluation = response_json.get("Feedback for Hypothesis", "No feedback provided")
-        new_hypothesis = response_json.get("New Hypothesis", "No new hypothesis provided")
-        reason = response_json.get("Reasoning", "No reasoning provided")
-        decision = convert2bool(response_json.get("Replace Best Result", "no"))
+        # Case-insensitive key lookup helper
+        def _get_ci(d, target_key, default=""):
+            """Case-insensitive dict get with fuzzy matching."""
+            val = d.get(target_key)
+            if val is not None:
+                return val
+            target_lower = target_key.lower()
+            for k, v in d.items():
+                if k.lower() == target_lower:
+                    return v
+            # Fuzzy: check if target words appear in key
+            target_words = [w for w in target_lower.split() if len(w) > 3]
+            for k, v in d.items():
+                k_lower = k.lower()
+                if all(w in k_lower for w in target_words):
+                    return v
+            return default
+
+        # Extract fields from JSON response with fuzzy matching
+        observations = _get_ci(response_json, "Observations", "No observations provided")
+        hypothesis_evaluation = _get_ci(response_json, "Feedback for Hypothesis", "No feedback provided")
+        new_hypothesis = _get_ci(response_json, "New Hypothesis", "No new hypothesis provided")
+        reason = _get_ci(response_json, "Reasoning", "No reasoning provided")
+        decision = convert2bool(_get_ci(response_json, "Replace Best Result", "no"))
 
         return HypothesisFeedback(
             observations=observations,
@@ -167,10 +219,29 @@ class QlibModelExperiment2Feedback(Experiment2Feedback):
 
         # Parse the JSON response to extract the feedback
         response_json_hypothesis = json.loads(response)
+
+        # Case-insensitive key lookup helper
+        def _get_ci(d, target_key, default=""):
+            """Case-insensitive dict get with fuzzy matching."""
+            val = d.get(target_key)
+            if val is not None:
+                return val
+            target_lower = target_key.lower()
+            for k, v in d.items():
+                if k.lower() == target_lower:
+                    return v
+            # Fuzzy: check if target words appear in key
+            target_words = [w for w in target_lower.split() if len(w) > 3]
+            for k, v in d.items():
+                k_lower = k.lower()
+                if all(w in k_lower for w in target_words):
+                    return v
+            return default
+
         return HypothesisFeedback(
-            observations=response_json_hypothesis.get("Observations", "No observations provided"),
-            hypothesis_evaluation=response_json_hypothesis.get("Feedback for Hypothesis", "No feedback provided"),
-            new_hypothesis=response_json_hypothesis.get("New Hypothesis", "No new hypothesis provided"),
-            reason=response_json_hypothesis.get("Reasoning", "No reasoning provided"),
-            decision=convert2bool(response_json_hypothesis.get("Decision", "false")),
+            observations=_get_ci(response_json_hypothesis, "Observations", "No observations provided"),
+            hypothesis_evaluation=_get_ci(response_json_hypothesis, "Feedback for Hypothesis", "No feedback provided"),
+            new_hypothesis=_get_ci(response_json_hypothesis, "New Hypothesis", "No new hypothesis provided"),
+            reason=_get_ci(response_json_hypothesis, "Reasoning", "No reasoning provided"),
+            decision=convert2bool(_get_ci(response_json_hypothesis, "Decision", "false")),
         )

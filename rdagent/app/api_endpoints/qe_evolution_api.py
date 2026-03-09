@@ -1,12 +1,14 @@
 """
 QE (QuantEvolver) 演进 API 端点
 
-提供以下接口：
+提供以下接口（双参数嵌套路由）：
 1. POST /api/v1/qe_workspace/tasks/{task_id}/loops - 触发新 LOOP 的回测执行
-2. GET /api/v1/qe_workspace/loops/{loop_id}/status - 查询 LOOP 状态
-3. GET /api/v1/qe_workspace/loops/{loop_id}/metrics - 获取 LOOP 回测指标
-4. GET /api/v1/qe_workspace/loops/{loop_id}/assets/download - 打包下载模型资产
+2. GET /api/v1/qe_workspace/tasks/{task_id}/loops/{loop_id}/status - 查询 LOOP 状态
+3. GET /api/v1/qe_workspace/tasks/{task_id}/loops/{loop_id}/metrics - 获取 LOOP 回测指标
+4. GET /api/v1/qe_workspace/tasks/{task_id}/loops/{loop_id}/assets/download - 打包下载模型资产
 5. DELETE /api/v1/qe_workspace/tasks/{task_id} - 清理任务工作区
+6. GET /api/v1/qe_workspace/tasks/{task_id}/logs - 任务日志流（SSE）
+7. GET /api/v1/qe_workspace/config - 工作区配置信息
 """
 
 import logging
@@ -18,16 +20,43 @@ import json
 from pathlib import Path
 from typing import Dict, Any, Optional
 
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None  # type: ignore
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
+# 确保 .env 文件中的环境变量在模块加载时可用（热重载安全）
+# override=False：不覆盖已存在的 shell 环境变量
+_env_path = Path(__file__).resolve().parents[3] / ".env"
+if _env_path.exists():
+    if load_dotenv is not None:
+        load_dotenv(_env_path, override=False)
+    else:
+        # python-dotenv 未安装时，手动解析 .env（仅补充缺失的环境变量）
+        with open(_env_path, encoding="utf-8") as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if not _line or _line.startswith("#") or "=" not in _line:
+                    continue
+                _key, _, _val = _line.partition("=")
+                _key = _key.strip()
+                _val = _val.strip().strip("'\"")
+                if _key and _key not in os.environ:
+                    os.environ[_key] = _val
+
 router = APIRouter(prefix="/api/v1/qe_workspace", tags=["qe_evolution"])
 
-# Workspace base directory for evolution tasks
-WORKSPACE_BASE = Path(os.environ.get("QE_WORKSPACE_BASE", "/tmp/qe_evolution_workspace"))
+# ── QE 专属配置 ──
+# QE 与 RDAgent 主程序完全隔离，路径配置通过 RDAgent .env 环境变量管理。
+# 未来部署到独立服务器时，通过启动命令或 .env 设置环境变量即可。
+WORKSPACE_BASE = Path(os.environ.get("QE_WORKSPACE_WSL", ""))
+if not str(WORKSPACE_BASE) or str(WORKSPACE_BASE) == ".":
+    logger.warning("QE_WORKSPACE_WSL 环境变量未设置，QE API 的 workspace 功能将不可用")
 
 class LoopRunRequest(BaseModel):
     loop_index: int
@@ -54,25 +83,31 @@ def _append_log(loop_dir: Path, message: str):
 
 async def _run_qlib_backtest(task_id: str, loop_id: str, config: Dict[str, Any], experiment_files: Optional[Dict[str, str]], wsl_command: Optional[str]):
     """
-    后台任务：执行 QLib 回测
+    后台任务：执行 QLib 回测。
+
+    关键设计：
+    - start_new_session=True: 子进程在独立会话中运行，uvicorn --reload 不会杀死它
+    - stdout 重定向到日志文件（非 PIPE）：父进程死后子进程不会因管道断裂收到 SIGPIPE
+    - pid.txt 记录子进程真实 PID（非 FastAPI worker PID）：健康检查准确判断
+    - read_exp_res.py 集成到命令链：父进程死后仍会自动执行生成结果文件
     """
     loop_dir = _get_loop_dir(task_id, loop_id)
     os.makedirs(loop_dir, exist_ok=True)
-    
+
     # 记录状态为 running
     status_file = loop_dir / "status.txt"
     status_file.write_text("running")
     _append_log(loop_dir, f"[START] loop={loop_id} status=running")
-    
+
     # 保存配置
     config_file = loop_dir / "config.json"
     with open(config_file, "w", encoding="utf-8") as f:
         json.dump(config, f)
-        
+
     try:
         logger.info(f"Starting QLib backtest for {loop_id} with config: {config}")
         _append_log(loop_dir, f"[INFO] Starting QLib backtest with config={json.dumps(config, ensure_ascii=False)}")
-        
+
         # 写入实验文件
         if experiment_files:
             for rel_path, content in experiment_files.items():
@@ -88,67 +123,62 @@ async def _run_qlib_backtest(task_id: str, loop_id: str, config: Dict[str, Any],
 
         # 构造执行命令
         if wsl_command:
-            # AIstock 传入的自定义 WSL 命令（已包含 cd、conda activate 等）
+            # AIstock 传入的自定义 WSL 命令（auto 模式已包含 read_exp_res.py）
             final_cmd = wsl_command
             _append_log(loop_dir, f"[INFO] Using wsl_command: {final_cmd}")
         else:
-            # 默认命令链：cd → prepare_factors → qrun
+            # 默认命令链：cd → prepare_factors → qrun → read_exp_res
             cmd_parts = [f"cd {loop_dir}"]
             if (loop_dir / "prepare_factors.py").exists():
                 cmd_parts.append("python prepare_factors.py")
             cmd_parts.append("qrun conf.yaml")
+            # 将 read_exp_res.py 集成到命令链，确保即使父进程重启也能生成结果文件
+            if (loop_dir / "read_exp_res.py").exists():
+                cmd_parts.append("python read_exp_res.py")
             final_cmd = " && ".join(cmd_parts)
             _append_log(loop_dir, f"[INFO] Executing command: {final_cmd}")
-        
-        # 执行子进程
+
+        # 将子进程输出重定向到日志文件（非 PIPE），确保子进程与父进程解耦
+        log_file_path = loop_dir / "run.log"
+        log_fd = os.open(str(log_file_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+
+        # 在独立会话中执行子进程，使其在 uvicorn --reload 时存活
         process = await asyncio.create_subprocess_shell(
             final_cmd,
-            stdout=asyncio.subprocess.PIPE,
+            stdout=log_fd,
             stderr=asyncio.subprocess.STDOUT,
             env=env,
-            cwd=loop_dir
+            cwd=loop_dir,
+            start_new_session=True,
         )
-        
-        # 读取输出到日志
-        while True:
-            line = await process.stdout.readline()
-            if not line:
-                break
-            _append_log(loop_dir, line.decode('utf-8', errors='replace').rstrip())
-            
+        os.close(log_fd)  # 父进程关闭 fd 副本，子进程保留自己的副本
+
+        # 写入子进程的真实 PID（而非 FastAPI worker PID）
+        (loop_dir / "pid.txt").write_text(str(process.pid))
+        _append_log(loop_dir, f"[INFO] Subprocess started, pid={process.pid}")
+
+        # 等待完成（如果 uvicorn reload 导致父进程重启，此处会被取消，但子进程继续运行）
         await process.wait()
-        
+
         if process.returncode != 0:
             raise RuntimeError(f"QLib backtest failed with return code {process.returncode}")
-        
-        # qlib_res.json 和图表分析脚本会由 read_exp_res.py 之类的脚本生成？
-        # 如果需要，我们可以主动跑一下 read_exp_res.py
-        if (loop_dir / "read_exp_res.py").exists():
-            _append_log(loop_dir, "[INFO] Running read_exp_res.py to generate metrics...")
-            res_process = await asyncio.create_subprocess_shell(
-                "python read_exp_res.py",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                env=env,
-                cwd=loop_dir
-            )
-            while True:
-                line = await res_process.stdout.readline()
-                if not line:
-                    break
-                _append_log(loop_dir, line.decode('utf-8', errors='replace').rstrip())
-            await res_process.wait()
-            
+
         # 记录状态为 completed
         status_file.write_text("completed")
         _append_log(loop_dir, f"[DONE] loop={loop_id} status=completed")
         logger.info(f"Completed QLib backtest for {loop_id}")
-        
+
     except Exception as e:
         logger.error(f"Backtest failed for {loop_id}: {e}")
-        status_file.write_text("failed")
-        (loop_dir / "error.log").write_text(str(e))
-        _append_log(loop_dir, f"[ERROR] loop={loop_id} status=failed error={str(e)}")
+        # 仅在状态未被健康检查更新时标记为 failed
+        try:
+            current = status_file.read_text().strip() if status_file.exists() else ""
+        except Exception:
+            current = ""
+        if current not in ("completed", "failed"):
+            status_file.write_text("failed")
+            (loop_dir / "error.log").write_text(str(e))
+        _append_log(loop_dir, f"[ERROR] loop={loop_id} error={str(e)}")
 
 @router.get("/tasks/{task_id}/logs")
 async def stream_task_logs(task_id: str):
@@ -192,7 +222,7 @@ async def create_and_run_loop(task_id: str, request: LoopRunRequest, background_
     """
     接收演进配置并触发 QLib 回测
     """
-    loop_id = f"{task_id}_L{request.loop_index}"
+    loop_id = f"Loop{request.loop_index}"
     
     try:
         # 启动后台回测任务
@@ -210,55 +240,151 @@ async def create_and_run_loop(task_id: str, request: LoopRunRequest, background_
         logger.error(f"Failed to trigger loop {loop_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/loops/{loop_id}/status")
-async def get_loop_status(loop_id: str):
+@router.get("/tasks/{task_id}/loops/{loop_id}/status")
+async def get_loop_status(task_id: str, loop_id: str):
     """
-    查询 LOOP 状态
+    查询 LOOP 状态。
+
+    状态判断逻辑（准确判断，不做推测）：
+    1. status.txt 存在且为 completed/failed → 直接返回（终态）
+    2. status.txt 为 running → 检查 PID 是否存活：
+       - PID 存活 → running
+       - PID 不存活 + 结果文件存在 → completed（进程正常退出但 status.txt 未更新）
+       - PID 不存活 + 无结果文件 → failed（进程异常终止）
+    3. status.txt 不存在 → not_found
     """
-    # 从 loop_id 中解析 task_id (如 Evo_1234_L0)
-    parts = loop_id.rsplit("_L", 1)
-    if len(parts) != 2:
-        raise HTTPException(status_code=400, detail="Invalid loop_id format")
-    
-    task_id = parts[0]
     loop_dir = _get_loop_dir(task_id, loop_id)
+    task_dir = _get_task_dir(task_id)
     status_file = loop_dir / "status.txt"
-    
+
     if not status_file.exists():
         return {"status": "not_found"}
-        
+
     status = status_file.read_text().strip()
+
+    # 终态直接返回
+    if status in ("completed", "failed"):
+        return {"status": status}
+
+    if status == "running":
+        pid_file = loop_dir / "pid.txt"
+        if pid_file.exists():
+            try:
+                pid = int(pid_file.read_text().strip())
+                os.kill(pid, 0)  # 不发信号，仅检查进程是否存在
+                return {"status": "running"}
+            except (ProcessLookupError, OSError):
+                # PID 不存活，检查结果文件确定最终状态（loop 目录优先，兼容 task 目录）
+                result_file = loop_dir / "qlib_results_enhanced.json"
+                if not result_file.exists():
+                    result_file = task_dir / "qlib_results_enhanced.json"
+                if result_file.exists():
+                    status = "completed"
+                else:
+                    status = "failed"
+                status_file.write_text(status)
+                _append_log(loop_dir, f"[DETECT] pid={pid} no longer alive, result_file_exists={result_file.exists()}, marking as {status}")
+                return {"status": status}
+        else:
+            # 无 pid.txt，无法判断进程状态，保持当前状态
+            return {"status": status}
+
+    # 其他未知状态（如 interrupted），直接返回
     return {"status": status}
 
-@router.get("/loops/{loop_id}/metrics")
-async def get_loop_metrics(loop_id: str):
+@router.get("/tasks/{task_id}/loops/{loop_id}/metrics")
+async def get_loop_metrics(task_id: str, loop_id: str):
     """
-    获取 LOOP 回测指标
-    """
-    parts = loop_id.rsplit("_L", 1)
-    if len(parts) != 2:
-        raise HTTPException(status_code=400, detail="Invalid loop_id format")
-    
-    task_id = parts[0]
-    loop_dir = _get_loop_dir(task_id, loop_id)
-    res_file = loop_dir / "qlib_res.json"
-    
-    if not res_file.exists():
-        raise HTTPException(status_code=404, detail="Metrics not ready")
-        
-    with open(res_file, "r") as f:
-        return json.load(f)
+    获取 LOOP 回测指标。
 
-@router.get("/loops/{loop_id}/assets/download")
-async def download_loop_assets(loop_id: str):
+    read_exp_res.py 输出文件固定为：
+    - qlib_results_enhanced.json（完整增强指标，含 summary 字段）
+    搜索顺序：loop 目录（wsl_command cd 目标） → task 目录（兼容旧路径）。
+    """
+    loop_dir = _get_loop_dir(task_id, loop_id)
+    task_dir = _get_task_dir(task_id)
+
+    enhanced_file = None
+    for search_dir in [loop_dir, task_dir]:
+        candidate = search_dir / "qlib_results_enhanced.json"
+        if candidate.exists():
+            enhanced_file = candidate
+            break
+
+    if enhanced_file is None:
+        raise HTTPException(status_code=404, detail="Metrics not ready: qlib_results_enhanced.json not found")
+
+    with open(enhanced_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    return data.get("summary", data)
+
+@router.get("/tasks/{task_id}/loops/{loop_id}/enhanced-metrics")
+async def get_loop_enhanced_metrics(task_id: str, loop_id: str):
+    """
+    获取 LOOP 增强诊断指标（IC 时间序列、训练过程、收益曲线等）。
+    主路径：从 qlib_results_enhanced.json 提取 5 个诊断子段。
+    兼容回退：尝试独立文件（ic_diagnostics.json 等）。
+    """
+    loop_dir = _get_loop_dir(task_id, loop_id)
+    task_dir = _get_task_dir(task_id)
+
+    # --- 主路径: 从 qlib_results_enhanced.json 提取 ---
+    enhanced_file = None
+    for search_dir in [loop_dir, task_dir]:
+        candidate = search_dir / "qlib_results_enhanced.json"
+        if candidate.exists():
+            enhanced_file = candidate
+            break
+
+    if enhanced_file is not None:
+        with open(enhanced_file, "r", encoding="utf-8") as f:
+            full_data = json.load(f)
+
+        # 提取 5 个诊断子段
+        _SECTION_KEYS = [
+            "ic_diagnostics", "return_curves", "training_diagnostics",
+            "trade_diagnostics", "prediction_diagnostics",
+        ]
+        result = {}
+        for key in _SECTION_KEYS:
+            if key in full_data:
+                result[key] = full_data[key]
+
+        # IC key 标准化: ic_dates → dates (前端期望 dates)
+        ic = result.get("ic_diagnostics")
+        if ic and "ic_dates" in ic and "dates" not in ic:
+            ic["dates"] = ic.pop("ic_dates")
+
+        if result:
+            return result
+
+    # --- 兼容回退: 尝试独立文件 ---
+    result = {}
+    _FALLBACK_FILES = {
+        "ic_diagnostics": "ic_diagnostics.json",
+        "return_curves": "return_curves.json",
+        "training_diagnostics": "training_diagnostics.json",
+        "trade_diagnostics": "trade_diagnostics.json",
+        "prediction_diagnostics": "prediction_diagnostics.json",
+    }
+    for key, filename in _FALLBACK_FILES.items():
+        fpath = loop_dir / filename
+        if fpath.exists():
+            with open(fpath, "r", encoding="utf-8") as f:
+                result[key] = json.load(f)
+
+    if not result:
+        raise HTTPException(status_code=404, detail="Enhanced metrics not available yet")
+
+    return result
+
+
+@router.get("/tasks/{task_id}/loops/{loop_id}/assets/download")
+async def download_loop_assets(task_id: str, loop_id: str):
     """
     模型资产打包(ZIP)下载
     """
-    parts = loop_id.rsplit("_L", 1)
-    if len(parts) != 2:
-        raise HTTPException(status_code=400, detail="Invalid loop_id format")
-        
-    task_id = parts[0]
     loop_dir = _get_loop_dir(task_id, loop_id)
     
     if not loop_dir.exists():
@@ -303,27 +429,21 @@ async def cleanup_task_workspace(task_id: str):
     if task_dir.exists():
         try:
             shutil.rmtree(task_dir)
-            return {"status": "success", "message": f"Workspace {task_id} cleaned up"}
+            return {"ok": True, "task_id": task_id}
         except Exception as e:
             logger.error(f"Failed to clean up workspace {task_id}: {e}")
             raise HTTPException(status_code=500, detail=str(e))
-    return {"status": "success", "message": f"Workspace {task_id} not found, assumed clean"}
+    return {"ok": True, "task_id": task_id}
 
 
 @router.get("/config")
 async def get_workspace_config():
     """
-    返回 RDAgent 侧的工作区配置信息，供 AIstock 动态获取路径。
-    消除 AIstock 对 RDAgent 内部路径的硬编码依赖。
+    返回 QE 工作区配置信息，供 AIstock 动态获取路径。
+    所有路径直接从环境变量读取（RDAgent .env）。
     """
     return {
         "workspace_base": str(WORKSPACE_BASE),
-        "factor_data_dir": os.environ.get(
-            "RDAGENT_FACTOR_DATA_DIR",
-            "/mnt/f/Dev/RD-Agent-main/git_ignore_folder/factor_implementation_source_data",
-        ),
-        "qlib_data_path": os.environ.get(
-            "QLIB_DATA_PATH",
-            "/mnt/f/Dev/AIstock/qlib_bin/qlib_bin_20251209",
-        ),
+        "factor_data_dir": os.environ.get("RDAGENT_FACTOR_DATA_WSL", ""),
+        "qlib_data_path": os.environ.get("QLIB_DATA_PATH_WSL", ""),
     }

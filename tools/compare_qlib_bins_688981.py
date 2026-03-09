@@ -149,7 +149,7 @@ def main() -> None:
 
     parser.add_argument(
         "--provider-a",
-        default="/mnt/f/Dev/AIstock/qlib_bin/qlib_bin_20251209",
+        default="/home/lc999/data/qlib_bin",
         help="Provider A root (default: AIstock qlib_bin_20251209)",
     )
     parser.add_argument(

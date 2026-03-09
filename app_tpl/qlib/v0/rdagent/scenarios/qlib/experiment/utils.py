@@ -79,11 +79,11 @@ def _candidate_schema_paths_for_file(p: Path) -> list[Path]:
             cands.append(gov_unix / "schemas" / "factors" / f"{stem}_schema.json")
 
     # 4) common default governance folder (both Windows and Unix styles)
-    default_gov_win = Path("F:/Dev/AIstock/data_governance")
+    default_gov_win = Path("/home/lc999/data/data_governance")
     cands.append(default_gov_win / "schemas" / f"{stem}_schema.csv")
     cands.append(default_gov_win / "schemas" / f"{stem}_schema.json")
     
-    default_gov_unix = Path("/mnt/f/Dev/AIstock/data_governance")
+    default_gov_unix = Path("/home/lc999/data/data_governance")
     cands.append(default_gov_unix / "schemas" / f"{stem}_schema.csv")
     cands.append(default_gov_unix / "schemas" / f"{stem}_schema.json")
     cands.append(default_gov_unix / "schemas" / "factors" / f"{stem}_schema.csv")
@@ -293,7 +293,7 @@ def generate_data_folder_from_qlib() -> None:
     if factors_root:
         factors_root_p = _to_unix_path(Path(factors_root)).resolve()
     else:
-        factors_root_p = Path("/mnt/f/Dev/AIstock/factors")
+        factors_root_p = Path("/home/lc999/data/aistock_factors")
     aistock_static_candidates = [
         factors_root_p / "combined_static_factors.parquet",
         factors_root_p / "static_factors.parquet",
@@ -354,7 +354,7 @@ def generate_data_folder_from_qlib() -> None:
 
     # Optional: copy governance schemas into the data folder so LLMs/agents can access
     # consistent field meanings/units without needing external paths.
-    gov_dir = Path(os.environ.get("AISTOCK_DATA_GOVERNANCE_DIR", "") or "/mnt/f/Dev/AIstock/data_governance")
+    gov_dir = Path(os.environ.get("AISTOCK_DATA_GOVERNANCE_DIR", "") or "/home/lc999/data/data_governance")
     gov_schemas = gov_dir / "schemas"
     if gov_schemas.exists():
         try:

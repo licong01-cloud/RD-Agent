@@ -112,11 +112,27 @@ class RDAgentSettings(ExtendedBaseSettings):
     """the semaphore for each step;  you can specify a overall semaphore
     or a step-wise semaphore like {"coding": 3, "running": 2}"""
 
+    max_pending_loops: int | None = None
+    """Maximum number of unfinished loops allowed before kickoff_loop blocks.
+    Controls how many loops can have their hypothesis generated before any
+    previous loop completes its feedback.  When None (default), falls back
+    to get_max_parallel() for backwards compatibility.
+    Set to 1 to enforce strict serial hypothesis generation (each loop waits
+    for the previous loop's feedback before proposing a new hypothesis)."""
+
     def get_max_parallel(self) -> int:
         """Based on the setting of semaphore, return the maximum number of parallel loops"""
         if isinstance(self.step_semaphore, int):
             return self.step_semaphore
         return max(self.step_semaphore.values())
+
+    def get_max_pending_loops(self) -> int:
+        """Return the kickoff backpressure threshold.
+        Decoupled from step_semaphore so that coding can run in parallel
+        while hypothesis generation still waits for prior feedback."""
+        if self.max_pending_loops is not None:
+            return self.max_pending_loops
+        return self.get_max_parallel()
 
     # NOTE: for debug
     # the following function only serves as debugging and is necessary in main logic.

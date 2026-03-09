@@ -10,6 +10,11 @@ from rdagent.scenarios.qlib.proposal.bandit import (
     EnvController,
     extract_metrics_from_experiment,
 )
+from rdagent.scenarios.qlib.proposal.field_utils import (
+    collect_used_fields,
+    format_field_usage_summary,
+    format_unused_field_whitelist,
+)
 from rdagent.utils.agent.tpl import T
 
 
@@ -96,7 +101,7 @@ class QlibQuantHypothesisGen(FactorAndModelHypothesisGen):
                 # qaunt_rag = "Now, you need to try factors that can achieve high IC (e.g., machine learning-based factors)! Do not include factors that are similar to those in the SOTA factor library!"
                 qaunt_rag = "Now, you need to try factors that can achieve high IC (e.g., cross-sectional ranking signals, non-linear price-volume combinations, multi-scale statistical features). Do NOT use machine learning training in factor scripts. Do not include factors that are similar to those in the SOTA factor library!"
         elif action == "model":
-            qaunt_rag = "1. In Quantitative Finance, market data could be time-series, and GRU model/LSTM model are suitable for them. Do not generate GNN model as for now.\n2. The training data consists of approximately 478,000 samples for the training set and about 128,000 samples for the validation set. Please design the hyperparameters accordingly and control the model size. This has a significant impact on the training results. If you believe that the previous model itself is good but the training hyperparameters or model hyperparameters are not optimal, you can return the same model and adjust these parameters instead.\n"
+            qaunt_rag = "1. In Quantitative Finance, market data could be time-series, and GRU model/LSTM model are suitable for them. Do not generate GNN model as for now.\n2. The training data consists of approximately 3,700,000 samples for the training set and about 1,200,000 samples for the validation set (A-share all market, 2018-2022 train, 2023-2024 valid). Please design the hyperparameters accordingly and control the model size. This has a significant impact on the training results. If you believe that the previous model itself is good but the training hyperparameters or model hyperparameters are not optimal, you can return the same model and adjust these parameters instead.\n"
 
         if len(trace.hist) == 0:
             hypothesis_and_feedback = "No previous hypothesis and feedback available since it's the first round."
@@ -145,22 +150,30 @@ class QlibQuantHypothesisGen(FactorAndModelHypothesisGen):
                 break
 
         sota_hypothesis_and_feedback = None
-        if action == "model":
-            for i in range(len(trace.hist) - 1, -1, -1):
-                if trace.hist[i][0].hypothesis.action == "model" and trace.hist[i][1].decision is True:
-                    sota_hypothesis_and_feedback = T("scenarios.qlib.prompts:sota_hypothesis_and_feedback").r(
-                        experiment=trace.hist[i][0], feedback=trace.hist[i][1]
-                    )
-                    break
+        for i in range(len(trace.hist) - 1, -1, -1):
+            if trace.hist[i][0].hypothesis.action == action and trace.hist[i][1].decision is True:
+                sota_hypothesis_and_feedback = T("scenarios.qlib.prompts:sota_hypothesis_and_feedback").r(
+                    experiment=trace.hist[i][0], feedback=trace.hist[i][1]
+                )
+                break
+
+        # --- 2A + 4A: 字段统计 + 未使用白名单（仅因子轮）---
+        field_usage_summary = ""
+        if action == "factor" and len(trace.hist) > 0:
+            prefix_fields = collect_used_fields(trace.hist, factor_only=True)
+            field_usage_summary = format_field_usage_summary(
+                prefix_fields, n_rounds=len(trace.hist), language="zh"
+            )
+            field_usage_summary += format_unused_field_whitelist(prefix_fields, language="zh")
 
         context_dict = {
             "hypothesis_and_feedback": hypothesis_and_feedback,
             "last_hypothesis_and_feedback": last_hypothesis_and_feedback,
-            "SOTA_hypothesis_and_feedback": sota_hypothesis_and_feedback,
+            "sota_hypothesis_and_feedback": sota_hypothesis_and_feedback,
             "RAG": qaunt_rag,
             "hypothesis_output_format": T("scenarios.qlib.prompts:hypothesis_output_format_with_action").r(),
             "hypothesis_specification": (
-                T("scenarios.qlib.prompts:factor_hypothesis_specification").r()
+                T("scenarios.qlib.prompts:factor_hypothesis_specification").r() + field_usage_summary
                 if action == "factor"
                 else T("scenarios.qlib.prompts:model_hypothesis_specification").r()
             ),

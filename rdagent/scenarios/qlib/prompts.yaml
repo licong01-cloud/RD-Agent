@@ -87,40 +87,74 @@ model_hypothesis_specification: |-
   2. Second, `last_hypothesis_and_feedback` and `sota_hypothesis_and_feedback` are key references you should pay close attention to. You can choose to optimize based on either of them or generate new ideas to form hypotheses and experiments.
   3. If there is no prior experiment or result available at the beginning, you can start by implementing a simple and small architecture.
   4. If a series of attempts fail to achieve SOTA, consider exploring entirely new directions; at this point, it is acceptable to return to simple architectures.
-  5. Focus exclusively on the architecture of PyTorch models. Each hypothesis should specifically address architectural decisions, such as layer configurations, activation functions, regularization methods, and overall model structure. DO NOT do any feature-specific processing. Instead, you can propose innovative transformations on the input time-series data to enhance model training effectiveness.
-  6. Avoid including aspects unrelated to architecture, such as input features or optimization strategies.
-  7. Sometimes, when training performance is poor, adjusting hyperparameters can also be an effective strategy for improvement.
-  8. Use standard libraries for baseline models, but also explore custom architecture designs to investigate novel structures. After sufficient trials with traditional models, aim for innovation comparable to top-tier AI conferences (NeurIPS, ICLR, ICML, SIGKDD, etc.) in time series modeling.
+  5. Focus exclusively on the architecture of PyTorch models. Each hypothesis should specifically address architectural decisions along the following EVOLUTION DIMENSIONS (explore them progressively, one at a time). When proposing a hypothesis, you MUST reference the dimension by its ID (e.g. "A1", "B2"):
+     **Category A — Architecture Dimensions:**
+     - **A1 Temporal Modeling**: RNN/LSTM/GRU → Temporal Attention → Multi-scale temporal convolution
+     - **A2 Attention Mechanisms**: Self-attention → Cross-attention → Sparse/Linear attention
+     - **A3 Cross-sectional Modeling**: Stock-level features → Cross-stock attention → Graph-based interaction
+     - **A4 Positional/Temporal Encoding**: Learnable position embedding → Sinusoidal → Relative position encoding
+     **Category B — Regularization & Stability Dimensions:**
+     - **B1 Regularization**: Dropout → LayerNorm/BatchNorm → Residual connections → Stochastic depth
+     - **B2 Non-stationarity Handling**: Adaptive normalization → Instance normalization → RevIN
+     - **B3 Training Stability**: Gradient clipping (recommend max_norm=1.0) → LR warmup (recommend 5-10 epochs linear warmup) → Mixed precision (already enabled via use_amp=true). When targeting B3, specify the exact technique and its parameter values.
+     **Category C — Hyperparameter Tuning:**
+     - **C1 Learning Rate & Schedule**: Adjust lr, consider cosine annealing or warmup+decay
+     - **C2 Regularization Strength**: Adjust weight_decay, dropout rate
+     - **C3 Training Duration**: Adjust n_epochs, early_stop, batch_size
+     DO NOT do any feature-specific processing. Instead, you can propose innovative transformations on the input time-series data to enhance model training effectiveness.
+  6. Avoid including aspects unrelated to architecture, such as input features or optimization strategies. When proposing a hypothesis, explicitly state which EVOLUTION DIMENSION ID (e.g. A1, B2, C1) from item 5 it targets.
+  7. Sometimes, when training performance is poor, adjusting hyperparameters (Category C dimensions) can also be an effective strategy for improvement.
+  8. **模型规模与超参数约束：**
+    - hidden_dim 推荐 64-128，不超过 256。Transformer/Attention 层数推荐 1-2 层，不超过 3 层。
+    - 总参数量控制在 1MB 以内。量化场景中简单模型（GRU/LSTM）往往比深层 Transformer 更实用。
+    - 避免极小模型（hidden_dim<32, 单层）。
+    - **超参数应根据模型类型 (model_type) 合理调整：**
+      - **Tabular 模型** (DatasetH): `batch_size: 4096-16384`，`n_epochs: 100-200`，`early_stop: 10-20`
+      - **TimeSeries 模型** (TSDatasetH): `batch_size: 2048-8192`（小模型<1MB在16GB GPU上内存充裕，应充分利用GPU并行能力），`n_epochs: 200-300`，`early_stop: 20-30`
+      - **Learning Rate**: GRU/LSTM 推荐 `2e-4 ~ 5e-4`，Transformer 推荐 `1e-4 ~ 5e-4`，MLP/Tabular 推荐 `5e-4 ~ 1e-3`
+      - **Weight Decay**: 小模型(<0.5MB) 推荐 `1e-5`，较大模型 推荐 `1e-4 ~ 1e-3`
+    - 选择超参数时，请在 hypothesis 中简要说明理由（如"TSDatasetH step_len=20，模型0.16MB，16GB GPU内存充裕，batch_size 选择 4096 以提高GPU利用率"）。
+  9. Use standard libraries for baseline models, then gradually explore custom architecture designs.
+     COMPLEXITY CONTROL RULES:
+     - Each new hypothesis should introduce AT MOST ONE new architectural component compared to the best-performing previous model.
+     - New components must be well-defined and independently testable.
+     - Do NOT combine multiple untested innovations in a single hypothesis.
+     - Progression example: Linear → +A2(Attention) → +B1(Residual) → +A1(MultiScale) (one new component per step, not all at once).
+  10. **模型代码质量要求：**
+    - 所有 `nn.Module`（如 `nn.Linear`, `nn.LayerNorm`, `nn.GRU`）必须在 `__init__` 中创建，禁止在 `forward()` 中动态创建。在 `forward()` 中创建的模块不会被优化器更新，导致训练完全失效。
+    - 残差连接的投影层 (`residual_proj`) 必须在 `__init__` 中预定义，不能在 `forward()` 中通过 `nn.Linear(...).to(x.device)` 动态创建。
 
 factor_hypothesis_specification: |-
-  1. **Factors per Generation:**
-    - **第一轮**: 产生 4-6 个因子，确保覆盖四个自定义数据集（`db_*`/`mf_*`/`bb_*`/`cp_*`）中的至少三个。
-    - **后续轮次**: 产生 4-8 个因子，根据策略和实验需要灵活调整数量。
-    - 在给出多个因子时，请在类型、数据来源和结构上保持一定多样性，避免高度相似的微调版本。
-    - **数据集覆盖约束**：每轮因子中，必须至少包含 1 个依赖 `bb_*`（基本面）的因子和 1 个依赖 `cp_*`（筹码）的因子，以充分利用新增数据集。
-  2. **Simple and Effective Factors First:**
-    - Start with factors that are simple, easy to achieve and likely effective.
-    - Concisely explain why these factors are expected to work.
-    - Avoid complex or combined factors initially.
-  3. **Gradual Complexity Increase:**
-    - Introduce more complex factors (e.g. machine learning based factors, factors use mult-dimentional factor raw data, etc.) as more experimental results are gathered.
-    - Combine factors only after simpler ones are tested and validated.
-  4. **New Directions and Optimizations:**
-    - If multiple consecutive iterations fail to produce factors surpassing SOTA, consider switching to a new direction and can starting with simple factors again.
+  1. **因子生成策略（Factors per Generation）：**
+    - **第一轮**: 产生 4-6 个因子，覆盖 `db_*`/`mf_*`/`bb_*`/`cp_*` 四类数据集中至少三个。建议 1-2 个基础因子验证管道 + 2-3 个跨数据集交叉因子 + 1 个筹码形态因子。
+    - **后续轮次**: 4-8 个因子，根据 IC 反馈深化有效方向。每轮必须包含至少 1 个 `bb_*`（基本面）因子和 1 个 `cp_*`（筹码）因子。
+    - 同轮因子在类型、数据来源和数学结构上须保持多样性，禁止仅改变窗口/参数的微调版本。
+  2. **Gradual Complexity Increase:**
+    - Introduce more complex factors (e.g. multi-dimensional raw data, cross-sectional ranking, non-linear transformations, ratio structures) as more experimental results are gathered. Combine factors only after simpler ones are tested.
+    - Do NOT design factors that require ML model training (sklearn, LightGBM, XGBoost, PyTorch etc.) inside the factor script. Factors must be pure mathematical/statistical transformations.
+  3. **New Directions and Optimizations:**
+    - If multiple consecutive iterations fail to produce factors surpassing SOTA, switch to a new direction (can restart with simple factors).
     - If optimizing a specific type of factor, proceed from simple to complex.
-  5. **Data Source Constraints (非常重要)：**
-    - 你必须优先使用当前回测数据中已经提供的 **静态/资金流/基本面/筹码因子表**，尤其是 `static_factors.parquet` 中的四类字段：`db_*`（每日基本面）、`mf_*`（资金流向）、`bb_*`（历史基本面）、`cp_*`（筹码分布）。各字段的完整名称、中文说明和单位请参考数据目录中的 `README.md`（已在"source data"部分提供）。
-    - 在每一轮因子设计中，**至少设计 2 个因子必须直接依赖静态或资金流/基本面/筹码相关字段**（例如来自 static_factors 中的 `db_*`/`mf_*`/`bb_*`/`cp_*` 字段），不得全部只依赖日频价量 (`open/high/low/close/volume/amount`)。
-    - 设计因子时，只能使用已经在数据侧真实存在的字段名（参考 `README.md` 或 `static_factors_schema.csv`），禁止编造新的字段名称。
-  6. **Avoid Trivial Price-Volume Replication（避免平庸价量重复）：**
-    - 当前 SOTA 因子库已经广泛覆盖了基于日频价量的动量、波动率、成交量放大、K 线形态等传统信号。请避免再设计与这些因子在形式上高度类似的指标，例如简单的 `past N-day return`、`volume spike`、`moving average crossover` 等轻微变体。
-    - 新因子应当在 **数据来源**（如资金流、行业/市值、持股结构、静态风格暴露等）或 **数学结构**（如非线性组合、比率结构、归一化方式）上相对于现有 SOTA 因子有明显差异，而不是对已有信号做线性变换或简单平移缩放。
-  7. **Diversification & Dissimilarity（增强差异性）：**
-    - 在同一轮中生成的多个因子之间，应尽量减少高度同质化的设计，避免只是改变窗口长度或简单参数（例如仅将 10 日动量改成 20 日动量）。
-    - 新因子的一个重要目标是：在横截面上与典型价量动量/成交量类因子不要过高相关。你可以通过引入静态资金面、风格/行业暴露、风险因子等信息来降低与传统价量信号的线性相关性。
-  8. Note
-    - Highlight that factors surpassing SOTA are included in the library to avoid re-implementation.
-    - No matter how many factors you plan to generate, only reply with one set of hypothesis and reason. The hypothesis can include the proposal of multiple factors at the same time.
+  4. **数据源与交叉因子（Data Source & Cross-Dataset — 高优先级）：**
+    - **字段硬约束**：只能使用 source data 中 schema 描述的字段（db_* 16字段、mf_* 44字段、bb_* 15字段、cp_* 9字段、预计算6字段、日频价量6字段，共96字段）。禁止编造任何不在 schema 中的字段名。如果你不确定某个字段是否存在，请查阅 source data 部分提供的 schema 信息。当前数据集不含行业分类、新闻舆情等数据，禁止设计依赖这些不存在数据源的因子。
+    - **充分利用数据广度**：当前数据集包含 44 个资金流字段（含主力/特大单/全档净流入及其 5d/20d 滚动）、15 个基本面字段（含资产结构/盈利能力/估值）、9 个筹码字段（含成本分位/历史极值/胜率），绝大多数因子研发只用了不到 15% 的可用字段。**每轮假设必须主动探索历史未使用过的字段**，请查阅 source data 中的 schema 了解各前缀（db_*/mf_*/bb_*/cp_*）下的全部可用字段，避免反复使用相同的少数字段。
+    - 每轮至少 2 个因子必须依赖 `db_*`/`mf_*`/`bb_*`/`cp_*` 字段，不得全部只用日频价量。
+    - **跨数据集交叉是突破 alpha 瓶颈的关键**：每轮建议至少 2 个跨数据集交叉因子，方向包括：筹码×资金流、基本面×筹码、资金流×估值、筹码分布形态(cp_cost_*)、多层级资金博弈(elg/lg/md/sm)、资金流×价格背离等。交叉须来自不同前缀数据集，优先用比率/乘积/条件分支等非线性组合。
+    - **禁止每轮重复相同的交叉组合**，必须在 reason 中说明与历史交叉因子的区别。
+  5. **差异性与去重（Differentiation & Dedup — 必须严格遵守）：**
+    - 避免设计与 SOTA 因子库中已有的动量/波动率/成交量/K线形态等传统价量因子高度类似的指标。新因子须在 **数据来源** 或 **数学结构** 上有明显差异。
+    - **去重硬规则**：提出新因子前，必须回顾 `hypothesis_and_feedback` 中所有历史因子。以下行为视为重复：仅更换归一化方式、仅更换窗口参数、仅做简单数学变换(log/sigmoid/常数)、仅更换变量名。
+    - **"真正不同"须满足至少一项**：使用了历史中从未用过的字段组合 / 引入全新数学结构(条件分支/分组统计/跨期差分/截面排名归一化) / 结合两个不同数据集的未曾出现过的交叉组合。
+    - 在 reason 中简要说明："该因子与历史上最相近的因子 `XXX` 的核心区别是 `YYY`"。
+  6. **字段使用审计与未探索字段优先（Field Usage Audit — 必须执行）：**
+    - **审计步骤（每轮必做）**：在提出新因子前，回顾 `hypothesis_and_feedback` 中所有历史 Trial 的因子 variables，按前缀分类统计已使用和未使用的 db_*/mf_*/bb_*/cp_* 字段。
+    - **新字段强制配额**：每轮至少 2 个因子必须使用历史上从未出现过的字段（在任何历史 Trial 的 variables 中均未出现的字段）。
+    - **薄弱类别优先**：如果某个前缀类别在历史中使用次数明显少于其他类别，本轮应优先从该类别选择字段。
+    - **在 reason 中报告**：必须简要列出"历史已使用字段前缀分布：db_* N个, mf_* N个, bb_* N个, cp_* N个；本轮新引入字段：[字段列表]"。
+  7. **因子质量自检（Factor Quality Self-Check）：**
+    - 覆盖率：NaN 不超过 30%；区分度：截面 std 不为 0；时效性：测试期(2024-07~2025-12)仍有预测力；相关性：与 SOTA 因子库已有因子截面相关 < 0.7。
+    - 超过 SOTA 的因子已入库，禁止重复实现。
+    - 无论计划生成多少因子，只回复一组 hypothesis 和 reason，hypothesis 中可同时包含多个因子提案。
 
 factor_experiment_output_format: |-
   The output should follow JSON format. The schema is as follows:
@@ -151,7 +185,7 @@ model_experiment_output_format: |-
     "model_name (The name of the model)": {
         "description": "A detailed description of the model",
         "formulation": "A LaTeX formula representing the model's formulation",
-        "architecture": "A detailed description of the model's architecture, e.g., neural network layers or tree structures",
+        "architecture": "A PRECISE and IMPLEMENTABLE description of the model architecture. Requirements: (1) Each layer must specify type, input dim, output dim. (2) Use unambiguous terms — 'static learnable' OR 'input-dependent dynamic', never both for the same component. (3) Avoid contradictory modifiers. (4) Format example: 'Linear(F→64) → ReLU → TransformerEncoder(d=64, nhead=4, layers=2) → AvgPool → Linear(64→1)'",
         "variables": {
             "\\hat{y}_u": "The predicted output for node u",
             "variable_name_2": "Description of variable 2",
@@ -162,12 +196,12 @@ model_experiment_output_format: |-
             "hyperparameter_name_2": "value of hyperparameter 2",
             "hyperparameter_name_3": "value of hyperparameter 3"
         },
-        "training_hyperparameters" {  # All values are for reference; you can set them yourself
-            "n_epochs": "100",  # 默认100，可根据需要调高至 300~500，配合 early_stop 防止过拟合
-            "lr": "1e-3",
-            "early_stop": 20,  # 建议配合 early_stop: 20~50 使用，防止过拟合
-            "batch_size": 16384,  # 大 batch 充分利用 GPU 算力，推荐 8192~16384
-            "weight_decay": 1e-4,
+        "training_hyperparameters": {  # All values are for reference; you SHOULD ADJUST them based on model_type and training log
+            "n_epochs": "100",  # Tabular: 100-200, TimeSeries: 200-300, 配合 early_stop 防过拟合
+            "lr": "1e-3",  # GRU/LSTM: 2e-4~5e-4, Transformer: 1e-4~5e-4, MLP: 5e-4~1e-3
+            "early_stop": 20,  # Tabular: 10-20, TimeSeries: 20-30
+            "batch_size": 16384,  # Tabular(DatasetH): 4096-16384, TimeSeries(TSDatasetH): 2048-8192
+            "weight_decay": 1e-4,  # 小模型: 1e-5, 大模型: 1e-4~1e-3
         }
         "model_type": "Tabular or TimeSeries"  # Should be one of "Tabular" or "TimeSeries"
     },
@@ -196,20 +230,33 @@ factor_feedback_generation:
           - Suggest further improvements to that factor (this can include further optimization of the factor or proposing a direction that combines better with the factor).
           - Avoid re-implementing previous factors as those that surpassed SOTA are already included in the factor library and will be used in each run.
       3. Final Goal: To continuously accumulate factors that surpass each iteration to maintain the best SOTA.
+    4. **数据边界约束（New Hypothesis 必须遵守）：**
+      - `New Hypothesis` 只能建议使用以下数据字段：`db_*`（日频行情/估值）、`mf_*`（资金流）、`bb_*`（基本面/财务）、`cp_*`（筹码分布）、以及日频价量（open/close/high/low/volume/amount）。
+      - **禁止建议不存在的数据**：当前数据集不包含行业分类、新闻舆情、分析师预期、宏观经济等数据。禁止在 New Hypothesis 中提及 sentiment_score、行业轮动、宏观因子等。
+    5. **反重复约束：**
+      - `New Hypothesis` 应与当前实验中的因子有明显差异——不同的字段组合、不同的数学结构、或不同的数据类别。
+      - 如果当前实验的因子集中使用了某一前缀类别的字段（如大量使用 `mf_*`、`db_*`、`bb_*` 或 `cp_*` 中的某一类），`New Hypothesis` 应优先建议探索当前实验中使用较少或完全未使用的前缀类别。
+      - 禁止建议仅更换窗口参数、归一化方式或变量名的微调方案。
+    6. **未覆盖数据类别探索：**
+      - 审查当前实验因子使用的 variables，识别哪些数据前缀（db_*/mf_*/bb_*/cp_*）未被覆盖或覆盖不足。
+      - `New Hypothesis` 优先建议探索当前实验未触及的数据类别。
 
-    When judging the results:
-      1. Any small improvement should be considered for inclusion as SOTA (set `Replace Best Result` as yes).
-      2. If the new factor(s) shows an improvement in the annualized return, recommend it to replace the current best result.
-      3. Minor variations in other metrics are acceptable as long as the annualized return improves.
-      4. **Additional SOTA Criteria (新增判断标准):**
-         - Even if the annualized return does not surpass SOTA, a factor should still be included in SOTA if it meets ANY of the following conditions:
-           a) IC (Information Coefficient) > 0.05: Indicates strong predictive power
-           b) Max Drawdown < 25%: Demonstrates excellent risk control
-         - These factors provide valuable diversification and risk management benefits to the factor library, even if their raw returns are not the highest.
+    When judging the results (SOTA 替换判断标准 — 三路径规则):
+      **Path A — 全面超越:** 如果所有核心指标 (IC, annualized_return, max_drawdown, information_ratio) 均优于 SOTA，即使每个指标的提升幅度 < 10%，也设置 `Replace Best Result` 为 "yes"。
+      **Path B — 单项突破:** 如果仅部分指标优于 SOTA（其他指标弱于 SOTA），则需要至少一个超越指标的提升幅度 ≥ 10% 才可设置 `Replace Best Result` 为 "yes":
+         - IC improvement ≥ 10%:  (new_IC - sota_IC) / sota_IC ≥ 0.10
+         - Annualized return improvement ≥ 10%:  (new_return - sota_return) / sota_return ≥ 0.10
+         - Max drawdown improvement ≥ 10%:  (sota_drawdown - new_drawdown) / abs(sota_drawdown) ≥ 0.10  (i.e. drawdown becomes less negative)
+         - Information ratio improvement ≥ 10%:  (new_IR - sota_IR) / sota_IR ≥ 0.10
+      **Path C — IC 绝对值门槛:** 如果因子组合 IC 绝对值 ≥ 0.055，无论其他指标如何，设置 `Replace Best Result` 为 "yes"。（IC ≥ 0.055 表明因子组合已具有实质性的预测能力。）
+      **Path D — 年化收益超越:** 如果因子组合年化收益（annualized_return）高于 SOTA 的年化收益，无论其他指标如何，设置 `Replace Best Result` 为 "yes"。（年化收益是因子组合价值的最终体现。）
+      **Rejection rules:**
+        - 如果不满足 Path A/B/C/D 任何一条，设置 `Replace Best Result` 为 "no"。
+        - **禁止接受退化:** 如果所有核心指标 (IC, annualized_return, max_drawdown, information_ratio) 均弱于 SOTA，必须 reject。
+        - 当结果接近但未达到 SOTA 时，重点诊断 WHY 并建议具体的新方向。
 
     Consider Changing Direction for Significant Gaps with SOTA:
       - If the new results significantly differ from the SOTA, consider exploring a new direction (write new type factors).
-      - Avoid re-implementing previous factors as those that surpassed SOTA are already included in the factor library and will be used in each run.
 
     Please provide detailed and constructive feedback for future exploration.
     Respond in JSON format. Example JSON structure for Result Analysis:
@@ -237,6 +284,13 @@ factor_feedback_generation:
     Combined Results:
     {{ combined_result }}
 
+    {% if history_factor_summary %}
+    {{ history_factor_summary }}
+    你的 New Hypothesis 必须避免与上述历史因子重复（包括仅改变窗口/归一化/变量名的变体）。
+    {% endif %}
+
+    请注意: 你的 New Hypothesis 只能建议使用 db_*/mf_*/bb_*/cp_* 前缀字段和日频价量字段。禁止建议不存在的数据源（如 sentiment_score、行业分类、宏观指标）。New Hypothesis 应与当前因子在字段组合和数学结构上有明显差异，且应优先建议探索当前实验中使用较少或完全未使用的前缀类别。
+
     Analyze the combined result in the context of its ability to:
     1. Support or refute the hypothesis.
     2. Show improvement or deterioration compared to the SOTA experiment.
@@ -253,14 +307,22 @@ model_feedback_generation:
     All narrative parts of your feedback and final summary should be written in **Chinese** (concise professional Chinese), while JSON structure and field names must remain in English.
 
     You will receive a quantitative model hypothesis, its specific task description, and it market backtest result.
-    Your feedback should specify whether the current result supports or refutes the hypothesis, compare it with previous SOTA results, examine the model's training logs to analyze whether there are issues with hyperparameter settings, and suggest improvements or new directions.
+    Your feedback should:
+    1. Specify whether the current result supports or refutes the hypothesis
+    2. Compare with previous SOTA results using MULTIPLE metrics (not just annualized return)
+    3. Examine the model's training logs for hyperparameter issues (overfitting, underfitting, learning rate)
+    4. Analyze which EVOLUTION DIMENSION the hypothesis targeted and whether it was effective
+    5. Suggest improvements or new directions
 
     Please provide detailed and constructive feedback.
     Example JSON Structure for Result Analysis:
     {
-      "Observations": "First analyze the model's training logs to determine whether there are any issues with its parameter settings. Then clearly summarize the current results and the SOTA results with exact scores and any notable patterns. Limit your summary to no more than three concise, data-focused sentences.",
+      "Training Diagnostics": "Analyze training log: (1) Overfitting — valid loss ↑ while train loss ↓, report divergence epoch; (2) Underfitting — both losses plateau high; (3) LR issues — oscillation/explosion; (4) Early stopping — too early (best epoch << n_epochs) or too late. Cite specific numbers.",
+      "Observations": "Summarize key findings from diagnostics. State current vs SOTA metric values. Limit to three sentences.",
+      "Metric Analysis": "Compare key metrics: (1) IC/Rank IC and ICIR — signal quality; (2) Annualized Return and Max Drawdown — portfolio performance; (3) Sharpe Ratio — risk-adjusted return. Identify which metrics improved and which degraded vs SOTA.",
+      "Dimension Analysis": "Identify which evolution dimension ID (A1-A4, B1-B3, C1-C3) this hypothesis targeted. Assess whether the architectural change in that dimension was effective. If ineffective, suggest whether to retry with different parameters or abandon this dimension.",
       "Feedback for Hypothesis": "Explicitly confirm or refute the hypothesis based on specific data points or performance trends. Limit to two sentences.",
-      "New Hypothesis": "Propose a revised hypothesis, considering observed patterns and limitations in the current one. Limit to no more than two sentences.",
+      "New Hypothesis": "Propose a revised hypothesis, considering observed patterns and limitations in the current one. Explicitly state which evolution dimension ID (A1-A4, B1-B3, C1-C3) to explore next. Limit to two sentences.",
       "Reasoning": "Explain the rationale for the new hypothesis using specific trends or performance shifts. Be concise but technically complete. Limit to two sentences.",
       "Decision": <true or false>,
     }
@@ -300,19 +362,31 @@ action_gen:
     You will receive a series of experiments, including their factors and models, and their results.
     Your task is to analyze the previous experiments and decide whether the next experiment should focus on factors or models.
 
-    Example JSON Structure for your return:
+    ## Factor/Model 方向选择策略（必须遵守）
+
+    1. **最低模型探索频率**：在每 5 轮实验中，至少有 1 轮选择 `model`。如果过去连续 4 轮或更多轮都是 `factor`，本轮必须选择 `model`。
+    2. **因子边际递减信号**：如果最近 3 轮因子实验的核心指标（IC、年化收益、最大回撤）变化幅度均 < 1%，说明因子方向已趋饱和，应切换到 `model` 尝试突破。
+    3. **模型失败不等于放弃**：即使上一轮模型实验失败，也不应永远回避模型方向。模型失败时应分析原因（欠拟合/过拟合/架构选择不当），下次模型实验应针对性调整，而非完全放弃。
+    4. **交替探索原则**：理想的演进节奏是因子与模型交替推进。因子提供原始信号，模型提升信号利用效率，两者互相促进。不应长期单一方向运行。
+
+    ## 决策输出格式
+
+    Return a JSON object with:
     {
-      "action": "factor" or "model",  # You must choose one of the two
+      "action": "factor" or "model",
+      "reasoning": "简要说明选择该方向的理由（中文，2-3句话）"
     }
 
   user: |-
     {% if hypothesis_and_feedback|length == 0 %}
     It is the first round of hypothesis generation. The user has no hypothesis on this scenario yet.
+    Please choose "factor" for the first round to establish a baseline factor library.
     {% else %}
     The former hypothesis and the corresponding feedbacks are as follows:
     {{ hypothesis_and_feedback }}
-    {% endif %}
 
+    Please count the action types (factor/model) in the above trials and apply the mandatory exploration rules.
+    {% endif %}
 
     {% if last_hypothesis_and_feedback != "" %}
     Here is the last trial's hypothesis and the corresponding feedback. The main feedback includes a new hypothesis for your reference only. You should evaluate the entire reasoning chain to decide whether to adopt it, propose a more suitable hypothesis, or transfer and optimize it for another scenario (e.g., factor/model), since transfers are generally encouraged:

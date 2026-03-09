@@ -319,9 +319,9 @@ class ExpGen(ABC):
         generate the experiment and decide whether to stop yield generation and give up control to other routines.
         """
         # we give a default implementation here.
-        # The proposal is set to try best to generate the experiment in max-parallel level.
+        # The proposal is set to try best to generate the experiment in max-pending-loops level.
         while True:
-            if loop.get_unfinished_loop_cnt(loop.loop_idx) < RD_AGENT_SETTINGS.get_max_parallel():
+            if loop.get_unfinished_loop_cnt(loop.loop_idx) < RD_AGENT_SETTINGS.get_max_pending_loops():
                 return self.gen(trace)
             await asyncio.sleep(1)
 
