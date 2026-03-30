@@ -226,3 +226,10 @@ qe_workspace/
 qe_data/
 qe_programs/
 qe_2*/
+
+# 数据/运行产物目录
+mnt/
+rdagent_data/
+RDagent_exports/
+tmp/
+models/
