@@ -14,6 +14,7 @@ from .alpha_baseline_api import router as alpha_baseline_router
 from .health_check import router as health_router
 from .qe_file_sync_api import router as qe_file_sync_router
 from .qe_experiment_setup_api import router as qe_experiment_setup_router
+from .system_metrics_api import router as system_metrics_router
 
 __all__ = [
     "sota_factors_router",
@@ -21,4 +22,5 @@ __all__ = [
     "health_router",
     "qe_file_sync_router",
     "qe_experiment_setup_router",
+    "system_metrics_router",
 ]

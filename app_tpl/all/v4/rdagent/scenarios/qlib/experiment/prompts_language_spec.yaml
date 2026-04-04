@@ -9,10 +9,10 @@ qlib_factor_interface_language_spec: |-
     ```python
     # 读取日线数据（字段名已统一为标准格式：open, high, low, close, volume, amount, factor）
     df = pd.read_hdf("daily_pv.h5", key="data").sort_index()
-    
-    # 根据假设选择 schema 中的字段，计算因子（不限于价量，可使用任意 db_*/mf_*/bb_*/cp_* 字段）
+
+    # 根据假设选择 schema 中的字段，计算因子（不限于价量，可使用任意 db_*/mf_*/bb_*/cp_*/sw2_* 字段）
     series = df["<your_field_a>"] / df["<your_field_b>"]
-    
+
     # 检查必要字段是否存在
     required_cols = ["<your_field_a>", "<your_field_b>"]
     missing = [c for c in required_cols if c not in df.columns]

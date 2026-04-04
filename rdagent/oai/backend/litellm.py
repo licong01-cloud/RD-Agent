@@ -38,7 +38,9 @@ class LiteLLMSettings(LLMSettings):
         env_prefix = "LITELLM_"
         """Use `LITELLM_` as prefix for environment variables"""
 
-    # Placeholder for LiteLLM specific settings, so far it's empty
+    chat_timeout: int = 600  # Total request timeout in seconds
+    chat_stream_timeout: int = 120  # Timeout for first streaming chunk (TTFT)
+    embedding_timeout: int = 120  # Embedding request timeout in seconds
 
 
 LITELLM_SETTINGS = LiteLLMSettings()
@@ -121,6 +123,7 @@ class LiteLLMAPIBackend(APIBackend):
                     tag="debug_litellm_emb",
                 )
         
+        embedding_params["timeout"] = LITELLM_SETTINGS.embedding_timeout
         response = embedding(**embedding_params)
         response_list = [data["embedding"] for data in response.data]
         return response_list
@@ -220,6 +223,8 @@ class LiteLLMAPIBackend(APIBackend):
             messages=messages,
             stream=LITELLM_SETTINGS.chat_stream,
             max_retries=0,
+            timeout=LITELLM_SETTINGS.chat_timeout,
+            stream_timeout=LITELLM_SETTINGS.chat_stream_timeout,
             **complete_kwargs,
             **kwargs,
         )

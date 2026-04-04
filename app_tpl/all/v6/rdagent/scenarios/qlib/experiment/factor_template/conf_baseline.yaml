@@ -6,9 +6,9 @@ market: &market all
 benchmark: &benchmark 000300.SH
 
 data_handler_config: &data_handler_config
-    # 基于当前 qlib_bin_20251209 可用数据的长周期配置（2010-01-07 ~ 2025-12-01）
+    # 基于当前 qlib_bin_20251209 可用数据的长周期配置（2010-01-07 ~ 2026-03-10）
     start_time: 2010-01-07
-    end_time: 2025-12-01
+    end_time: 2026-03-10
     # 因子归一化拟合区间：前五年
     fit_start_time: 2010-01-07
     fit_end_time: 2014-12-31
@@ -49,8 +49,8 @@ port_analysis_config: &port_analysis_config
     backtest:
         start_time: 2021-01-01
         # 为避免 Qlib 在回测最后一步访问 calendar_index+1 越界，这里不使用最后一个交易日
-        # 当前 day 频数据最后一行是 2025-12-01，因此将回测截止日设置到 2025-11-28
-        end_time: 2025-11-28
+        # 当前 day 频数据最后一行是 2026-03-10，因此将回测截止日设置到 2026-03-09
+        end_time: 2026-03-09
         account: 100000000
         benchmark: *benchmark
         exchange_kwargs:
@@ -84,13 +84,13 @@ task:
                 module_path: qlib.contrib.data.handler
                 kwargs: *data_handler_config
             segments:
-                # 基于 2010-01-07 ~ 2025-12-01 的长周期划分
+                # 基于 2010-01-07 ~ 2026-03-10 的长周期划分
                 # 训练：2010-01-07 ~ 2018-12-31
                 train: [2010-01-07, 2018-12-31]
                 # 验证：2019-01-01 ~ 2020-12-31
                 valid: [2019-01-01, 2020-12-31]
-                # 测试：2021-01-01 ~ 2025-12-01
-                test: [2021-01-01, 2025-12-01]
+                # 测试：2021-01-01 ~ 2026-03-10
+                test: [2021-01-01, 2026-03-10]
     record: 
         - class: SignalRecord
           module_path: qlib.workflow.record_temp

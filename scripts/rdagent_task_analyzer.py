@@ -26,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+import numpy as np
 import pandas as pd
 
 # ---------------------------------------------------------------------------
@@ -216,6 +217,94 @@ def extract_runner_result(loop_dir: Path) -> dict[str, Any]:
         result_data["result_type"] = type(exp_result).__name__ if exp_result is not None else "None"
 
     return result_data
+
+
+def extract_backtest_portfolio(loop_dir: Path) -> dict[str, Any]:
+    """Extract detailed backtest portfolio data: positions, indicators, report.
+
+    Locates the experiment workspace from the runner result pkl, then loads
+    positions_normal_1day.pkl, indicators_normal_1day.pkl, report_normal_1day.pkl
+    from the mlruns artifacts directory.
+
+    If mlruns is not under workspace_path (common for factor experiments), falls
+    back to parsing the training log for mlflow experiment_id / run_id and searching
+    all workspaces under RD-Agent_workspace.
+    """
+    pkls = _find_pkl_files(loop_dir, "running/runner result")
+    if not pkls:
+        return {}
+    obj = safe_pickle_load(pkls[-1])
+    if obj is None:
+        return {}
+
+    # Find workspace path
+    ws = getattr(obj, "experiment_workspace", None)
+    ws_path = getattr(ws, "workspace_path", None) if ws else None
+    if ws_path is None:
+        # Try sub_workspace_list
+        sub_ws_list = getattr(obj, "sub_workspace_list", None)
+        if sub_ws_list:
+            ws_path = getattr(sub_ws_list[0], "workspace_path", None)
+    if ws_path is None:
+        return {}
+    ws_path = Path(ws_path)
+
+    # Strategy 1: Find portfolio_analysis directly under workspace mlruns
+    pa_dirs = list(ws_path.glob("mlruns/**/portfolio_analysis"))
+
+    # Strategy 2: If not found, parse training log for mlflow IDs and search globally
+    if not pa_dirs:
+        log_pkls = _find_pkl_files(loop_dir, "running/Qlib_execute_log")
+        if log_pkls:
+            log_text = safe_pickle_load(log_pkls[-1])
+            if isinstance(log_text, str):
+                exp_id = None
+                run_id = None
+                for line in log_text.split("\n"):
+                    if "Experiment" in line and "starts running" in line:
+                        m = re.search(r"Experiment\s+(\d+)", line)
+                        if m:
+                            exp_id = m.group(1)
+                    if "Recorder" in line and "starts running" in line:
+                        m = re.search(r"Recorder\s+([a-f0-9]+)", line)
+                        if m:
+                            run_id = m.group(1)
+                if exp_id and run_id:
+                    # Search all RD-Agent_workspace directories
+                    ws_root = ws_path.parent  # typically RD-Agent_workspace/
+                    if ws_root.exists():
+                        found = list(ws_root.glob(f"*/mlruns/{exp_id}/{run_id}/artifacts/portfolio_analysis"))
+                        if found:
+                            pa_dirs = found
+
+    if not pa_dirs:
+        return {}
+    pa_dir = pa_dirs[0]
+
+    result: dict[str, Any] = {"workspace_path": str(ws_path), "pa_dir": str(pa_dir)}
+
+    # Load positions
+    pos_file = pa_dir / "positions_normal_1day.pkl"
+    if pos_file.exists():
+        positions = safe_pickle_load(pos_file)
+        if positions and isinstance(positions, dict):
+            result["positions"] = positions
+
+    # Load indicators
+    ind_file = pa_dir / "indicators_normal_1day.pkl"
+    if ind_file.exists():
+        indicators = safe_pickle_load(ind_file)
+        if isinstance(indicators, pd.DataFrame):
+            result["indicators"] = indicators
+
+    # Load report
+    rpt_file = pa_dir / "report_normal_1day.pkl"
+    if rpt_file.exists():
+        report = safe_pickle_load(rpt_file)
+        if isinstance(report, pd.DataFrame):
+            result["report"] = report
+
+    return result
 
 
 def extract_feedback(loop_dir: Path) -> dict[str, Any]:
@@ -416,7 +505,7 @@ def extract_training_log(loop_dir: Path) -> dict[str, Any]:
     if obj is None:
         return {}
     log_text = str(obj)
-    result: dict[str, Any] = {"log_length": len(log_text)}
+    result: dict[str, Any] = {"log_length": len(log_text), "raw_text": log_text}
 
     # Extract template rendering context (actual hyperparameters used)
     ctx_match = re.search(r"Render the template with the context:\s*(\{[^}]+\})", log_text)
@@ -452,7 +541,7 @@ def extract_training_log(loop_dir: Path) -> dict[str, Any]:
     if valid_match:
         result["valid_samples"] = int(valid_match.group(1))
 
-    # Parse epoch-by-epoch loss
+    # Parse epoch-by-epoch loss (supports old and new formats)
     epoch_pattern = re.compile(r"Epoch(\d+):\s+train\s+([\d.]+),\s+valid\s+([\d.]+)")
     epochs = []
     for m in epoch_pattern.finditer(log_text):
@@ -461,8 +550,28 @@ def extract_training_log(loop_dir: Path) -> dict[str, Any]:
             "train_loss": float(m.group(2)),
             "valid_loss": float(m.group(3)),
         })
+    # Fallback: valid-only format (per-epoch train eval skipped)
+    if not epochs:
+        epoch_validonly_pattern = re.compile(r"Epoch(\d+):\s+train\s+N/A.*?valid\s+([\d.eE+-]+)")
+        for m in epoch_validonly_pattern.finditer(log_text):
+            epochs.append({
+                "epoch": int(m.group(1)),
+                "train_loss": None,
+                "valid_loss": float(m.group(2)),
+            })
+        if epochs:
+            result["train_eval_skipped"] = True
     result["epochs"] = epochs
     result["total_epochs_trained"] = len(epochs)
+
+    # Parse final one-shot train eval (after best model loaded)
+    final_train_match = re.search(
+        r"Final train eval.*?train\s+([\d.eE+-]+),?\s*valid\s+([\d.eE+-]+)",
+        log_text,
+    )
+    if final_train_match:
+        result["final_train_score"] = float(final_train_match.group(1))
+        result["final_valid_score"] = float(final_train_match.group(2))
 
     # Extract early stop info
     early_match = re.search(r"early stop", log_text)
@@ -475,7 +584,7 @@ def extract_training_log(loop_dir: Path) -> dict[str, Any]:
 
     # Extract epoch timestamps for timing analysis
     epoch_time_pattern = re.compile(
-        r"\((\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+)\).*Epoch(\d+):\s+train"
+        r"\((\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+)\).*Epoch(\d+):"
     )
     epoch_times = []
     for m in epoch_time_pattern.finditer(log_text):
@@ -851,13 +960,17 @@ def analyze_training_convergence(loop_data: list[dict[str, Any]]) -> list[dict[s
         info["dataset_cls"] = ctx.get("dataset_cls", "DatasetH")
 
         # Training loss analysis
-        train_losses = [e["train_loss"] for e in epochs]
+        train_losses = [e["train_loss"] for e in epochs if e.get("train_loss") is not None]
         valid_losses = [e["valid_loss"] for e in epochs]
+        train_eval_skipped = tlog.get("train_eval_skipped", False)
+        final_train_score = tlog.get("final_train_score")
 
         info["first_train_loss"] = train_losses[0] if train_losses else None
         info["last_train_loss"] = train_losses[-1] if train_losses else None
         info["first_valid_loss"] = valid_losses[0] if valid_losses else None
         info["last_valid_loss"] = valid_losses[-1] if valid_losses else None
+        info["train_eval_skipped"] = train_eval_skipped
+        info["final_train_score"] = final_train_score
 
         # Compute total loss reduction
         if train_losses:
@@ -874,6 +987,8 @@ def analyze_training_convergence(loop_data: list[dict[str, Any]]) -> list[dict[s
         # 1. Check if model barely learns (loss ~1.0 means predicting zeros for normalized targets)
         if train_losses and train_losses[0] > 0.95:
             diagnoses.append("LOSS_NEAR_BASELINE: train loss ~1.0 indicates model barely predicts beyond mean (for CSZScoreNorm targets, MSE=1.0 equals predicting all zeros)")
+        elif train_eval_skipped and final_train_score is not None and final_train_score > 0.95:
+            diagnoses.append("LOSS_NEAR_BASELINE: final one-shot train loss ~1.0 indicates model barely predicts beyond mean")
 
         # 2. Check if best epoch is epoch 0 (model never improved)
         if tlog.get("best_epoch") == 0:
@@ -891,6 +1006,12 @@ def analyze_training_convergence(loop_data: list[dict[str, Any]]) -> list[dict[s
             gap = valid_losses[-1] - train_losses[-1]
             if gap > 0.01 and len(epochs) > 10:
                 diagnoses.append(f"OVERFITTING: train-valid gap = {gap:.4f}, model memorizes training data")
+        elif train_eval_skipped and final_train_score is not None and valid_losses:
+            best_valid = info.get("best_valid_loss", valid_losses[-1])
+            if best_valid is not None:
+                gap = best_valid - final_train_score
+                if gap > 0.01:
+                    diagnoses.append(f"OVERFITTING: final train-valid gap = {gap:.4f} (one-shot eval of best model)")
 
         # 5. Steps per epoch and GPU efficiency
         bs = info["actual_batch_size"]
@@ -1091,6 +1212,18 @@ FIELD_WHITELIST: dict[str, list[str]] = {
     "cp": [
         "cp_cost_5pct", "cp_cost_15pct", "cp_cost_50pct", "cp_cost_85pct", "cp_cost_95pct",
         "cp_his_high", "cp_his_low", "cp_weight_avg", "cp_winner_rate",
+    ],
+    "sw2": [
+        "sw2_open", "sw2_high", "sw2_low", "sw2_close",
+        "sw2_pct_change", "sw2_vol", "sw2_amount",
+        "sw2_pe", "sw2_pb", "sw2_total_mv",
+        "sw2_mf_buy_sm_amt", "sw2_mf_sell_sm_amt",
+        "sw2_mf_buy_md_amt", "sw2_mf_sell_md_amt",
+        "sw2_mf_buy_lg_amt", "sw2_mf_sell_lg_amt",
+        "sw2_mf_buy_elg_amt", "sw2_mf_sell_elg_amt",
+        "sw2_mf_net_amt",
+        "sw2_mf_buy_elg_vol", "sw2_mf_sell_elg_vol",
+        "sw2_mf_net_vol",
     ],
     "precomputed": [
         "PriceStrength_10D", "value_pe_inv", "value_pb_inv",
@@ -1511,6 +1644,991 @@ def analyze_factor_homogeneity(loop_data: list[dict[str, Any]]) -> dict[str, Any
 
 
 # ---------------------------------------------------------------------------
+# Section 4a: Memory & CoSTEER Intensity Profile
+# ---------------------------------------------------------------------------
+
+def analyze_memory_profile(
+    session_obj: Any,
+    loop_data: list[dict[str, Any]],
+    log_dir: Path,
+) -> dict[str, Any]:
+    """Analyze session snapshot sizes, CoSTEER work intensity, and memory risk.
+
+    This section examines:
+    - Session snapshot size growth across loops
+    - CoSTEER work intensity per loop (evo_iters × factors)
+    - Knowledge base and evolving_trace accumulation
+    - Estimated evaluation call counts
+    - Memory risk assessment
+    """
+    result: dict[str, Any] = {
+        "session_snapshots": [],
+        "per_loop_intensity": [],
+        "kb_info": None,
+        "issues": [],
+    }
+
+    # 1. Session snapshot sizes and component breakdown
+    session_dir_path = log_dir / "__session__"
+    if session_dir_path.is_dir():
+        for li_name in sorted(os.listdir(session_dir_path)):
+            fb_path = session_dir_path / li_name / "3_feedback"
+            if not fb_path.is_file():
+                continue
+            snap_info: dict[str, Any] = {
+                "loop_id": int(li_name),
+                "total_mb": fb_path.stat().st_size / 1024 / 1024,
+            }
+            try:
+                sess = safe_pickle_load(fb_path)
+                if sess is not None:
+                    coder = getattr(sess, "coder", None)
+                    if coder:
+                        snap_info["coder_mb"] = len(pickle.dumps(coder)) / 1024 / 1024
+                        # Knowledge base
+                        rag = getattr(coder, "rag", None)
+                        kb = getattr(rag, "knowledgebase", None) if rag else None
+                        if kb:
+                            snap_info["kb_mb"] = len(pickle.dumps(kb)) / 1024 / 1024
+                            graph = getattr(kb, "graph", None)
+                            if graph and hasattr(graph, "nodes"):
+                                snap_info["kb_nodes"] = len(graph.nodes)
+                        # Evolving trace
+                        ea = getattr(coder, "evolve_agent", None)
+                        if ea:
+                            et = getattr(ea, "evolving_trace", None)
+                            if et:
+                                snap_info["evo_trace_mb"] = len(pickle.dumps(et)) / 1024 / 1024
+                                snap_info["evo_trace_steps"] = len(et)
+                    # Trace hist
+                    trace = getattr(sess, "trace", None)
+                    if trace:
+                        hist = getattr(trace, "hist", [])
+                        snap_info["hist_len"] = len(hist)
+                        # Count total SOTA factors
+                        sota_factors = 0
+                        for exp, fb in hist:
+                            if fb and getattr(fb, "decision", False):
+                                if hasattr(exp, "sub_tasks"):
+                                    sota_factors += len(exp.sub_tasks)
+                                elif hasattr(exp, "sub_workspace_list"):
+                                    sota_factors += len(exp.sub_workspace_list)
+                        snap_info["sota_factors"] = sota_factors
+                    del sess
+            except Exception:
+                pass
+            result["session_snapshots"].append(snap_info)
+
+    # 2. Per-loop CoSTEER work intensity
+    total_work = 0
+    total_eval_calls = 0
+    max_single_loop_work = 0
+    consecutive_max = 0
+    max_consecutive_max = 0
+
+    for ld in loop_data:
+        loop_id = ld["loop_id"]
+        evo_iters = ld.get("evo_loop_count", 0)
+        factor_count = ld.get("coder_result_count", 5)
+        work = evo_iters * factor_count
+        eval_calls = work * 19  # ~19 evaluate calls per factor per iteration
+        total_work += work
+        total_eval_calls += eval_calls
+
+        if work > max_single_loop_work:
+            max_single_loop_work = work
+
+        # Track consecutive MAX_LOOP hits
+        if evo_iters >= 5:
+            consecutive_max += 1
+            max_consecutive_max = max(max_consecutive_max, consecutive_max)
+        else:
+            consecutive_max = 0
+
+        # Count light loops (1 iteration = quick convergence)
+        is_light = evo_iters <= 1
+
+        intensity = {
+            "loop_id": loop_id,
+            "evo_iters": evo_iters,
+            "factor_count": factor_count,
+            "work_units": work,
+            "eval_calls": eval_calls,
+            "cumulative_work": total_work,
+            "cumulative_eval_calls": total_eval_calls,
+            "hit_max_loop": evo_iters >= 5,
+            "is_light": is_light,
+        }
+        result["per_loop_intensity"].append(intensity)
+
+    # 3. Summary statistics
+    n_loops = len(loop_data)
+    light_loops = sum(1 for p in result["per_loop_intensity"] if p["is_light"])
+    max_loops_hit = sum(1 for p in result["per_loop_intensity"] if p["hit_max_loop"])
+
+    result["summary"] = {
+        "total_loops": n_loops,
+        "total_work_units": total_work,
+        "total_eval_calls": total_eval_calls,
+        "max_single_loop_work": max_single_loop_work,
+        "avg_work_per_loop": total_work / max(n_loops, 1),
+        "light_loops": light_loops,
+        "max_loops_hit": max_loops_hit,
+        "max_consecutive_max_loop": max_consecutive_max,
+    }
+
+    # 4. KB info from last session snapshot
+    if result["session_snapshots"]:
+        last_snap = result["session_snapshots"][-1]
+        result["kb_info"] = {
+            "kb_mb": last_snap.get("kb_mb"),
+            "kb_nodes": last_snap.get("kb_nodes"),
+        }
+
+    # 5. Snapshot growth analysis
+    if len(result["session_snapshots"]) >= 2:
+        first_total = result["session_snapshots"][0]["total_mb"]
+        last_total = result["session_snapshots"][-1]["total_mb"]
+        growth_mb = last_total - first_total
+        growth_pct = (last_total / first_total - 1) * 100 if first_total > 0 else 0
+        result["snapshot_growth"] = {
+            "first_mb": first_total,
+            "last_mb": last_total,
+            "growth_mb": growth_mb,
+            "growth_pct": growth_pct,
+        }
+
+    # 6. Issue detection
+    issues = result["issues"]
+
+    # High CoSTEER intensity
+    if total_work > 100:
+        issues.append({
+            "issue": "HIGH_COSTEER_INTENSITY",
+            "detail": (
+                f"Total work units = {total_work} (evo_iters×factors), "
+                f"total eval calls ≈ {total_eval_calls}. "
+                f"High memory churn from pickle deserialization + deepcopy."
+            ),
+        })
+
+    # Consecutive MAX_LOOP hits
+    if max_consecutive_max >= 2:
+        issues.append({
+            "issue": "CONSECUTIVE_MAX_LOOP",
+            "detail": (
+                f"{max_consecutive_max} consecutive loops hit MAX_LOOP=5. "
+                f"No 'light' loops to relieve memory pressure from glibc arena inflation."
+            ),
+        })
+
+    # No light loops
+    if n_loops >= 4 and light_loops == 0:
+        issues.append({
+            "issue": "NO_LIGHT_LOOPS",
+            "detail": (
+                f"Zero light loops (≤1 evo iteration) in {n_loops} loops. "
+                f"Continuous high memory churn without GC breathing room."
+            ),
+        })
+
+    # Single loop overload
+    if max_single_loop_work >= 30:
+        overload_loop = max(
+            result["per_loop_intensity"], key=lambda x: x["work_units"]
+        )
+        issues.append({
+            "issue": "SINGLE_LOOP_OVERLOAD",
+            "detail": (
+                f"Loop {overload_loop['loop_id']}: {overload_loop['evo_iters']} iters × "
+                f"{overload_loop['factor_count']} factors = {overload_loop['work_units']} work units "
+                f"(≈{overload_loop['eval_calls']} eval calls). This is exceptionally high."
+            ),
+        })
+
+    # Snapshot growth
+    sg = result.get("snapshot_growth")
+    if sg and sg["growth_pct"] > 30:
+        issues.append({
+            "issue": "SESSION_SNAPSHOT_GROWTH",
+            "detail": (
+                f"Session snapshot grew from {sg['first_mb']:.1f} MB to {sg['last_mb']:.1f} MB "
+                f"(+{sg['growth_pct']:.0f}%). Indicates accumulating state in coder/KB."
+            ),
+        })
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Section 4b: Backtest Portfolio Analysis
+# ---------------------------------------------------------------------------
+
+
+def _extract_cost_rates(workspace_path: str | None) -> dict[str, float]:
+    """Extract transaction cost rates from workspace conf_*.yaml files.
+
+    Returns dict with open_cost, close_cost, min_cost.
+    Falls back to known defaults from MEMORY.md.
+    """
+    defaults = {"open_cost": 0.000095, "close_cost": 0.000595, "min_cost": 5.0}
+    if workspace_path is None:
+        return defaults
+    ws = Path(workspace_path)
+    conf_files = list(ws.glob("conf_*.yaml")) + list(ws.glob("conf*.yaml"))
+    for cf in conf_files:
+        try:
+            text = cf.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        oc = re.search(r"open_cost\s*:\s*([0-9.eE\-]+)", text)
+        cc = re.search(r"close_cost\s*:\s*([0-9.eE\-]+)", text)
+        mc = re.search(r"min_cost\s*:\s*([0-9.eE\-]+)", text)
+        result = dict(defaults)
+        if oc:
+            result["open_cost"] = float(oc.group(1))
+        if cc:
+            result["close_cost"] = float(cc.group(1))
+        if mc:
+            result["min_cost"] = float(mc.group(1))
+        return result
+    return defaults
+
+
+def _get_position_dict(pos_obj: Any) -> dict[str, Any]:
+    """Extract raw dict from Position object or plain dict."""
+    if isinstance(pos_obj, dict):
+        return pos_obj
+    # qlib.backtest.position.Position has .position attribute
+    p = getattr(pos_obj, "position", None)
+    if isinstance(p, dict):
+        return p
+    return {}
+
+
+def analyze_per_loop_execution_quality(loop_data: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Extract per-loop execution quality metrics: FFR, PA, deal_amount,
+    with_cost vs without_cost, and execution strategy from each loop.
+
+    This enables comparison of execution quality across loops to detect
+    improvements from strategy changes (e.g., TWAPStrategy → TailTWAPWithLimitStrategy).
+    """
+    results: list[dict[str, Any]] = []
+    for ld in loop_data:
+        loop_id = ld["loop_id"]
+        entry: dict[str, Any] = {"loop_id": loop_id}
+
+        # --- Extract FFR, PA, deal_amount from indicators ---
+        bp = ld.get("backtest_portfolio", {})
+        indicators = bp.get("indicators")
+        if isinstance(indicators, pd.DataFrame):
+            if "ffr" in indicators.columns:
+                ffr = indicators["ffr"].dropna()
+                if len(ffr) > 0:
+                    entry["ffr_mean"] = round(float(ffr.mean()), 4)
+                    entry["ffr_min"] = round(float(ffr.min()), 4)
+                    entry["days_ffr_below_085"] = int((ffr < 0.85).sum())
+            if "pa" in indicators.columns:
+                pa = indicators["pa"].dropna()
+                if len(pa) > 0:
+                    entry["pa_mean"] = round(float(pa.mean()), 6)
+                    entry["pa_days_negative"] = int((pa < 0).sum())
+            if "deal_amount" in indicators.columns:
+                da = indicators["deal_amount"].dropna()
+                if len(da) > 0:
+                    entry["deal_amount_avg"] = round(float(da.mean()), 0)
+
+        # --- Extract with_cost vs without_cost from runner result ---
+        metrics = ld.get("runner_result", {}).get("metrics", {}) or {}
+        ann_with = metrics.get("1day.excess_return_with_cost.annualized_return")
+        ann_without = metrics.get("1day.excess_return_without_cost.annualized_return")
+        if ann_with is not None:
+            entry["ann_ret_with_cost"] = round(float(ann_with), 6)
+        if ann_without is not None:
+            entry["ann_ret_without_cost"] = round(float(ann_without), 6)
+        if ann_with is not None and ann_without is not None:
+            entry["cost_drag_pct"] = round((ann_without - ann_with) * 100, 2)
+
+        # --- Fallback: FFR/PA from runner_result metrics (1day.ffr, 1day.pa) ---
+        if "ffr_mean" not in entry:
+            ffr_metric = metrics.get("1day.ffr")
+            if ffr_metric is not None:
+                entry["ffr_mean"] = round(float(ffr_metric), 4)
+        if "pa_mean" not in entry:
+            pa_metric = metrics.get("1day.pa")
+            if pa_metric is not None:
+                entry["pa_mean"] = round(float(pa_metric), 6)
+
+        # --- Detect execution strategy from qrun log and workspace conf ---
+        log_text = ld.get("training_log", {}).get("raw_text", "")
+        ws_path_str = bp.get("workspace_path", "")
+        strategy_detected = False
+        if ws_path_str:
+            ws_p = Path(ws_path_str)
+            for cf in list(ws_p.glob("conf_*.yaml")) + list(ws_p.glob("conf*.yaml")):
+                try:
+                    ct = cf.read_text(encoding="utf-8")
+                    if "TailTWAPWithLimitStrategy" in ct or "tail_twap_strategy" in ct:
+                        entry["exec_strategy"] = "TailTWAP+Limit"
+                        strategy_detected = True
+                    elif "TWAPStrategy" in ct:
+                        entry["exec_strategy"] = "TWAP"
+                        strategy_detected = True
+                    if strategy_detected:
+                        break
+                except Exception:
+                    pass
+        if not strategy_detected and log_text:
+            if "TailTWAPWithLimitStrategy" in log_text:
+                entry["exec_strategy"] = "TailTWAP+Limit"
+            elif "TWAPStrategy" in log_text:
+                entry["exec_strategy"] = "TWAP"
+            elif "NestedExecutor" in log_text:
+                entry["exec_strategy"] = "Nested(unknown)"
+
+        # --- Detect minute-line mode ---
+        if "Minute memory patch" in log_text or "freq: 1min" in log_text:
+            entry["minute_mode"] = True
+        elif ws_path_str:
+            ws_p = Path(ws_path_str)
+            for cf in list(ws_p.glob("conf_*.yaml")) + list(ws_p.glob("conf*.yaml")):
+                try:
+                    ct = cf.read_text(encoding="utf-8")
+                    if "freq: 1min" in ct or "time_per_step: 1min" in ct:
+                        entry["minute_mode"] = True
+                        break
+                except Exception:
+                    pass
+
+        results.append(entry)
+    return results
+
+
+def analyze_backtest_portfolio(loop_data: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Comprehensive backtest portfolio analysis: capital utilization, trading
+    activity, turnover, per-stock P&L, and trade win rates.
+
+    Uses the last loop that has backtest_portfolio data.
+    """
+    # Find the latest loop with portfolio data
+    portfolio_data = None
+    source_loop = -1
+    for ld in reversed(loop_data):
+        bp = ld.get("backtest_portfolio")
+        if bp and "positions" in bp:
+            portfolio_data = bp
+            source_loop = ld["loop_id"]
+            break
+    if portfolio_data is None:
+        return None
+
+    positions = portfolio_data["positions"]
+    indicators: pd.DataFrame | None = portfolio_data.get("indicators")
+
+    # Extract transaction cost rates from workspace config
+    cost_rates = _extract_cost_rates(portfolio_data.get("workspace_path"))
+    report: pd.DataFrame | None = portfolio_data.get("report")
+
+    dates = sorted(positions.keys())
+    n_days = len(dates)
+    if n_days < 2:
+        return None
+
+    result: dict[str, Any] = {"source_loop": source_loop, "n_trading_days": n_days}
+    result["date_range"] = [str(dates[0])[:10], str(dates[-1])[:10]]
+
+    # =========================================================
+    # 1. Capital Utilization
+    # =========================================================
+    utils: list[float] = []
+    stock_counts: list[int] = []
+    cash_list: list[float] = []
+    total_list: list[float] = []
+
+    for d in dates:
+        p = _get_position_dict(positions[d])
+        cash_d = p.get("cash", 0)
+        stocks_d = {k: v for k, v in p.items() if k not in ("cash", "now_account_value") and isinstance(v, dict)}
+        sv = sum(v.get("amount", 0) * v.get("price", 0) for v in stocks_d.values())
+        total = cash_d + sv
+        utils.append(sv / total * 100 if total > 0 else 0)
+        stock_counts.append(len(stocks_d))
+        cash_list.append(cash_d)
+        total_list.append(total)
+
+    result["utilization"] = {
+        "avg": round(float(np.mean(utils)), 1),
+        "min": round(float(np.min(utils)), 1),
+        "max": round(float(np.max(utils)), 1),
+        "std": round(float(np.std(utils)), 1),
+        "days_below_90": sum(1 for u in utils if u < 90),
+        "days_below_80": sum(1 for u in utils if u < 80),
+    }
+    result["stock_counts"] = {
+        "avg": round(float(np.mean(stock_counts)), 1),
+        "min": int(np.min(stock_counts)),
+        "max": int(np.max(stock_counts)),
+    }
+    # Stock count distribution (top buckets)
+    from collections import Counter
+    sc_dist = Counter(stock_counts)
+    result["stock_count_distribution"] = dict(sorted(sc_dist.items()))
+
+    # =========================================================
+    # 2. Trading Activity (entries/exits)
+    # =========================================================
+    prev_stocks: set[str] = set()
+    daily_entries: list[int] = []
+    daily_exits: list[int] = []
+    for i, d in enumerate(dates):
+        p = _get_position_dict(positions[d])
+        curr = set(k for k in p if k not in ("cash", "now_account_value") and isinstance(p[k], dict))
+        if i > 0:
+            daily_entries.append(len(curr - prev_stocks))
+            daily_exits.append(len(prev_stocks - curr))
+        prev_stocks = curr
+
+    result["trading_activity"] = {
+        "avg_daily_entries": round(float(np.mean(daily_entries)), 1) if daily_entries else 0,
+        "avg_daily_exits": round(float(np.mean(daily_exits)), 1) if daily_exits else 0,
+        "max_daily_entries": int(np.max(daily_entries)) if daily_entries else 0,
+        "max_daily_exits": int(np.max(daily_exits)) if daily_exits else 0,
+        "zero_trade_days": sum(1 for e, x in zip(daily_entries, daily_exits) if e == 0 and x == 0),
+    }
+
+    # =========================================================
+    # 3. Turnover Estimation (from position changes)
+    # =========================================================
+    turnovers: list[float] = []
+    for i in range(1, n_days):
+        p_prev = _get_position_dict(positions[dates[i - 1]])
+        p_curr = _get_position_dict(positions[dates[i]])
+
+        prev_stk = {k: v.get("amount", 0) * v.get("price", 0)
+                     for k, v in p_prev.items()
+                     if k not in ("cash", "now_account_value") and isinstance(v, dict)}
+        curr_stk = {k: v.get("amount", 0) * v.get("price", 0)
+                     for k, v in p_curr.items()
+                     if k not in ("cash", "now_account_value") and isinstance(v, dict)}
+
+        traded_value = 0.0
+        for s in set(prev_stk) | set(curr_stk):
+            pv = prev_stk.get(s, 0)
+            cv = curr_stk.get(s, 0)
+            if pv == 0:
+                traded_value += cv  # new buy
+            elif cv == 0:
+                traded_value += pv  # full sell
+
+        total_val = sum(curr_stk.values())
+        if total_val > 0:
+            turnovers.append(traded_value / total_val)
+
+    avg_turnover = float(np.mean(turnovers)) if turnovers else 0
+    result["turnover"] = {
+        "avg_daily": round(avg_turnover, 4),
+        "avg_daily_pct": round(avg_turnover * 100, 2),
+        "annualized": round(avg_turnover * 252, 2),
+    }
+
+    # =========================================================
+    # 4. Return Analysis
+    # =========================================================
+    initial_val = total_list[0] if total_list[0] > 0 else 1e8
+    final_val = total_list[-1]
+    n_years = n_days / 252
+    total_ret = final_val / initial_val - 1
+    cagr = (final_val / initial_val) ** (1 / n_years) - 1 if n_years > 0 else 0
+
+    result["returns"] = {
+        "initial_capital": round(initial_val, 0),
+        "final_value": round(final_val, 0),
+        "total_return_pct": round(total_ret * 100, 2),
+        "cagr_pct": round(cagr * 100, 2),
+        "n_years": round(n_years, 2),
+    }
+
+    # =========================================================
+    # 4b. Monthly Returns
+    # =========================================================
+    if len(total_list) >= 2 and len(dates) == len(total_list):
+        monthly_returns: dict[str, float] = {}
+        prev_month_val = total_list[0]
+        prev_month_key = str(dates[0])[:7]
+        for i in range(1, len(dates)):
+            month_key = str(dates[i])[:7]
+            if month_key != prev_month_key:
+                # End of previous month
+                monthly_returns[prev_month_key] = round(
+                    (total_list[i - 1] / prev_month_val - 1) * 100, 2
+                ) if prev_month_val > 0 else 0.0
+                prev_month_val = total_list[i - 1]
+                prev_month_key = month_key
+        # Final month
+        monthly_returns[prev_month_key] = round(
+            (total_list[-1] / prev_month_val - 1) * 100, 2
+        ) if prev_month_val > 0 else 0.0
+        result["monthly_returns"] = monthly_returns
+
+    # =========================================================
+    # 4c. Risk Metrics (Sharpe, Sortino, MaxDD Duration, Calmar)
+    # =========================================================
+    if len(total_list) >= 3:
+        daily_returns = np.diff(total_list) / np.array(total_list[:-1])
+        daily_returns = daily_returns[np.isfinite(daily_returns)]
+
+        if len(daily_returns) > 1:
+            avg_ret = float(np.mean(daily_returns))
+            std_ret = float(np.std(daily_returns, ddof=1))
+            sharpe = (avg_ret / std_ret * np.sqrt(252)) if std_ret > 0 else 0.0
+
+            downside = daily_returns[daily_returns < 0]
+            downside_std = float(np.std(downside, ddof=1)) if len(downside) > 1 else 0.0
+            sortino = (avg_ret / downside_std * np.sqrt(252)) if downside_std > 0 else 0.0
+
+            # Max drawdown duration
+            cummax = np.maximum.accumulate(total_list)
+            drawdowns = (np.array(total_list) - cummax) / cummax
+            max_dd_pct = float(np.min(drawdowns)) * 100
+
+            # Duration of max drawdown (days in drawdown state)
+            in_dd = drawdowns < 0
+            max_dd_duration = 0
+            cur_dd_duration = 0
+            for dd_flag in in_dd:
+                if dd_flag:
+                    cur_dd_duration += 1
+                    max_dd_duration = max(max_dd_duration, cur_dd_duration)
+                else:
+                    cur_dd_duration = 0
+
+            calmar = (cagr / abs(max_dd_pct / 100)) if max_dd_pct < 0 else 0.0
+
+            result["risk_metrics"] = {
+                "sharpe_ratio": round(sharpe, 3),
+                "sortino_ratio": round(sortino, 3),
+                "max_drawdown_pct": round(max_dd_pct, 2),
+                "max_drawdown_duration_days": max_dd_duration,
+                "calmar_ratio": round(calmar, 3),
+                "daily_volatility_pct": round(std_ret * 100, 4),
+                "annualized_volatility_pct": round(std_ret * np.sqrt(252) * 100, 2),
+            }
+
+    # =========================================================
+    # 5. Indicators Summary (FFR, PA, etc.)
+    # =========================================================
+    if indicators is not None and "ffr" in indicators.columns:
+        ffr = indicators["ffr"].dropna()
+        result["ffr_analysis"] = {
+            "mean": round(float(ffr.mean()), 4),
+            "min": round(float(ffr.min()), 4),
+            "std": round(float(ffr.std()), 4),
+            "days_below_085": int((ffr < 0.85).sum()),
+            "days_below_070": int((ffr < 0.70).sum()),
+        }
+        # FFR buckets
+        bins = [0, 0.80, 0.90, 0.95, 1.01]
+        labels = ["<0.80", "0.80-0.90", "0.90-0.95", "0.95-1.00"]
+        ffr_bucket = pd.cut(ffr, bins=bins, labels=labels)
+        result["ffr_buckets"] = {
+            lab: int(cnt) for lab, cnt in ffr_bucket.value_counts().items()
+        }
+    if indicators is not None and "pa" in indicators.columns:
+        pa = indicators["pa"].dropna()
+        if len(pa) > 0:
+            result["pa_analysis"] = {
+                "mean": round(float(pa.mean()), 6),
+                "median": round(float(pa.median()), 6),
+                "min": round(float(pa.min()), 6),
+                "max": round(float(pa.max()), 6),
+                "std": round(float(pa.std()), 6),
+                "days_negative": int((pa < 0).sum()),
+                "pct_negative": round((pa < 0).sum() / len(pa) * 100, 1),
+            }
+
+    if indicators is not None and "deal_amount" in indicators.columns:
+        da = indicators["deal_amount"]
+        result["deal_amount"] = {
+            "avg_daily": round(float(da.mean()), 0),
+            "total": round(float(da.sum()), 0),
+        }
+
+    # =========================================================
+    # 6. Per-Stock P&L and Win Rate Analysis
+    #    Uses Qlib close price data for accurate exit prices
+    #    (especially for 1-day holdings where snapshot only has entry close)
+    # =========================================================
+
+    # Load Qlib close prices for accurate sell-day pricing
+    close_lookup: dict[tuple[str, str], float] = {}
+    _qlib_loaded = False
+    try:
+        import qlib
+        from qlib.data import D
+        # Determine qlib data path
+        qlib_bin_paths = [
+            Path("/home/lc999/data/qlib_bin"),
+            Path.home() / "data" / "qlib_bin",
+            Path.home() / "data" / "qlib_data",
+        ]
+        qlib_path = None
+        for p in qlib_bin_paths:
+            if p.exists() and (p / "instruments").exists():
+                qlib_path = p
+                break
+        if qlib_path:
+            try:
+                qlib.init(provider_uri={"day": str(qlib_path)}, expression_cache=None, dataset_cache=None)
+            except Exception:
+                pass  # already initialized
+            date_range_start = str(dates[0])[:10]
+            date_range_end = str(dates[-1])[:10]
+            # Pad by a few days for next-day lookups
+            from datetime import datetime as _dt, timedelta as _td
+            start_dt = _dt.strptime(date_range_start, "%Y-%m-%d") - _td(days=5)
+            end_dt = _dt.strptime(date_range_end, "%Y-%m-%d") + _td(days=10)
+            close_df = D.features(
+                instruments=D.instruments(market="all"),
+                fields=["$close"],
+                start_time=start_dt.strftime("%Y-%m-%d"),
+                end_time=end_dt.strftime("%Y-%m-%d"),
+                freq="day",
+            )
+            close_df.columns = ["close"]
+            close_df = close_df.reset_index()
+            close_df.columns = ["instrument", "datetime", "close"]
+            for _, row in close_df.iterrows():
+                key = (row["instrument"], str(row["datetime"])[:10])
+                close_lookup[key] = float(row["close"])
+            _qlib_loaded = True
+    except Exception:
+        pass  # Qlib not available; fall back to snapshot prices
+
+    # Track each stock's complete trade history
+    stock_history: dict[str, list[dict]] = defaultdict(list)
+    for d in dates:
+        p = _get_position_dict(positions[d])
+        for sid, v in p.items():
+            if sid in ("cash", "now_account_value") or not isinstance(v, dict):
+                continue
+            stock_history[sid].append({
+                "date": str(d)[:10],
+                "amount": float(v.get("amount", 0)),
+                "price": float(v.get("price", 0)),
+            })
+
+    all_dates_str = [str(d)[:10] for d in dates]
+
+    # Build per-stock trade records: identify entry/exit pairs
+    trade_records: list[dict[str, Any]] = []
+    open_positions: dict[str, dict] = {}
+
+    for sid, hist in stock_history.items():
+        date_set = set(h["date"] for h in hist)
+        periods: list[list[dict]] = []
+        current_period: list[dict] = []
+
+        for ds in all_dates_str:
+            if ds in date_set:
+                matching = [h for h in hist if h["date"] == ds]
+                if matching:
+                    if not current_period:
+                        current_period = [matching[0]]
+                    else:
+                        current_period.append(matching[0])
+            else:
+                if current_period:
+                    periods.append(current_period)
+                    current_period = []
+        if current_period:
+            periods.append(current_period)
+
+        for period in periods:
+            entry_price = period[0]["price"]
+            entry_date = period[0]["date"]
+            exit_date = period[-1]["date"]
+            exit_price_snapshot = period[-1]["price"]
+            holding_days = len(period)
+            amount = period[0]["amount"]
+
+            is_last_date = (exit_date == all_dates_str[-1])
+            if is_last_date and exit_date in date_set:
+                pnl_pct = (exit_price_snapshot / entry_price - 1) * 100 if entry_price > 0 else 0
+                open_positions[sid] = {
+                    "entry_date": entry_date,
+                    "entry_price": entry_price,
+                    "current_price": exit_price_snapshot,
+                    "holding_days": holding_days,
+                    "amount": amount,
+                    "unrealized_pnl_pct": round(pnl_pct, 2),
+                }
+            else:
+                # Determine actual exit price:
+                # Sell happens on the NEXT trading day after last holding day
+                exit_date_idx = all_dates_str.index(exit_date)
+                sell_date_idx = exit_date_idx + 1
+                if sell_date_idx < len(all_dates_str):
+                    sell_date = all_dates_str[sell_date_idx]
+                else:
+                    sell_date = exit_date
+
+                # Try Qlib close price for sell_date (more accurate)
+                exit_price_actual = close_lookup.get((sid, sell_date))
+                if exit_price_actual is None or np.isnan(exit_price_actual):
+                    # Fallback: use last holding day's snapshot close
+                    exit_price_actual = exit_price_snapshot
+                    price_source = "snapshot"
+                else:
+                    price_source = "qlib_next_day"
+
+                pnl_pct = (exit_price_actual / entry_price - 1) * 100 if entry_price > 0 else 0
+                pnl_value = (exit_price_actual - entry_price) * amount
+
+                trade_records.append({
+                    "stock": sid,
+                    "entry_date": entry_date,
+                    "exit_date": exit_date,
+                    "sell_date": sell_date,
+                    "entry_price": round(entry_price, 4),
+                    "exit_price": round(exit_price_actual, 4),
+                    "amount": amount,
+                    "holding_days": holding_days,
+                    "pnl_pct": round(pnl_pct, 2),
+                    "pnl_value": round(pnl_value, 2),
+                    "price_source": price_source,
+                })
+
+    result["qlib_price_loaded"] = _qlib_loaded
+    result["close_lookup_size"] = len(close_lookup)
+
+    # Per-trade cost computation
+    open_cost = cost_rates["open_cost"]
+    close_cost = cost_rates["close_cost"]
+    min_cost = cost_rates["min_cost"]
+    for t in trade_records:
+        buy_value = t["entry_price"] * t["amount"]
+        sell_value = t["exit_price"] * t["amount"]
+        t["buy_cost"] = round(max(buy_value * open_cost, min_cost), 2)
+        t["sell_cost"] = round(max(sell_value * close_cost, min_cost), 2)
+        t["total_cost"] = round(t["buy_cost"] + t["sell_cost"], 2)
+        t["net_pnl"] = round(t["pnl_value"] - t["total_cost"], 2)
+
+    result["cost_rates"] = cost_rates
+
+    # Win rate statistics
+    if trade_records:
+        one_day_trades = [t for t in trade_records if t["holding_days"] == 1]
+        multi_day_trades = [t for t in trade_records if t["holding_days"] > 1]
+
+        # When Qlib prices are loaded, 1-day trades have accurate P&L → use ALL trades
+        # When Qlib is not available, 1-day trades have pnl=0 → use multi-day only
+        if _qlib_loaded:
+            effective_trades = trade_records
+        else:
+            effective_trades = multi_day_trades if multi_day_trades else trade_records
+        wins = [t for t in effective_trades if t["pnl_pct"] > 0]
+        losses = [t for t in effective_trades if t["pnl_pct"] < 0]
+        flat = [t for t in effective_trades if t["pnl_pct"] == 0]
+        pnl_pcts = [t["pnl_pct"] for t in effective_trades]
+        win_pnls = [t["pnl_pct"] for t in wins]
+        loss_pnls = [t["pnl_pct"] for t in losses]
+        holding_days_list = [t["holding_days"] for t in effective_trades]
+
+        win_rate = len(wins) / len(effective_trades) * 100 if effective_trades else 0
+
+        # Profit factor = gross profit / gross loss
+        gross_profit = sum(t["pnl_value"] for t in wins) if wins else 0
+        gross_loss = abs(sum(t["pnl_value"] for t in losses)) if losses else 1
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
+
+        # 1-day trade stats
+        one_day_wins = [t for t in one_day_trades if t["pnl_pct"] > 0]
+        one_day_losses = [t for t in one_day_trades if t["pnl_pct"] < 0]
+        one_day_wr = len(one_day_wins) / (len(one_day_wins) + len(one_day_losses)) * 100 if (one_day_wins or one_day_losses) else 0
+        one_day_net = sum(t["pnl_value"] for t in one_day_trades)
+
+        # Multi-day trade stats
+        multi_wins = [t for t in multi_day_trades if t["pnl_pct"] > 0]
+        multi_losses = [t for t in multi_day_trades if t["pnl_pct"] < 0]
+        multi_wr = len(multi_wins) / (len(multi_wins) + len(multi_losses)) * 100 if (multi_wins or multi_losses) else 0
+        multi_net = sum(t["pnl_value"] for t in multi_day_trades)
+
+        result["trade_stats"] = {
+            "total_trades": len(trade_records),
+            "one_day_trades": len(one_day_trades),
+            "one_day_pct": round(len(one_day_trades) / len(trade_records) * 100, 1),
+            "one_day_win_rate": round(one_day_wr, 1),
+            "one_day_net_pnl": round(one_day_net, 0),
+            "multi_day_trades": len(multi_day_trades),
+            "multi_day_win_rate": round(multi_wr, 1),
+            "multi_day_net_pnl": round(multi_net, 0),
+            "effective_trades": len(effective_trades),
+            "winning_trades": len(wins),
+            "losing_trades": len(losses),
+            "flat_trades": len(flat),
+            "win_rate_pct": round(win_rate, 1),
+            "avg_pnl_pct": round(float(np.mean(pnl_pcts)), 2) if pnl_pcts else 0,
+            "avg_win_pct": round(float(np.mean(win_pnls)), 2) if win_pnls else 0,
+            "avg_loss_pct": round(float(np.mean(loss_pnls)), 2) if loss_pnls else 0,
+            "max_win_pct": round(float(np.max(win_pnls)), 2) if win_pnls else 0,
+            "max_loss_pct": round(float(np.min(loss_pnls)), 2) if loss_pnls else 0,
+            "median_pnl_pct": round(float(np.median(pnl_pcts)), 2) if pnl_pcts else 0,
+            "profit_factor": round(profit_factor, 2),
+            "gross_profit": round(gross_profit, 0),
+            "gross_loss": round(gross_loss, 0),
+            "net_pnl": round(gross_profit - gross_loss, 0),
+            "avg_holding_days": round(float(np.mean(holding_days_list)), 1) if holding_days_list else 0,
+            "median_holding_days": int(np.median(holding_days_list)) if holding_days_list else 0,
+            "qlib_price_used": _qlib_loaded,
+        }
+
+        # Top 10 most profitable trades
+        sorted_trades = sorted(trade_records, key=lambda t: t["pnl_value"], reverse=True)
+        result["top_winners"] = sorted_trades[:10]
+        result["top_losers"] = sorted_trades[-10:][::-1]  # worst first
+
+        # Transaction cost summary
+        total_commission = sum(t["total_cost"] for t in trade_records)
+        avg_cost_per_trade = total_commission / len(trade_records) if trade_records else 0
+        initial_val_for_cost = total_list[0] if total_list and total_list[0] > 0 else 1e8
+        n_years_cost = n_days / 252 if n_days > 0 else 1
+        cost_drag_annualized_pct = (total_commission / initial_val_for_cost / n_years_cost) * 100
+        result["cost_analysis"] = {
+            "open_cost_rate": open_cost,
+            "close_cost_rate": close_cost,
+            "min_cost": min_cost,
+            "total_commission": round(total_commission, 2),
+            "avg_cost_per_trade": round(avg_cost_per_trade, 2),
+            "cost_drag_annualized_pct": round(cost_drag_annualized_pct, 2),
+        }
+
+        # Per-stock aggregated P&L (enhanced)
+        stock_pnl: dict[str, dict] = defaultdict(lambda: {
+            "total_pnl": 0.0, "total_pnl_net": 0.0, "total_cost": 0.0,
+            "total_buy_value": 0.0, "total_sell_value": 0.0,
+            "trades": 0, "wins": 0, "total_pnl_pct": 0.0,
+            "holding_days_sum": 0, "max_win_pct": -999.0, "max_loss_pct": 999.0,
+        })
+        for t in trade_records:
+            s = t["stock"]
+            sp = stock_pnl[s]
+            sp["total_pnl"] += t["pnl_value"]
+            sp["total_pnl_net"] += t["net_pnl"]
+            sp["total_cost"] += t["total_cost"]
+            sp["total_buy_value"] += t["entry_price"] * t["amount"]
+            sp["total_sell_value"] += t["exit_price"] * t["amount"]
+            sp["total_pnl_pct"] += t["pnl_pct"]
+            sp["trades"] += 1
+            sp["holding_days_sum"] += t["holding_days"]
+            if t["pnl_pct"] > 0:
+                sp["wins"] += 1
+            if t["pnl_pct"] > sp["max_win_pct"]:
+                sp["max_win_pct"] = t["pnl_pct"]
+            if t["pnl_pct"] < sp["max_loss_pct"]:
+                sp["max_loss_pct"] = t["pnl_pct"]
+
+        def _stock_summary(s: str, v: dict) -> dict:
+            return {
+                "stock": s,
+                "total_pnl": round(v["total_pnl"], 0),
+                "total_pnl_net": round(v["total_pnl_net"], 0),
+                "total_cost": round(v["total_cost"], 2),
+                "trades": v["trades"],
+                "wins": v["wins"],
+                "win_rate": round(v["wins"] / v["trades"] * 100, 1) if v["trades"] > 0 else 0,
+                "avg_pnl_pct": round(v["total_pnl_pct"] / v["trades"], 2) if v["trades"] > 0 else 0,
+                "avg_holding_days": round(v["holding_days_sum"] / v["trades"], 1) if v["trades"] > 0 else 0,
+                "max_win_pct": round(v["max_win_pct"], 2) if v["max_win_pct"] > -999 else 0,
+                "max_loss_pct": round(v["max_loss_pct"], 2) if v["max_loss_pct"] < 999 else 0,
+            }
+
+        sorted_stocks = sorted(stock_pnl.items(), key=lambda x: x[1]["total_pnl"], reverse=True)
+        result["all_stocks_by_pnl"] = [_stock_summary(s, v) for s, v in sorted_stocks]
+        result["top_stocks_by_pnl"] = [_stock_summary(s, v) for s, v in sorted_stocks[:15]]
+        result["bottom_stocks_by_pnl"] = [_stock_summary(s, v) for s, v in sorted_stocks[-15:][::-1]]
+
+        # Consecutive win/loss streaks
+        max_con_wins = 0
+        max_con_losses = 0
+        cur_wins = 0
+        cur_losses = 0
+        # Sort trades by exit date for streak analysis
+        sorted_by_exit = sorted(trade_records, key=lambda t: t["sell_date"])
+        for t in sorted_by_exit:
+            if t["pnl_pct"] > 0:
+                cur_wins += 1
+                cur_losses = 0
+            elif t["pnl_pct"] < 0:
+                cur_losses += 1
+                cur_wins = 0
+            else:
+                cur_wins = 0
+                cur_losses = 0
+            max_con_wins = max(max_con_wins, cur_wins)
+            max_con_losses = max(max_con_losses, cur_losses)
+        result["streaks"] = {
+            "max_consecutive_wins": max_con_wins,
+            "max_consecutive_losses": max_con_losses,
+        }
+
+        # Win rate by holding period bucket
+        bucket_stats: dict[str, dict] = {}
+        for label, lo, hi in [("1d", 1, 1), ("2-3d", 2, 3), ("4-7d", 4, 7), ("8-14d", 8, 14), ("15+d", 15, 9999)]:
+            bucket_trades = [t for t in trade_records if lo <= t["holding_days"] <= hi]
+            if bucket_trades:
+                bw = sum(1 for t in bucket_trades if t["pnl_pct"] > 0)
+                bucket_stats[label] = {
+                    "count": len(bucket_trades),
+                    "win_rate": round(bw / len(bucket_trades) * 100, 1),
+                    "avg_pnl": round(float(np.mean([t["pnl_pct"] for t in bucket_trades])), 2),
+                }
+        result["win_rate_by_holding_period"] = bucket_stats
+
+    result["open_positions_count"] = len(open_positions)
+    result["trade_records"] = trade_records
+
+    # =========================================================
+    # 7. Diagnoses
+    # =========================================================
+    issues: list[dict[str, str]] = []
+
+    avg_util = result["utilization"]["avg"]
+    if avg_util < 85:
+        issues.append({"code": "LOW_UTILIZATION", "detail": f"Average capital utilization {avg_util:.1f}% < 85%. Significant cash drag on returns."})
+
+    ffr_info = result.get("ffr_analysis")
+    if ffr_info and ffr_info["mean"] < 0.95:
+        issues.append({"code": "LOW_FFR", "detail": f"Mean FFR {ffr_info['mean']:.3f} < 0.95. {ffr_info.get('days_below_085', 0)} days below 0.85. Check only_tradable config."})
+
+    ts = result.get("trade_stats")
+    if ts:
+        if ts["win_rate_pct"] < 45:
+            issues.append({"code": "LOW_WIN_RATE", "detail": f"Win rate {ts['win_rate_pct']:.1f}% < 45%. Strategy may lack edge."})
+        if ts["profit_factor"] < 1.0:
+            issues.append({"code": "NEGATIVE_EXPECTANCY", "detail": f"Profit factor {ts['profit_factor']:.2f} < 1.0. Strategy is net losing money on trades."})
+        if ts["avg_holding_days"] < 2:
+            issues.append({"code": "EXCESSIVE_CHURN", "detail": f"Avg holding {ts['avg_holding_days']:.1f} days. Extreme short-term turnover."})
+
+    turnover_info = result.get("turnover")
+    if turnover_info and turnover_info["annualized"] > 50:
+        issues.append({"code": "HIGH_TURNOVER", "detail": f"Annualized turnover {turnover_info['annualized']:.1f}x. Transaction costs may erode alpha significantly."})
+
+    ca = result.get("cost_analysis")
+    if ca and ca["cost_drag_annualized_pct"] > 2.0:
+        issues.append({"code": "HIGH_COST_DRAG", "detail": f"Annualized cost drag {ca['cost_drag_annualized_pct']:.2f}% > 2%. Transaction costs significantly eroding returns."})
+
+    rm = result.get("risk_metrics")
+    if rm:
+        if rm["sharpe_ratio"] < 0.5:
+            issues.append({"code": "LOW_SHARPE", "detail": f"Sharpe ratio {rm['sharpe_ratio']:.3f} < 0.5. Risk-adjusted returns are poor."})
+        if rm["max_drawdown_duration_days"] > 60:
+            issues.append({"code": "PROLONGED_DRAWDOWN", "detail": f"Max drawdown lasted {rm['max_drawdown_duration_days']} days (> 60). Strategy recovery is slow."})
+
+    result["issues"] = issues
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Section 4: Live Resource Check
 # ---------------------------------------------------------------------------
 
@@ -1628,6 +2746,9 @@ def generate_text_report(
     code_quality_issues: list[dict[str, Any]],
     live_resources: dict[str, Any] | None,
     homogeneity_analysis: dict[str, Any] | None = None,
+    memory_profile: dict[str, Any] | None = None,
+    portfolio_analysis: dict[str, Any] | None = None,
+    execution_quality: list[dict[str, Any]] | None = None,
 ) -> str:
     lines: list[str] = []
     sep = "=" * 80
@@ -1886,7 +3007,14 @@ def generate_text_report(
                 total_h = ca.get("total_training_hours")
                 if total_h:
                     lines.append(f"    Total Train Time: {total_h}h")
-                lines.append(f"    Train Loss:       {ca.get('first_train_loss', 'N/A')} -> {ca.get('last_train_loss', 'N/A')} ({ca.get('train_loss_reduction_pct', 'N/A')}% reduction)")
+                if ca.get("train_eval_skipped"):
+                    ft = ca.get("final_train_score")
+                    if ft is not None:
+                        lines.append(f"    Train Loss:       per-epoch skipped, final one-shot = {ft}")
+                    else:
+                        lines.append(f"    Train Loss:       per-epoch skipped (no final eval)")
+                else:
+                    lines.append(f"    Train Loss:       {ca.get('first_train_loss', 'N/A')} -> {ca.get('last_train_loss', 'N/A')} ({ca.get('train_loss_reduction_pct', 'N/A')}% reduction)")
                 lines.append(f"    Valid Loss:       {ca.get('first_valid_loss', 'N/A')} -> {ca.get('last_valid_loss', 'N/A')} ({ca.get('valid_loss_reduction_pct', 'N/A')}% reduction)")
                 lines.append(f"    Best Valid Loss:  {ca.get('best_valid_loss', 'N/A')}")
                 lines.append(f"    Early Stopped:    {ca.get('early_stopped', False)}")
@@ -2013,7 +3141,7 @@ def generate_text_report(
         lines.append(f"\n  Field Coverage: {total_cov.get('used', 0)}/{total_cov.get('total', 0)} "
                       f"({total_cov.get('coverage_pct', 0)}%)")
         lines.append(f"    {'Group':<15s} {'Used':>5s} / {'Total':>5s}  {'Coverage':>8s}  Unused (sample)")
-        for grp_name in ["db", "mf", "bb", "cp", "precomputed", "daily_pv"]:
+        for grp_name in ["db", "mf", "bb", "cp", "sw2", "precomputed", "daily_pv"]:
             gi = cov.get(grp_name, {})
             unused_sample = ", ".join(gi.get("unused_fields", [])[:4])
             if gi.get("unused_fields", []):
@@ -2318,7 +3446,369 @@ def generate_text_report(
         lines.append("  No CoSTEER iteration data available.")
     lines.append("")
 
-    # --- Section 14: Analytical Conclusions & Recommendations ---
+    # --- Section 15: Memory & CoSTEER Intensity Profile ---
+    if memory_profile:
+        lines.append(sep)
+        lines.append("  MEMORY & COSTEER INTENSITY PROFILE")
+        lines.append(sep)
+
+        # Session snapshot table
+        snaps = memory_profile.get("session_snapshots", [])
+        if snaps:
+            lines.append("")
+            lines.append("  Session Snapshot Sizes:")
+            lines.append(f"    {'Session':>8s}  {'Total':>8s}  {'Coder':>8s}  {'KB':>8s}  {'KB Nodes':>9s}  {'EvoTrace':>9s}  {'EvoSteps':>9s}  {'Hist':>5s}  {'SOTA Fac':>9s}")
+            lines.append(f"    {'-'*80}")
+            for s in snaps:
+                total = f"{s.get('total_mb', 0):.1f} MB"
+                coder = f"{s.get('coder_mb', 0):.1f} MB" if s.get('coder_mb') else "N/A"
+                kb = f"{s.get('kb_mb', 0):.1f} MB" if s.get('kb_mb') else "N/A"
+                kb_n = f"{s.get('kb_nodes', 0):>5d}" if s.get('kb_nodes') else "N/A"
+                et = f"{s.get('evo_trace_mb', 0):.1f} MB" if s.get('evo_trace_mb') else "N/A"
+                et_s = f"{s.get('evo_trace_steps', 0):>5d}" if s.get('evo_trace_steps') is not None else "N/A"
+                hist = f"{s.get('hist_len', 0):>3d}" if s.get('hist_len') is not None else "N/A"
+                sf = f"{s.get('sota_factors', 0):>5d}" if s.get('sota_factors') is not None else "N/A"
+                lines.append(f"    {s['loop_id']:>8d}  {total:>8s}  {coder:>8s}  {kb:>8s}  {kb_n:>9s}  {et:>9s}  {et_s:>9s}  {hist:>5s}  {sf:>9s}")
+
+        # Snapshot growth
+        sg = memory_profile.get("snapshot_growth")
+        if sg:
+            lines.append(f"\n  Snapshot Growth: {sg['first_mb']:.1f} MB -> {sg['last_mb']:.1f} MB "
+                         f"(+{sg['growth_mb']:.1f} MB, +{sg['growth_pct']:.0f}%)")
+
+        # CoSTEER work intensity table
+        pli = memory_profile.get("per_loop_intensity", [])
+        if pli:
+            lines.append("")
+            lines.append("  CoSTEER Work Intensity:")
+            lines.append(f"    {'Loop':>5s}  {'Iters':>5s}  {'Factors':>7s}  {'Work':>5s}  {'EvalCalls':>10s}  {'Cumul.Work':>11s}  {'Cumul.Eval':>11s}  {'Status':>12s}")
+            lines.append(f"    {'-'*80}")
+            for p in pli:
+                status = ""
+                if p["hit_max_loop"]:
+                    status = "HIT MAX"
+                elif p["is_light"]:
+                    status = "light"
+                lines.append(
+                    f"    {p['loop_id']:>5d}  {p['evo_iters']:>5d}  {p['factor_count']:>7d}  "
+                    f"{p['work_units']:>5d}  {p['eval_calls']:>10d}  "
+                    f"{p['cumulative_work']:>11d}  {p['cumulative_eval_calls']:>11d}  {status:>12s}"
+                )
+
+        # Summary
+        summary = memory_profile.get("summary", {})
+        if summary:
+            lines.append(f"\n  Intensity Summary:")
+            lines.append(f"    Total work units:         {summary['total_work_units']}")
+            lines.append(f"    Total eval calls:         ~{summary['total_eval_calls']}")
+            lines.append(f"    Max single-loop work:     {summary['max_single_loop_work']}")
+            lines.append(f"    Avg work/loop:            {summary['avg_work_per_loop']:.1f}")
+            lines.append(f"    Light loops (≤1 iter):    {summary['light_loops']}/{summary['total_loops']}")
+            lines.append(f"    MAX_LOOP hits:            {summary['max_loops_hit']}")
+            lines.append(f"    Consecutive MAX_LOOP:     {summary['max_consecutive_max_loop']}")
+
+        # Issues
+        issues = memory_profile.get("issues", [])
+        if issues:
+            lines.append(f"\n  Memory Risk Issues:")
+            for mi in issues:
+                lines.append(f"    [!] {mi['issue']}: {mi['detail']}")
+
+        lines.append("")
+
+    # --- Section 17: Backtest Portfolio & Trade Analysis ---
+    if portfolio_analysis:
+        lines.append(sep)
+        lines.append("  BACKTEST PORTFOLIO & TRADE ANALYSIS")
+        lines.append(sep)
+        lines.append(f"  Source: Loop {portfolio_analysis['source_loop']}, "
+                      f"{portfolio_analysis['n_trading_days']} trading days "
+                      f"({portfolio_analysis['date_range'][0]} ~ {portfolio_analysis['date_range'][1]})")
+
+        # Returns
+        ret = portfolio_analysis.get("returns", {})
+        lines.append(f"\n  --- Returns ---")
+        lines.append(f"    Initial Capital:   {ret.get('initial_capital', 0):>15,.0f}")
+        lines.append(f"    Final Value:       {ret.get('final_value', 0):>15,.0f}")
+        lines.append(f"    Total Return:      {ret.get('total_return_pct', 0):>14.2f}%")
+        lines.append(f"    CAGR:              {ret.get('cagr_pct', 0):>14.2f}%")
+
+        # Capital utilization
+        util = portfolio_analysis.get("utilization", {})
+        lines.append(f"\n  --- Capital Utilization ---")
+        lines.append(f"    Average:           {util.get('avg', 0):>14.1f}%")
+        lines.append(f"    Min / Max:         {util.get('min', 0):.1f}% / {util.get('max', 0):.1f}%")
+        lines.append(f"    Days < 90%:        {util.get('days_below_90', 0):>14d}")
+        lines.append(f"    Days < 80%:        {util.get('days_below_80', 0):>14d}")
+
+        # Stock counts
+        sc = portfolio_analysis.get("stock_counts", {})
+        lines.append(f"\n  --- Stock Holdings ---")
+        lines.append(f"    Avg / Min / Max:   {sc.get('avg', 0):.1f} / {sc.get('min', 0)} / {sc.get('max', 0)}")
+        # Distribution
+        dist = portfolio_analysis.get("stock_count_distribution", {})
+        if dist:
+            lines.append(f"    Distribution:")
+            for cnt, days in sorted(dist.items()):
+                bar = "#" * min(days, 60)
+                lines.append(f"      {cnt:>3d} stocks: {days:>4d} days {bar}")
+
+        # Turnover
+        to = portfolio_analysis.get("turnover", {})
+        lines.append(f"\n  --- Turnover ---")
+        lines.append(f"    Avg Daily:         {to.get('avg_daily_pct', 0):>14.2f}%")
+        lines.append(f"    Annualized:        {to.get('annualized', 0):>14.2f}x")
+
+        # Trading activity
+        ta = portfolio_analysis.get("trading_activity", {})
+        lines.append(f"\n  --- Daily Trading Activity ---")
+        lines.append(f"    Avg Entries/Exits:  {ta.get('avg_daily_entries', 0):.1f} / {ta.get('avg_daily_exits', 0):.1f}")
+        lines.append(f"    Max Entries/Exits:  {ta.get('max_daily_entries', 0)} / {ta.get('max_daily_exits', 0)}")
+        lines.append(f"    Zero-trade Days:   {ta.get('zero_trade_days', 0):>14d}")
+
+        # FFR
+        ffr = portfolio_analysis.get("ffr_analysis")
+        if ffr:
+            lines.append(f"\n  --- Fill Fulfillment Rate (FFR) ---")
+            lines.append(f"    Mean FFR:          {ffr['mean']:>14.4f}")
+            lines.append(f"    Min FFR:           {ffr['min']:>14.4f}")
+            lines.append(f"    Days FFR < 0.85:   {ffr['days_below_085']:>14d}")
+            buckets = portfolio_analysis.get("ffr_buckets", {})
+            if buckets:
+                lines.append(f"    FFR Buckets:")
+                for lab in ["<0.80", "0.80-0.90", "0.90-0.95", "0.95-1.00"]:
+                    lines.append(f"      {lab:>12s}: {buckets.get(lab, 0):>4d} days")
+
+        # PA (Price Advantage)
+        pa_info = portfolio_analysis.get("pa_analysis")
+        if pa_info:
+            lines.append(f"\n  --- Price Advantage (PA) ---")
+            lines.append(f"    Mean PA:           {pa_info['mean']:>14.6f}")
+            lines.append(f"    Median PA:         {pa_info['median']:>14.6f}")
+            lines.append(f"    Min / Max:         {pa_info['min']:.6f} / {pa_info['max']:.6f}")
+            lines.append(f"    Std:               {pa_info['std']:>14.6f}")
+            lines.append(f"    Days PA < 0:       {pa_info['days_negative']:>14d} ({pa_info['pct_negative']:.1f}%)")
+            lines.append(f"    (PA>0 = bought cheaper than close; PA<0 = bought more expensive)")
+
+        # Transaction cost analysis
+        ca = portfolio_analysis.get("cost_analysis")
+        if ca:
+            lines.append(f"\n  --- Transaction Cost Analysis ---")
+            lines.append(f"    Open Cost Rate:    {ca['open_cost_rate']*10000:>14.2f} bps")
+            lines.append(f"    Close Cost Rate:   {ca['close_cost_rate']*10000:>14.2f} bps")
+            lines.append(f"    Min Cost/Trade:    {ca['min_cost']:>14.1f}")
+            lines.append(f"    Total Commission:  {ca['total_commission']:>14,.2f}")
+            lines.append(f"    Avg Cost/Trade:    {ca['avg_cost_per_trade']:>14,.2f}")
+            lines.append(f"    Ann. Cost Drag:    {ca['cost_drag_annualized_pct']:>14.2f}%")
+
+        # Risk metrics
+        rm = portfolio_analysis.get("risk_metrics")
+        if rm:
+            lines.append(f"\n  --- Risk Metrics ---")
+            lines.append(f"    Sharpe Ratio:      {rm['sharpe_ratio']:>14.3f}")
+            lines.append(f"    Sortino Ratio:     {rm['sortino_ratio']:>14.3f}")
+            lines.append(f"    Max Drawdown:      {rm['max_drawdown_pct']:>14.2f}%")
+            lines.append(f"    MaxDD Duration:    {rm['max_drawdown_duration_days']:>14d} days")
+            lines.append(f"    Calmar Ratio:      {rm['calmar_ratio']:>14.3f}")
+            lines.append(f"    Ann. Volatility:   {rm['annualized_volatility_pct']:>14.2f}%")
+
+        # Monthly returns
+        monthly = portfolio_analysis.get("monthly_returns", {})
+        if monthly:
+            lines.append(f"\n  --- Monthly Returns ---")
+            # Group by year for compact display
+            years: dict[str, list[tuple[str, float]]] = defaultdict(list)
+            for ym, ret_pct in monthly.items():
+                yr = ym[:4]
+                mon = ym[5:7]
+                years[yr].append((mon, ret_pct))
+            lines.append(f"    {'Year':>6s}  " + "  ".join(f"{'M'+str(i):>6s}" for i in range(1, 13)))
+            lines.append(f"    {'─'*6}  " + "  ".join(f"{'─'*6}" for _ in range(12)))
+            for yr in sorted(years.keys()):
+                mon_map = {m: r for m, r in years[yr]}
+                row_parts = []
+                for i in range(1, 13):
+                    m_key = f"{i:02d}"
+                    if m_key in mon_map:
+                        row_parts.append(f"{mon_map[m_key]:>6.1f}")
+                    else:
+                        row_parts.append(f"{'':>6s}")
+                lines.append(f"    {yr:>6s}  " + "  ".join(row_parts))
+
+        # Trade stats (win rate)
+        ts = portfolio_analysis.get("trade_stats")
+        if ts:
+            qlib_note = " (Qlib close prices)" if ts.get("qlib_price_used") else " (snapshot prices only)"
+            lines.append(f"\n  --- Trade Win/Loss Analysis{qlib_note} ---")
+            lines.append(f"    Total Trades:      {ts['total_trades']:>14d}")
+            one_day = ts.get('one_day_trades', 0)
+            one_day_pct = ts.get('one_day_pct', 0)
+            if one_day > 0:
+                one_day_wr = ts.get('one_day_win_rate', 0)
+                one_day_net = ts.get('one_day_net_pnl', 0)
+                lines.append(f"    1-Day Trades:      {one_day:>14d}  ({one_day_pct:.1f}%)")
+                lines.append(f"    1-Day Win Rate:    {one_day_wr:>14.1f}%")
+                lines.append(f"    1-Day Net P&L:     {one_day_net:>14,.0f}")
+            multi_day_n = ts.get('multi_day_trades', 0)
+            if multi_day_n > 0:
+                multi_wr = ts.get('multi_day_win_rate', 0)
+                multi_net = ts.get('multi_day_net_pnl', 0)
+                lines.append(f"    Multi-Day Trades:  {multi_day_n:>14d}")
+                lines.append(f"    Multi-Day WinRate: {multi_wr:>14.1f}%")
+                lines.append(f"    Multi-Day Net P&L: {multi_net:>14,.0f}")
+            lines.append(f"    --- Overall ---")
+            lines.append(f"    Winning / Losing:  {ts['winning_trades']} / {ts['losing_trades']} / {ts.get('flat_trades', 0)} flat")
+            lines.append(f"    Win Rate:          {ts['win_rate_pct']:>14.1f}%")
+            lines.append(f"    Avg Win / Loss:    {ts['avg_win_pct']:.2f}% / {ts['avg_loss_pct']:.2f}%")
+            lines.append(f"    Profit Factor:     {ts['profit_factor']:>14.2f}")
+            lines.append(f"    Gross Profit:      {ts.get('gross_profit', 0):>14,.0f}")
+            lines.append(f"    Gross Loss:        {ts.get('gross_loss', 0):>14,.0f}")
+            lines.append(f"    Net P&L:           {ts.get('net_pnl', 0):>14,.0f}")
+            lines.append(f"    Avg Holding Days:  {ts['avg_holding_days']:>14.1f}")
+            lines.append(f"    Median Holding:    {ts['median_holding_days']:>14d} days")
+
+        # Streaks
+        streaks = portfolio_analysis.get("streaks")
+        if streaks:
+            lines.append(f"\n  --- Streak Analysis ---")
+            lines.append(f"    Max Consec. Wins:  {streaks['max_consecutive_wins']:>14d}")
+            lines.append(f"    Max Consec. Losses:{streaks['max_consecutive_losses']:>14d}")
+
+        # Win rate by holding period
+        wrp = portfolio_analysis.get("win_rate_by_holding_period", {})
+        if wrp:
+            lines.append(f"\n  --- Win Rate by Holding Period ---")
+            lines.append(f"    {'Period':>10s} {'Trades':>8s} {'WinRate':>8s} {'AvgP&L':>8s}")
+            lines.append(f"    {'─'*10} {'─'*8} {'─'*8} {'─'*8}")
+            for label in ["1d", "2-3d", "4-7d", "8-14d", "15+d"]:
+                if label in wrp:
+                    b = wrp[label]
+                    lines.append(f"    {label:>10s} {b['count']:>8d} {b['win_rate']:>7.1f}% {b['avg_pnl']:>7.2f}%")
+
+        # Top winners/losers
+        tw = portfolio_analysis.get("top_winners", [])
+        if tw:
+            lines.append(f"\n  --- Top 10 Winning Trades ---")
+            lines.append(f"    {'Stock':>12s} {'Entry':>12s} {'Exit':>12s} {'Days':>5s} {'P&L%':>8s} {'P&L Value':>12s} {'Cost':>8s} {'NetP&L':>12s}")
+            for t in tw[:10]:
+                lines.append(f"    {t['stock']:>12s} {t['entry_date']:>12s} {t['exit_date']:>12s} "
+                              f"{t['holding_days']:>5d} {t['pnl_pct']:>7.2f}% {t['pnl_value']:>12,.0f} "
+                              f"{t.get('total_cost', 0):>8,.0f} {t.get('net_pnl', t['pnl_value']):>12,.0f}")
+
+        tl = portfolio_analysis.get("top_losers", [])
+        if tl:
+            lines.append(f"\n  --- Top 10 Losing Trades ---")
+            lines.append(f"    {'Stock':>12s} {'Entry':>12s} {'Exit':>12s} {'Days':>5s} {'P&L%':>8s} {'P&L Value':>12s} {'Cost':>8s} {'NetP&L':>12s}")
+            for t in tl[:10]:
+                lines.append(f"    {t['stock']:>12s} {t['entry_date']:>12s} {t['exit_date']:>12s} "
+                              f"{t['holding_days']:>5d} {t['pnl_pct']:>7.2f}% {t['pnl_value']:>12,.0f} "
+                              f"{t.get('total_cost', 0):>8,.0f} {t.get('net_pnl', t['pnl_value']):>12,.0f}")
+
+        # Top/Bottom 15 stocks by total P&L (enhanced)
+        ts_pnl = portfolio_analysis.get("top_stocks_by_pnl", [])
+        if ts_pnl:
+            n_top = len(ts_pnl)
+            lines.append(f"\n  --- Top {n_top} Stocks by Cumulative P&L ---")
+            lines.append(f"    {'Stock':>12s} {'Trades':>6s} {'WR%':>6s} {'GrossP&L':>10s} {'Costs':>8s} {'NetP&L':>10s} {'AvgHold':>7s} {'MaxWin%':>8s} {'MaxLoss%':>8s}")
+            for s in ts_pnl:
+                lines.append(f"    {s['stock']:>12s} {s['trades']:>6d} {s['win_rate']:>5.1f}% "
+                              f"{s['total_pnl']:>10,.0f} {s['total_cost']:>8,.0f} {s['total_pnl_net']:>10,.0f} "
+                              f"{s['avg_holding_days']:>7.1f} {s['max_win_pct']:>7.2f}% {s['max_loss_pct']:>7.2f}%")
+
+        bs_pnl = portfolio_analysis.get("bottom_stocks_by_pnl", [])
+        if bs_pnl:
+            n_bot = len(bs_pnl)
+            lines.append(f"\n  --- Bottom {n_bot} Stocks by Cumulative P&L ---")
+            lines.append(f"    {'Stock':>12s} {'Trades':>6s} {'WR%':>6s} {'GrossP&L':>10s} {'Costs':>8s} {'NetP&L':>10s} {'AvgHold':>7s} {'MaxWin%':>8s} {'MaxLoss%':>8s}")
+            for s in bs_pnl:
+                lines.append(f"    {s['stock']:>12s} {s['trades']:>6d} {s['win_rate']:>5.1f}% "
+                              f"{s['total_pnl']:>10,.0f} {s['total_cost']:>8,.0f} {s['total_pnl_net']:>10,.0f} "
+                              f"{s['avg_holding_days']:>7.1f} {s['max_win_pct']:>7.2f}% {s['max_loss_pct']:>7.2f}%")
+
+        total_unique_stocks = len(portfolio_analysis.get("all_stocks_by_pnl", []))
+        if total_unique_stocks > 30:
+            lines.append(f"\n    ({total_unique_stocks} total unique stocks traded. Use --export-trades for full list.)")
+
+        # Portfolio issues
+        p_issues = portfolio_analysis.get("issues", [])
+        if p_issues:
+            lines.append(f"\n  ** PORTFOLIO DIAGNOSES **")
+            for pi in p_issues:
+                lines.append(f"    ! {pi['code']}: {pi['detail']}")
+
+        lines.append("")
+
+    # --- Section 18: Execution Quality Evolution ---
+    if execution_quality and any(eq.get("ffr_mean") is not None or eq.get("pa_mean") is not None for eq in execution_quality):
+        lines.append(sep)
+        lines.append("  EXECUTION QUALITY EVOLUTION (Per-Loop)")
+        lines.append(sep)
+
+        # Build header and rows
+        has_ffr = any(eq.get("ffr_mean") is not None for eq in execution_quality)
+        has_pa = any(eq.get("pa_mean") is not None for eq in execution_quality)
+        has_da = any(eq.get("deal_amount_avg") is not None for eq in execution_quality)
+        has_cost = any(eq.get("cost_drag_pct") is not None for eq in execution_quality)
+        has_strat = any(eq.get("exec_strategy") is not None for eq in execution_quality)
+
+        hdr = f"  {'Loop':>5s}"
+        div_len = 8
+        if has_ffr:
+            hdr += f"  {'FFR':>8s}  {'FFR<.85':>7s}"
+            div_len += 19
+        if has_pa:
+            hdr += f"  {'PA(mean)':>10s}  {'PA<0%':>5s}"
+            div_len += 19
+        if has_da:
+            hdr += f"  {'DealAmt':>12s}"
+            div_len += 14
+        if has_cost:
+            hdr += f"  {'RetW/Cost':>9s}  {'RetNoCost':>9s}  {'CostDrag':>8s}"
+            div_len += 32
+        if has_strat:
+            hdr += f"  {'Strategy':>16s}"
+            div_len += 18
+        lines.append(hdr)
+        lines.append("  " + "-" * div_len)
+
+        for eq in execution_quality:
+            row = f"  {eq['loop_id']:>5d}"
+            if has_ffr:
+                ffr_val = f"{eq['ffr_mean']:.4f}" if eq.get("ffr_mean") is not None else "  N/A"
+                ffr_lo = f"{eq.get('days_ffr_below_085', 0):>5d}d" if eq.get("ffr_mean") is not None else "  N/A"
+                row += f"  {ffr_val:>8s}  {ffr_lo:>7s}"
+            if has_pa:
+                pa_val = f"{eq['pa_mean']:.6f}" if eq.get("pa_mean") is not None else "     N/A"
+                pa_neg = f"{eq.get('pa_days_negative', 0):>3d}d" if eq.get("pa_mean") is not None else " N/A"
+                row += f"  {pa_val:>10s}  {pa_neg:>5s}"
+            if has_da:
+                da_val = f"{eq['deal_amount_avg']:,.0f}" if eq.get("deal_amount_avg") is not None else "N/A"
+                row += f"  {da_val:>12s}"
+            if has_cost:
+                rw = f"{eq['ann_ret_with_cost']*100:.1f}%" if eq.get("ann_ret_with_cost") is not None else "N/A"
+                rn = f"{eq['ann_ret_without_cost']*100:.1f}%" if eq.get("ann_ret_without_cost") is not None else "N/A"
+                cd = f"{eq['cost_drag_pct']:.2f}%" if eq.get("cost_drag_pct") is not None else "N/A"
+                row += f"  {rw:>9s}  {rn:>9s}  {cd:>8s}"
+            if has_strat:
+                sv = eq.get("exec_strategy", "N/A")
+                row += f"  {sv:>16s}"
+            lines.append(row)
+
+        # Trend analysis
+        ffr_vals = [eq["ffr_mean"] for eq in execution_quality if eq.get("ffr_mean") is not None]
+        pa_vals = [eq["pa_mean"] for eq in execution_quality if eq.get("pa_mean") is not None]
+        if len(ffr_vals) >= 2:
+            delta = ffr_vals[-1] - ffr_vals[0]
+            trend = "improving" if delta > 0 else "degrading"
+            lines.append(f"\n  FFR Trend: {ffr_vals[0]:.4f} -> {ffr_vals[-1]:.4f} (delta: {delta:+.4f}) [{'^ ' + trend if delta > 0 else 'v ' + trend}]")
+        if len(pa_vals) >= 2:
+            delta = pa_vals[-1] - pa_vals[0]
+            trend = "improving" if delta > 0 else "degrading"
+            lines.append(f"  PA Trend:  {pa_vals[0]:.6f} -> {pa_vals[-1]:.6f} (delta: {delta:+.6f}) [{'^ ' + trend if delta > 0 else 'v ' + trend}]")
+
+        lines.append("")
+
+    # --- Section 16: Analytical Conclusions & Recommendations ---
     lines.append(sep)
     lines.append("  ANALYTICAL CONCLUSIONS & RECOMMENDATIONS")
     lines.append(sep)
@@ -2327,7 +3817,7 @@ def generate_text_report(
         loop_data, evolution_analysis, parallelism_analysis,
         propagation_analysis, feedback_analysis, live_resources,
         convergence_analysis, prompt_issues, code_quality_issues,
-        homogeneity_analysis,
+        homogeneity_analysis, memory_profile, portfolio_analysis,
     )
     for i, c in enumerate(conclusions, 1):
         lines.append(f"  {i}. [{c['category']}] {c['finding']}")
@@ -2350,11 +3840,51 @@ def generate_conclusions(
     prompt_issues: list[dict[str, Any]] | None = None,
     code_quality_issues: list[dict[str, Any]] | None = None,
     homogeneity_analysis: dict[str, Any] | None = None,
+    memory_profile: dict[str, Any] | None = None,
+    portfolio_analysis: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """Generate analytical conclusions and recommendations."""
     conclusions: list[dict[str, str]] = []
 
-    # 0. Code quality bugs (critical - these cause silent training failure)
+    # 0. Memory profile issues (critical - OOM risk)
+    if memory_profile:
+        for mi in memory_profile.get("issues", []):
+            rec = ""
+            if mi["issue"] == "HIGH_COSTEER_INTENSITY":
+                rec = (
+                    "High eval call count causes glibc malloc arena inflation. "
+                    "Consider adding gc.collect() between CoSTEER iterations or "
+                    "setting MALLOC_ARENA_MAX=2 to limit arena count."
+                )
+            elif mi["issue"] == "CONSECUTIVE_MAX_LOOP":
+                rec = (
+                    "Consecutive MAX_LOOP hits = continuous heavy memory churn. "
+                    "Review factor prompt clarity to reduce CoSTEER retries. "
+                    "Consider clearing loop_prev_out for completed loops."
+                )
+            elif mi["issue"] == "NO_LIGHT_LOOPS":
+                rec = (
+                    "All loops require multiple CoSTEER iterations. "
+                    "Factor code templates or field validation should be improved "
+                    "to reduce compile failures."
+                )
+            elif mi["issue"] == "SINGLE_LOOP_OVERLOAD":
+                rec = (
+                    "One loop has exceptionally high work intensity. "
+                    "6+ factors with 5 iterations is an OOM risk factor."
+                )
+            elif mi["issue"] == "SESSION_SNAPSHOT_GROWTH":
+                rec = (
+                    "Session state is growing across loops. "
+                    "Knowledge base embedding accumulation is the likely cause."
+                )
+            conclusions.append({
+                "category": "MEMORY",
+                "finding": f"[{mi['issue']}] {mi['detail']}",
+                "recommendation": rec,
+            })
+
+    # 0.5 Code quality bugs (critical - these cause silent training failure)
     if code_quality_issues:
         for cqi in code_quality_issues:
             conclusions.append({
@@ -2640,6 +4170,45 @@ def generate_conclusions(
             ),
         })
 
+    # Portfolio analysis issues
+    if portfolio_analysis:
+        for pi in portfolio_analysis.get("issues", []):
+            rec = ""
+            if pi["code"] == "LOW_UTILIZATION":
+                rec = "Check if only_tradable=true is set. Low utilization often caused by limit-up stocks wasting TopK slots."
+            elif pi["code"] == "LOW_FFR":
+                rec = "Enable only_tradable=true + forbid_all_trade_at_limit=false in strategy kwargs to skip limit-up stocks."
+            elif pi["code"] == "LOW_WIN_RATE":
+                rec = "Win rate below 45% suggests weak signal. Consider concentrating alpha with smaller TopK or improving factor quality."
+            elif pi["code"] == "NEGATIVE_EXPECTANCY":
+                rec = "Profit factor < 1.0 means strategy loses money on average. Review signal quality and transaction costs."
+            elif pi["code"] == "EXCESSIVE_CHURN":
+                rec = "Very short holding periods increase cost drag. Consider hold_thresh or inertia_bonus to reduce noise-driven turnover."
+            elif pi["code"] == "HIGH_TURNOVER":
+                rec = "High annualized turnover erodes alpha via transaction costs. Consider reducing n_drop or adding turnover inertia."
+            elif pi["code"] == "HIGH_COST_DRAG":
+                rec = "Transaction costs > 2% annualized drag. Reduce turnover or negotiate lower commission rates."
+            elif pi["code"] == "LOW_SHARPE":
+                rec = "Sharpe < 0.5 indicates poor risk-adjusted returns. Improve signal quality or reduce drawdowns."
+            elif pi["code"] == "PROLONGED_DRAWDOWN":
+                rec = "Drawdown > 60 days suggests strategy struggles to recover. Consider diversification or stop-loss mechanisms."
+            conclusions.append({
+                "category": "PORTFOLIO",
+                "finding": f"[{pi['code']}] {pi['detail']}",
+                "recommendation": rec,
+            })
+
+        ts = portfolio_analysis.get("trade_stats")
+        if ts:
+            conclusions.append({
+                "category": "PORTFOLIO",
+                "finding": (
+                    f"Trade stats: {ts['total_trades']} trades, {ts['win_rate_pct']:.1f}% win rate, "
+                    f"profit factor {ts['profit_factor']:.2f}, avg holding {ts['avg_holding_days']:.1f}d."
+                ),
+                "recommendation": "",
+            })
+
     if not conclusions:
         conclusions.append({
             "category": "INFO",
@@ -2671,6 +4240,7 @@ Examples:
     parser.add_argument("--log-dir", default=str(DEFAULT_LOG_DIR), help=f"Log root directory (default: {DEFAULT_LOG_DIR})")
     parser.add_argument("--live-check", action="store_true", help="Include live GPU/process/memory check via WSL")
     parser.add_argument("--json", action="store_true", help="Output machine-readable JSON instead of text report")
+    parser.add_argument("--export-trades", metavar="PATH", help="Export trade records and stock summaries to CSV files ({PATH}_trades.csv, {PATH}_stocks.csv)")
     args = parser.parse_args()
 
     log_dir = Path(args.log_dir) / args.task_id
@@ -2700,6 +4270,7 @@ Examples:
         ld["costeer_detail"] = analyze_costeer_detail(loop_path)
         ld["model_code"] = extract_model_code(loop_path)
         ld["training_log"] = extract_training_log(loop_path)
+        ld["backtest_portfolio"] = extract_backtest_portfolio(loop_path)
 
         # Count factor workspaces from coder result (list of FactorFBWorkspace)
         coder_pkls = _find_pkl_files(loop_path, "coding/coder result")
@@ -2722,6 +4293,9 @@ Examples:
     prompt_issues = analyze_prompt_config_consistency(loop_data, prompt_config)
     code_quality_issues = analyze_model_code_quality(loop_data)
     homogeneity_analysis = analyze_factor_homogeneity(loop_data)
+    memory_profile = analyze_memory_profile(session_obj, loop_data, log_dir)
+    portfolio_analysis = analyze_backtest_portfolio(loop_data)
+    execution_quality = analyze_per_loop_execution_quality(loop_data)
 
     # Live resource check
     live_resources = check_live_resources() if args.live_check else None
@@ -2731,8 +4305,23 @@ Examples:
         loop_data, evolution_analysis, parallelism_analysis,
         propagation_analysis, feedback_analysis, live_resources,
         convergence_analysis, prompt_issues, code_quality_issues,
-        homogeneity_analysis,
+        homogeneity_analysis, memory_profile, portfolio_analysis,
     )
+
+    # CSV export
+    if args.export_trades and portfolio_analysis:
+        trades_path = args.export_trades + "_trades.csv"
+        stocks_path = args.export_trades + "_stocks.csv"
+        trade_records_list = portfolio_analysis.get("trade_records", [])
+        if trade_records_list:
+            trades_df = pd.DataFrame(trade_records_list)
+            trades_df.to_csv(trades_path, index=False)
+            print(f"Exported {len(trade_records_list)} trades to {trades_path}", file=sys.stderr)
+        all_stocks = portfolio_analysis.get("all_stocks_by_pnl", [])
+        if all_stocks:
+            stock_df = pd.DataFrame(all_stocks)
+            stock_df.to_csv(stocks_path, index=False)
+            print(f"Exported {len(all_stocks)} stock summaries to {stocks_path}", file=sys.stderr)
 
     # Output
     if args.json:
@@ -2755,6 +4344,9 @@ Examples:
             "prompt_issues": prompt_issues,
             "code_quality_issues": code_quality_issues,
             "homogeneity_analysis": homogeneity_analysis,
+            "memory_profile": memory_profile,
+            "portfolio_analysis": portfolio_analysis,
+            "execution_quality": execution_quality,
             "live_resources": live_resources,
             "conclusions": conclusions,
         }
@@ -2765,7 +4357,8 @@ Examples:
             evolution_analysis, parallelism_analysis, propagation_analysis,
             feedback_analysis, hyperparam_analysis, convergence_analysis,
             costeer_config, prompt_config, prompt_issues, code_quality_issues,
-            live_resources, homogeneity_analysis,
+            live_resources, homogeneity_analysis, memory_profile,
+            portfolio_analysis, execution_quality,
         ))
 
 

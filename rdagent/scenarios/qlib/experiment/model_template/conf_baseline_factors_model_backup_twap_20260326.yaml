@@ -1,0 +1,128 @@
+qlib_init:
+    provider_uri:
+        day: "/home/lc999/data/qlib_bin"
+        1min: "/home/lc999/data/qlib_minute_bin"
+    region: cn
+    dataset_cache: null
+    expression_cache: null
+market: &market all
+benchmark: &benchmark 000300.SH
+data_handler_config: &data_handler_config
+    start_time: 2018-08-01
+    end_time: 2026-03-10
+    fit_start_time: 2018-08-01
+    fit_end_time: 2022-12-31
+    instruments: *market
+    infer_processors:
+        - class: FilterCol
+          kwargs:
+              fields_group: feature
+              col_list: ["RESI5", "WVMA5", "RSQR5", "KLEN", "RSQR10", "CORR5", "CORD5", "CORR10", 
+                            "ROC60", "RESI10", "VSTD5", "RSQR60", "CORR60", "WVMA60", "STD5", 
+                            "RSQR20", "CORD60", "CORD10", "CORR20", "KLOW"
+                        ]
+        - class: RobustZScoreNorm
+          kwargs:
+              fields_group: feature
+              clip_outlier: true
+        - class: Fillna
+          kwargs:
+              fields_group: feature
+    learn_processors:
+        - class: DropnaLabel
+        - class: CSZScoreNorm
+          kwargs:
+              fields_group: label
+    label: ["Ref($close, -2) / Ref($close, -1) - 1"] 
+
+port_analysis_config: &port_analysis_config
+    executor:
+        class: NestedExecutor
+        module_path: qlib.backtest.executor
+        kwargs:
+            time_per_step: day
+            inner_executor:
+                class: SimulatorExecutor
+                module_path: qlib.backtest.executor
+                kwargs:
+                    time_per_step: 1min
+                    generate_portfolio_metrics: true
+            inner_strategy:
+                class: TWAPStrategy
+                module_path: qlib.contrib.strategy.rule_strategy
+            generate_portfolio_metrics: true
+    strategy:
+        class: TopkDropoutStrategy
+        module_path: qlib.contrib.strategy
+        kwargs:
+            signal: <PRED>
+            topk: 50
+            n_drop: 5
+            only_tradable: true
+            forbid_all_trade_at_limit: false
+    backtest:
+        start_time: 2024-07-01
+        # 避免 Qlib 在回测最后一步访问 calendar_index+1 越界
+        end_time: 2026-03-09
+        account: 100000000
+        benchmark: ~
+        exchange_kwargs:
+            freq: 1min
+            limit_threshold: ["$limit_up", "$limit_down"]
+            deal_price: close
+            open_cost: 0.000095
+            close_cost: 0.000595
+            min_cost: 5
+            trade_unit: 100
+task:
+    model:
+        class: GeneralPTNN
+        module_path: qlib.contrib.model.pytorch_general_nn
+        kwargs:
+            n_epochs: {{ n_epochs }}
+            lr: {{ lr }}
+            early_stop: {{ early_stop }}
+            batch_size: {{ batch_size | default(16384) }}
+            weight_decay: {{ weight_decay }}
+            metric: loss
+            loss: mse
+            n_jobs: 4
+            GPU: 0
+            use_amp: true
+            gradient_accumulation_steps: 1
+            pin_memory: true
+            prefetch_factor: 2
+            persistent_workers: true
+            pt_model_uri: "model.model_cls"
+            pt_model_kwargs: {
+                "num_features": 20,
+                {% if num_timesteps %}num_timesteps: {{ num_timesteps }}{% endif %}
+            }                    
+    dataset:
+        class: {{ dataset_cls | default("DatasetH") }}
+        module_path: qlib.data.dataset
+        kwargs:
+            handler:
+                class: Alpha158
+                module_path: qlib.contrib.data.handler
+                kwargs: *data_handler_config
+            segments:
+                train: [2018-08-01, 2022-12-31]
+                valid: [2023-01-01, 2024-06-30]
+                test: [2024-07-01, 2026-03-10]
+            {% if step_len %}step_len: {{ step_len }}{% endif %}
+    record: 
+        - class: SignalRecord
+          module_path: qlib.workflow.record_temp
+          kwargs: 
+            model: <MODEL>
+            dataset: <DATASET>
+        - class: SigAnaRecord
+          module_path: qlib.workflow.record_temp
+          kwargs: 
+            ana_long_short: False
+            ann_scaler: 252
+        - class: PortAnaRecord
+          module_path: qlib.workflow.record_temp
+          kwargs: 
+            config: *port_analysis_config

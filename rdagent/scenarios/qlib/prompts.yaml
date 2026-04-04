@@ -86,7 +86,8 @@ model_hypothesis_specification: |-
   1. First, observe and analyze the overall experimental progression in `hypothesis_and_feedback`. Analyze where the previous model designs were inadequate — whether it was due to parameter settings, architectural flaws, or a lack of novelty (proposing entirely new concepts is highly encouraged as long as they demonstrate effectiveness).
   2. Second, `last_hypothesis_and_feedback` and `sota_hypothesis_and_feedback` are key references you should pay close attention to. You can choose to optimize based on either of them or generate new ideas to form hypotheses and experiments.
   3. If there is no prior experiment or result available at the beginning, you can start by implementing a simple and small architecture.
-  4. If a series of attempts fail to achieve SOTA, consider exploring entirely new directions; at this point, it is acceptable to return to simple architectures.
+  4. If a series of attempts fail to achieve SOTA, consider exploring entirely new directions; at this point, it is acceptable to return to simple architectures. Also consider switching model paradigm (e.g., TimeSeries → Tabular MLP, see dimension D1).
+     **模型 vs 因子 SOTA 基线预期差异**：因子 Loop 的 SOTA 基线（LightGBM IC~0.054, AnnRet~100%）不能直接作为模型 Loop 的参考。LightGBM 在 Alpha158 特征上天然优于 RNN ~40%（Qlib 官方基准验证）。切换到 PyTorch 模型后：IC 0.04-0.05 即为优秀，年化收益 80%+ 为良好。首个模型 Loop 不必超越因子 SOTA，关键是建立模型基线后持续改进。
   5. Focus exclusively on the architecture of PyTorch models. Each hypothesis should specifically address architectural decisions along the following EVOLUTION DIMENSIONS (explore them progressively, one at a time). When proposing a hypothesis, you MUST reference the dimension by its ID (e.g. "A1", "B2"):
      **Category A — Architecture Dimensions:**
      - **A1 Temporal Modeling**: RNN/LSTM/GRU → Temporal Attention → Multi-scale temporal convolution
@@ -101,6 +102,13 @@ model_hypothesis_specification: |-
      - **C1 Learning Rate & Schedule**: Adjust lr, consider cosine annealing or warmup+decay
      - **C2 Regularization Strength**: Adjust weight_decay, dropout rate
      - **C3 Training Duration**: Adjust n_epochs, early_stop, batch_size
+     **Category D — Model Paradigm Switch (高优先级探索):**
+     - **D1 MLP Tabular**: 当 GRU/Transformer 连续 2+ 轮未突破 SOTA 时，尝试切换到 DatasetH + MLP 范式。历史数据显示 MLP Tabular 接受率 75% (vs GRU 33%)，年化收益可达 106%。关键: model_type 设为 "Tabular"，batch_size 设为 4096-16384，lr 设为 5e-4~1e-3，weight_decay 设为 1e-4~2e-4。
+     **演进前置条件 (MUST CHECK before choosing a dimension):**
+     - 探索 A2/A3/A4 之前，必须先有 A1 (GRU/LSTM 基线) ACCEPTED
+     - 探索 B2/B3 之前，必须先有 B1 (Dropout+LayerNorm) 基线
+     - 探索 C2/C3 之前，必须先验证 C1 (Learning Rate) 在合理范围内
+     - 每次只引入一个新维度，不得同时引入 2+ 个未验证维度
      DO NOT do any feature-specific processing. Instead, you can propose innovative transformations on the input time-series data to enhance model training effectiveness.
   6. Avoid including aspects unrelated to architecture, such as input features or optimization strategies. When proposing a hypothesis, explicitly state which EVOLUTION DIMENSION ID (e.g. A1, B2, C1) from item 5 it targets.
   7. Sometimes, when training performance is poor, adjusting hyperparameters (Category C dimensions) can also be an effective strategy for improvement.
@@ -112,7 +120,11 @@ model_hypothesis_specification: |-
       - **Tabular 模型** (DatasetH): `batch_size: 4096-16384`，`n_epochs: 100-200`，`early_stop: 10-20`
       - **TimeSeries 模型** (TSDatasetH): `batch_size: 2048-8192`（小模型<1MB在16GB GPU上内存充裕，应充分利用GPU并行能力），`n_epochs: 200-300`，`early_stop: 20-30`
       - **Learning Rate**: GRU/LSTM 推荐 `2e-4 ~ 5e-4`，Transformer 推荐 `1e-4 ~ 5e-4`，MLP/Tabular 推荐 `5e-4 ~ 1e-3`
-      - **Weight Decay**: 小模型(<0.5MB) 推荐 `1e-5`，较大模型 推荐 `1e-4 ~ 1e-3`
+      - **Weight Decay (按模型类型，非模型大小)**:
+        - GRU/LSTM: `0 ~ 1e-5`（GRU 内部门控机制已具正则化效果，高 wd 抑制梯度。QE 数据库 TOP5 中 4 个使用 1e-5）
+        - Transformer: `5e-5 ~ 1e-4`
+        - MLP Tabular: `1e-4 ~ 2e-4`
+        - **严禁**: GRU/LSTM 使用 weight_decay ≥ 1e-3（已验证会导致训练崩溃，IC 从 0.055 跌至 0.006）
     - 选择超参数时，请在 hypothesis 中简要说明理由（如"TSDatasetH step_len=20，模型0.16MB，16GB GPU内存充裕，batch_size 选择 4096 以提高GPU利用率"）。
   9. Use standard libraries for baseline models, then gradually explore custom architecture designs.
      COMPLEXITY CONTROL RULES:
@@ -126,8 +138,9 @@ model_hypothesis_specification: |-
 
 factor_hypothesis_specification: |-
   1. **因子生成策略（Factors per Generation）：**
-    - **第一轮**: 产生 4-6 个因子，覆盖 `db_*`/`mf_*`/`bb_*`/`cp_*` 四类数据集中至少三个。建议 1-2 个基础因子验证管道 + 2-3 个跨数据集交叉因子 + 1 个筹码形态因子。
-    - **后续轮次**: 4-8 个因子，根据 IC 反馈深化有效方向。每轮必须包含至少 1 个 `bb_*`（基本面）因子和 1 个 `cp_*`（筹码）因子。
+    - **第一轮**: 产生 2-3 个因子，覆盖 `db_*`/`mf_*`/`bb_*`/`cp_*`/`sw2_*` 五类数据集中至少两个。建议 1 个跨数据集交叉因子 + 1 个筹码形态或行业板块因子（可选第 3 个基础因子验证管道）。
+    - **后续轮次**: 严格 2 个因子。因子质量远比数量重要——2 个深思熟虑的高质量因子胜过 4 个平庸因子。每个因子必须有明确的经济学逻辑和差异化的数据来源。各轮次间交替覆盖 `bb_*`（基本面）、`cp_*`（筹码）、`sw2_*`（行业板块）三类数据，每轮至少涵盖其中两类。
+    - **因子效能递减警告**：随着 SOTA 因子池增长，新增因子的边际 IC 贡献会快速衰减。当 SOTA 因子已有 6 个以上时，应优先设计与现有因子正交性最强的方向（使用完全不同的字段前缀组合），而非追求数量。
     - 同轮因子在类型、数据来源和数学结构上须保持多样性，禁止仅改变窗口/参数的微调版本。
   2. **Gradual Complexity Increase:**
     - Introduce more complex factors (e.g. multi-dimensional raw data, cross-sectional ranking, non-linear transformations, ratio structures) as more experimental results are gathered. Combine factors only after simpler ones are tested.
@@ -136,10 +149,19 @@ factor_hypothesis_specification: |-
     - If multiple consecutive iterations fail to produce factors surpassing SOTA, switch to a new direction (can restart with simple factors).
     - If optimizing a specific type of factor, proceed from simple to complex.
   4. **数据源与交叉因子（Data Source & Cross-Dataset — 高优先级）：**
-    - **字段硬约束**：只能使用 source data 中 schema 描述的字段（db_* 16字段、mf_* 44字段、bb_* 15字段、cp_* 9字段、预计算6字段、日频价量6字段，共96字段）。禁止编造任何不在 schema 中的字段名。如果你不确定某个字段是否存在，请查阅 source data 部分提供的 schema 信息。当前数据集不含行业分类、新闻舆情等数据，禁止设计依赖这些不存在数据源的因子。
-    - **充分利用数据广度**：当前数据集包含 44 个资金流字段（含主力/特大单/全档净流入及其 5d/20d 滚动）、15 个基本面字段（含资产结构/盈利能力/估值）、9 个筹码字段（含成本分位/历史极值/胜率），绝大多数因子研发只用了不到 15% 的可用字段。**每轮假设必须主动探索历史未使用过的字段**，请查阅 source data 中的 schema 了解各前缀（db_*/mf_*/bb_*/cp_*）下的全部可用字段，避免反复使用相同的少数字段。
-    - 每轮至少 2 个因子必须依赖 `db_*`/`mf_*`/`bb_*`/`cp_*` 字段，不得全部只用日频价量。
+    - **字段硬约束**：只能使用 source data 中 schema 描述的字段（db_* 16字段、mf_* 44字段、bb_* 15字段、cp_* 9字段、sw2_* 22字段、预计算6字段、日频价量6字段，共118字段）。禁止编造任何不在 schema 中的字段名。如果你不确定某个字段是否存在，请查阅 source data 部分提供的 schema 信息。当前数据集不含新闻舆情等数据，禁止设计依赖这些不存在数据源的因子。
+    - **充分利用数据广度**：当前数据集包含 44 个资金流字段（含主力/特大单/全档净流入及其 5d/20d 滚动）、15 个基本面字段（含资产结构/盈利能力/估值）、9 个筹码字段（含成本分位/历史极值/胜率）、22 个申万L2行业板块字段（含行业OHLCV/估值/资金流），绝大多数因子研发只用了不到 15% 的可用字段。**每轮假设必须主动探索历史未使用过的字段**，请查阅 source data 中的 schema 了解各前缀（db_*/mf_*/bb_*/cp_*/sw2_*）下的全部可用字段，避免反复使用相同的少数字段。**特别注意：资金流字段（mf_*）是当前覆盖率最低的数据类别**（44个字段中历史仅使用约20%），包含多层级资金博弈（elg/lg/md/sm 特大单/大单/中单/小单）、多时间窗口（net_amt_5d/net_amt_20d 滚动）、买卖分拆（buy/sell）等丰富维度，应优先探索未使用的 mf_* 字段及其交叉组合。
+    - 每轮至少 2 个因子必须依赖 `db_*`/`mf_*`/`bb_*`/`cp_*`/`sw2_*` 字段，不得全部只用日频价量。
     - **跨数据集交叉是突破 alpha 瓶颈的关键**：每轮建议至少 2 个跨数据集交叉因子，方向包括：筹码×资金流、基本面×筹码、资金流×估值、筹码分布形态(cp_cost_*)、多层级资金博弈(elg/lg/md/sm)、资金流×价格背离等。交叉须来自不同前缀数据集，优先用比率/乘积/条件分支等非线性组合。
+    - **行业板块数据（sw2_*）是当前使用率最低的数据维度**（22个字段覆盖行业OHLCV/估值/多档资金流，应尽快充分验证其 alpha 贡献）。探索方向须覆盖多种数学结构，避免全部使用比值：
+      - **比值结构**：个股指标 / 行业指标，剥离行业 beta（如 `db_pe / sw2_pe` 行业估值偏离）
+      - **时序结构**：行业指标的 N 日动量/反转/突破（如 `sw2_pct_change` 滚动求和或 `sw2_close` 创 N 日新高）
+      - **条件分支**：当行业资金流方向与个股相反时触发的反转信号（如 `sign(mf_net_amt) != sign(sw2_mf_net_amt)` 时的超额收益）
+      - **截面排名**：个股在同行业内的资金流/估值分位数排名（如个股 `mf_net_amt` 在行业 `sw2_mf_net_amt` 中的占比分位）
+      - **sw2 × 资金流交叉**：个股主力资金流相对行业整体的强度，如 `mf_main_net_amt / sw2_mf_net_amt`（个股主力占行业净流入比重）、`mf_elg_net_amt - sw2_mf_buy_elg_amt * stock_weight`（超大单超额流入），捕捉个股在行业资金流中的相对地位
+      - **sw2 × 基本面交叉**：个股基本面指标相对行业的偏离，如 `bb_profit_yoy - sw2_pct_change`（盈利增速 vs 行业涨幅背离）、`bb_pe_dyn / sw2_pe`（个股动态PE相对行业PE的溢价率），捕捉基本面与行业定价的错配
+      - **sw2 × 筹码交叉**：个股筹码结构与行业估值的关系，如 `cp_winner_rate * sign(sw2_pct_change)`（行业上涨时获利盘比例的信号含义反转）、`(cp_cost_50pct / db_close) * (sw2_pe / db_pe)`（筹码偏离度 × 行业估值偏离度）
+      - **行业状态指标**：行业趋势/动量/反转状态因子，如 `sw2_close / sw2_close.rolling(20).mean()`（行业均线偏离度）、`sw2_vol / sw2_vol.rolling(10).mean()`（行业放量程度），作为条件变量调节其他因子的含义
     - **禁止每轮重复相同的交叉组合**，必须在 reason 中说明与历史交叉因子的区别。
   5. **差异性与去重（Differentiation & Dedup — 必须严格遵守）：**
     - 避免设计与 SOTA 因子库中已有的动量/波动率/成交量/K线形态等传统价量因子高度类似的指标。新因子须在 **数据来源** 或 **数学结构** 上有明显差异。
@@ -147,10 +169,10 @@ factor_hypothesis_specification: |-
     - **"真正不同"须满足至少一项**：使用了历史中从未用过的字段组合 / 引入全新数学结构(条件分支/分组统计/跨期差分/截面排名归一化) / 结合两个不同数据集的未曾出现过的交叉组合。
     - 在 reason 中简要说明："该因子与历史上最相近的因子 `XXX` 的核心区别是 `YYY`"。
   6. **字段使用审计与未探索字段优先（Field Usage Audit — 必须执行）：**
-    - **审计步骤（每轮必做）**：在提出新因子前，回顾 `hypothesis_and_feedback` 中所有历史 Trial 的因子 variables，按前缀分类统计已使用和未使用的 db_*/mf_*/bb_*/cp_* 字段。
+    - **审计步骤（每轮必做）**：在提出新因子前，回顾 `hypothesis_and_feedback` 中所有历史 Trial 的因子 variables，按前缀分类统计已使用和未使用的 db_*/mf_*/bb_*/cp_*/sw2_* 字段。
     - **新字段强制配额**：每轮至少 2 个因子必须使用历史上从未出现过的字段（在任何历史 Trial 的 variables 中均未出现的字段）。
     - **薄弱类别优先**：如果某个前缀类别在历史中使用次数明显少于其他类别，本轮应优先从该类别选择字段。
-    - **在 reason 中报告**：必须简要列出"历史已使用字段前缀分布：db_* N个, mf_* N个, bb_* N个, cp_* N个；本轮新引入字段：[字段列表]"。
+    - **在 reason 中报告**：必须简要列出"历史已使用字段前缀分布：db_* N个, mf_* N个, bb_* N个, cp_* N个, sw2_* N个；本轮新引入字段：[字段列表]"。
   7. **因子质量自检（Factor Quality Self-Check）：**
     - 覆盖率：NaN 不超过 30%；区分度：截面 std 不为 0；时效性：测试期(2024-07~2025-12)仍有预测力；相关性：与 SOTA 因子库已有因子截面相关 < 0.7。
     - 超过 SOTA 的因子已入库，禁止重复实现。
@@ -196,12 +218,12 @@ model_experiment_output_format: |-
             "hyperparameter_name_2": "value of hyperparameter 2",
             "hyperparameter_name_3": "value of hyperparameter 3"
         },
-        "training_hyperparameters": {  # All values are for reference; you SHOULD ADJUST them based on model_type and training log
+        "training_hyperparameters": {  # IMPORTANT: Values below are DEFAULTS for MLP Tabular. You MUST adjust based on model_type!
             "n_epochs": "100",  # Tabular: 100-200, TimeSeries: 200-300, 配合 early_stop 防过拟合
-            "lr": "1e-3",  # GRU/LSTM: 2e-4~5e-4, Transformer: 1e-4~5e-4, MLP: 5e-4~1e-3
+            "lr": "1e-3",  # GRU/LSTM: 2e-4~3e-4, Transformer: 1e-4~5e-4, MLP: 5e-4~1e-3. GRU 黄金值 3e-4
             "early_stop": 20,  # Tabular: 10-20, TimeSeries: 20-30
-            "batch_size": 16384,  # Tabular(DatasetH): 4096-16384, TimeSeries(TSDatasetH): 2048-8192
-            "weight_decay": 1e-4,  # 小模型: 1e-5, 大模型: 1e-4~1e-3
+            "batch_size": 16384,  # Tabular(DatasetH): 4096-16384, TimeSeries(TSDatasetH): 4096(推荐)~8192
+            "weight_decay": "SEE model_hypothesis_specification §8",  # GRU: 1e-5, Transformer: 5e-5~1e-4, MLP: 1e-4~2e-4. 按模型类型选择！
         }
         "model_type": "Tabular or TimeSeries"  # Should be one of "Tabular" or "TimeSeries"
     },
@@ -231,28 +253,33 @@ factor_feedback_generation:
           - Avoid re-implementing previous factors as those that surpassed SOTA are already included in the factor library and will be used in each run.
       3. Final Goal: To continuously accumulate factors that surpass each iteration to maintain the best SOTA.
     4. **数据边界约束（New Hypothesis 必须遵守）：**
-      - `New Hypothesis` 只能建议使用以下数据字段：`db_*`（日频行情/估值）、`mf_*`（资金流）、`bb_*`（基本面/财务）、`cp_*`（筹码分布）、以及日频价量（open/close/high/low/volume/amount）。
-      - **禁止建议不存在的数据**：当前数据集不包含行业分类、新闻舆情、分析师预期、宏观经济等数据。禁止在 New Hypothesis 中提及 sentiment_score、行业轮动、宏观因子等。
+      - `New Hypothesis` 只能建议使用以下数据字段：`db_*`（日频行情/估值）、`mf_*`（资金流）、`bb_*`（基本面/财务）、`cp_*`（筹码分布）、`sw2_*`（申万L2行业板块）、以及日频价量（open/close/high/low/volume/amount）。
+      - **禁止建议不存在的数据**：当前数据集不包含新闻舆情、分析师预期、宏观经济等数据。禁止在 New Hypothesis 中提及 sentiment_score、宏观因子等。
     5. **反重复约束：**
       - `New Hypothesis` 应与当前实验中的因子有明显差异——不同的字段组合、不同的数学结构、或不同的数据类别。
-      - 如果当前实验的因子集中使用了某一前缀类别的字段（如大量使用 `mf_*`、`db_*`、`bb_*` 或 `cp_*` 中的某一类），`New Hypothesis` 应优先建议探索当前实验中使用较少或完全未使用的前缀类别。
+      - 如果当前实验的因子集中使用了某一前缀类别的字段（如大量使用 `mf_*`、`db_*`、`bb_*`、`cp_*` 或 `sw2_*` 中的某一类），`New Hypothesis` 应优先建议探索当前实验中使用较少或完全未使用的前缀类别。
       - 禁止建议仅更换窗口参数、归一化方式或变量名的微调方案。
     6. **未覆盖数据类别探索：**
-      - 审查当前实验因子使用的 variables，识别哪些数据前缀（db_*/mf_*/bb_*/cp_*）未被覆盖或覆盖不足。
+      - 审查当前实验因子使用的 variables，识别哪些数据前缀（db_*/mf_*/bb_*/cp_*/sw2_*）未被覆盖或覆盖不足。
       - `New Hypothesis` 优先建议探索当前实验未触及的数据类别。
+      - **行业板块因子优先**：如果当前实验中 sw2_* 字段使用不足（少于 2 个因子涉及 sw2_*），New Hypothesis **必须**包含至少一个行业板块方向的因子建议，具体方向参见 factor_hypothesis_specification 第 4 条中的行业因子探索方向。
 
     When judging the results (SOTA 替换判断标准 — 三路径规则):
       **Path A — 全面超越:** 如果所有核心指标 (IC, annualized_return, max_drawdown, information_ratio) 均优于 SOTA，即使每个指标的提升幅度 < 10%，也设置 `Replace Best Result` 为 "yes"。
       **Path B — 单项突破:** 如果仅部分指标优于 SOTA（其他指标弱于 SOTA），则需要至少一个超越指标的提升幅度 ≥ 10% 才可设置 `Replace Best Result` 为 "yes":
          - IC improvement ≥ 10%:  (new_IC - sota_IC) / sota_IC ≥ 0.10
          - Annualized return improvement ≥ 10%:  (new_return - sota_return) / sota_return ≥ 0.10
-         - Max drawdown improvement ≥ 10%:  (sota_drawdown - new_drawdown) / abs(sota_drawdown) ≥ 0.10  (i.e. drawdown becomes less negative)
+         - Max drawdown improvement ≥ 10%:  (new_drawdown - sota_drawdown) / abs(sota_drawdown) ≥ 0.10  (i.e. drawdown becomes less negative, e.g. -0.10 is better than -0.15)
          - Information ratio improvement ≥ 10%:  (new_IR - sota_IR) / sota_IR ≥ 0.10
-      **Path C — IC 绝对值门槛:** 如果因子组合 IC 绝对值 ≥ 0.055，无论其他指标如何，设置 `Replace Best Result` 为 "yes"。（IC ≥ 0.055 表明因子组合已具有实质性的预测能力。）
+      **Path C — IC 绝对值门槛:** 如果因子组合 IC 绝对值 ≥ 0.055，设置 `Replace Best Result` 为 "yes"。但仍需遵守 Rejection rules：如果所有核心指标均劣于 SOTA，必须 reject。（IC ≥ 0.055 表明因子组合已具有实质性的预测能力。）
       **Path D — 年化收益超越:** 如果因子组合年化收益（annualized_return）高于 SOTA 的年化收益，无论其他指标如何，设置 `Replace Best Result` 为 "yes"。（年化收益是因子组合价值的最终体现。）
       **Rejection rules:**
         - 如果不满足 Path A/B/C/D 任何一条，设置 `Replace Best Result` 为 "no"。
         - **禁止接受退化:** 如果所有核心指标 (IC, annualized_return, max_drawdown, information_ratio) 均弱于 SOTA，必须 reject。
+        - **多指标退化保护:** 如果 4 个核心指标中有 3 个或更多退化超过 10%（即 (sota - new) / abs(sota) ≥ 0.10），即使有 1 个指标改善也必须 reject。这防止以单一指标的改善掩盖其他指标的严重退化。
+          示例: IC 从 0.055 降至 0.048 (-12.7%), 年化收益从 1.06 降至 0.82 (-22.6%), 信息比率从 4.36 降至 3.80 (-12.8%), 但最大回撤从 -0.135 改善至 -0.110 (+18.5%) → 3/4 指标退化超 10%, 必须 REJECT。
+        - **年化收益保护:** 如果 annualized_return 退化超过 10%（即 (sota_return - new_return) / abs(sota_return) ≥ 0.10），仅凭 max_drawdown 改善不能通过 Path B。此时需要 IC 或 information_ratio 中至少一个也有 ≥10% 改善才可通过 Path B。（回撤改善不能以牺牲年化收益为代价。）
+          示例: 年化收益从 1.078 降至 0.944 (-12.4%), 但最大回撤从 -0.149 改善至 -0.125 (+16.1%)。由于 IC 仅 -1.2%、IR 也退化 -10.1%，均未改善 ≥10% → 不满足补偿条件 → 必须 REJECT。
         - 当结果接近但未达到 SOTA 时，重点诊断 WHY 并建议具体的新方向。
 
     Consider Changing Direction for Significant Gaps with SOTA:
@@ -283,13 +310,6 @@ factor_feedback_generation:
     {% endfor %}
     Combined Results:
     {{ combined_result }}
-
-    {% if history_factor_summary %}
-    {{ history_factor_summary }}
-    你的 New Hypothesis 必须避免与上述历史因子重复（包括仅改变窗口/归一化/变量名的变体）。
-    {% endif %}
-
-    请注意: 你的 New Hypothesis 只能建议使用 db_*/mf_*/bb_*/cp_* 前缀字段和日频价量字段。禁止建议不存在的数据源（如 sentiment_score、行业分类、宏观指标）。New Hypothesis 应与当前因子在字段组合和数学结构上有明显差异，且应优先建议探索当前实验中使用较少或完全未使用的前缀类别。
 
     Analyze the combined result in the context of its ability to:
     1. Support or refute the hypothesis.
@@ -346,11 +366,17 @@ model_feedback_generation:
     Training Log: {{ exp.stdout }}
     Result: {{ exp_result }}
 
-    # When judging the results:
+    # When judging the results (模型 SOTA 替换判断标准):
     1. **Recommendation for Replacement:**
-      - If the new model's performance shows an improvement in the annualized return, recommend it to replace the current SOTA result.
-      - Minor variations in other metrics are acceptable as long as the annualized return improves.
-    2.  Consider Changing Direction When Results Are Significantly Worse Than SOTA:
+      - **Path A — 全面超越:** 如果所有核心指标 (IC, annualized_return, max_drawdown, information_ratio) 均优于 SOTA，设置 Decision 为 true。
+      - **Path B — 单项突破:** 如果仅部分指标优于 SOTA，则需要至少一个超越指标的提升幅度 ≥ 10% 才可设置 Decision 为 true。
+      - **Path C — IC 绝对值门槛:** 如果模型 IC 绝对值 ≥ 0.055，设置 Decision 为 true。但仍需遵守 Rejection rules（第2条）：如果所有核心指标均劣于 SOTA，必须设置 Decision 为 false。
+      - **Path D — 年化收益超越:** 如果年化收益高于 SOTA 的年化收益，设置 Decision 为 true。
+    2. **Rejection rules:**
+      - 如果所有核心指标均弱于 SOTA，必须设置 Decision 为 false。
+      - **多指标退化保护:** 如果 4 个核心指标 (IC, annualized_return, max_drawdown, information_ratio) 中有 3 个或更多退化超过 10%，即使有 1 个指标改善也必须设置 Decision 为 false。
+      - **年化收益保护:** 如果 annualized_return 退化超过 10%，仅凭 max_drawdown 改善不能设置 Decision 为 true。此时需要 IC 或 information_ratio 中至少一个也有 ≥10% 改善才可设置 Decision 为 true。
+    3. Consider Changing Direction When Results Are Significantly Worse Than SOTA:
       - If the new results significantly worse than the SOTA, consider exploring a new direction, like change a model architecture.
 
 action_gen:

@@ -107,12 +107,12 @@ factor_hypothesis_specification: |-
     - If multiple consecutive iterations fail to produce factors surpassing SOTA, consider switching to a new direction and can starting with simple factors again.
     - If optimizing a specific type of factor, proceed from simple to complex.
   5. **数据源约束（Data Source Constraints — 高优先级）：**
-    - **字段硬约束**：只能使用 source data 中 schema 描述的字段（db_* 16字段、mf_* 44字段、bb_* 15字段、cp_* 9字段、预计算6字段、日频价量6字段，共96字段）。禁止编造任何不在 schema 中的字段名。当前数据集不含行业分类、新闻舆情等数据，禁止设计依赖这些不存在数据源的因子。
+    - **字段硬约束**：只能使用 source data 中 schema 描述的字段（db_* 16字段、mf_* 44字段、bb_* 15字段、cp_* 9字段、sw2_* 22字段、预计算6字段、日频价量6字段，共118字段）。禁止编造任何不在 schema 中的字段名。当前数据集不含新闻舆情等数据，禁止设计依赖这些不存在数据源的因子。
     - **充分利用数据广度**：当前数据集包含 44 个资金流字段（含主力/特大单/全档净流入及其 5d/20d 滚动）、15 个基本面字段（含资产结构/盈利能力/估值）、9 个筹码字段（含成本分位/历史极值/胜率）。**每轮假设必须主动探索历史未使用过的字段**。
-    - 每轮至少 2 个因子必须依赖 `db_*`/`mf_*`/`bb_*`/`cp_*` 字段，不得全部只用日频价量。
+    - 每轮至少 2 个因子必须依赖 `db_*`/`mf_*`/`bb_*`/`cp_*`/`sw2_*` 字段，不得全部只用日频价量。
   6. **Avoid Trivial Price-Volume Replication（避免平庸价量重复）：**
     - 当前 SOTA 因子库已经广泛覆盖了基于日频价量的动量、波动率、成交量放大、K 线形态等传统信号。请避免再设计与这些因子在形式上高度类似的指标，例如简单的 `past N-day return`、`volume spike`、`moving average crossover` 等轻微变体。
-    - 新因子应当在 **数据来源**（如资金流 mf_*、基本面 bb_*、筹码分布 cp_*、估值/市值 db_* 等）或 **数学结构**（如非线性组合、比率结构、归一化方式）上相对于现有 SOTA 因子有明显差异，而不是对已有信号做线性变换或简单平移缩放。
+    - 新因子应当在 **数据来源**（如资金流 mf_*、基本面 bb_*、筹码分布 cp_*、估值/市值 db_*、行业板块 sw2_* 等）或 **数学结构**（如非线性组合、比率结构、归一化方式）上相对于现有 SOTA 因子有明显差异，而不是对已有信号做线性变换或简单平移缩放。
   7. **Diversification & Dissimilarity（增强差异性）：**
     - 在同一轮中生成的多个因子之间，应尽量减少高度同质化的设计，避免只是改变窗口长度或简单参数（例如仅将 10 日动量改成 20 日动量）。
     - 新因子的一个重要目标是：在横截面上与典型价量动量/成交量类因子不要过高相关。你可以通过引入资金流结构(mf_*)、基本面特征(bb_*)、筹码分布(cp_*)等信息来降低与传统价量信号的线性相关性。
@@ -126,7 +126,7 @@ factor_hypothesis_specification: |-
     - 如果需要预测未来收益，应该使用滚动窗口的统计特征或历史模式
     - 例如：使用过去 5 日的收盘价预测未来收益，而不是直接访问未来 5 日的收盘价
   10. **字段使用审计与未探索字段优先：**
-    - 在提出新因子前，回顾历史因子的 variables，识别哪些 db_*/mf_*/bb_*/cp_* 字段已用、哪些从未用。
+    - 在提出新因子前，回顾历史因子的 variables，识别哪些 db_*/mf_*/bb_*/cp_*/sw2_* 字段已用、哪些从未用。
     - 每轮至少 2 个因子必须使用历史上从未用过的字段。
     - 如果某前缀类别使用偏少，本轮应优先从该类别选择字段。
     - 在 reason 中简要说明历史字段覆盖情况和本轮新引入的字段。
@@ -206,14 +206,14 @@ factor_feedback_generation:
           - Avoid re-implementing previous factors as those that surpassed SOTA are already included in the factor library and will be used in each run.
       3. Final Goal: To continuously accumulate factors that surpass each iteration to maintain the best SOTA.
     4. **数据边界约束（New Hypothesis 必须遵守）：**
-      - `New Hypothesis` 只能建议使用以下数据字段：`db_*`（日频行情/估值）、`mf_*`（资金流）、`bb_*`（基本面/财务）、`cp_*`（筹码分布）、以及日频价量（open/close/high/low/volume/amount）。
-      - **禁止建议不存在的数据**：当前数据集不包含行业分类、新闻舆情、分析师预期、宏观经济等数据。禁止在 New Hypothesis 中提及 sentiment_score、行业轮动、宏观因子等。
+      - `New Hypothesis` 只能建议使用以下数据字段：`db_*`（日频行情/估值）、`mf_*`（资金流）、`bb_*`（基本面/财务）、`cp_*`（筹码分布）、`sw2_*`（申万L2行业板块）、以及日频价量（open/close/high/low/volume/amount）。
+      - **禁止建议不存在的数据**：当前数据集不包含新闻舆情、分析师预期、宏观经济等数据。禁止在 New Hypothesis 中提及 sentiment_score、宏观因子等。
     5. **反重复约束：**
       - `New Hypothesis` 应与当前实验中的因子有明显差异——不同的字段组合、不同的数学结构、或不同的数据类别。
-      - 如果当前实验的因子集中使用了某一前缀类别的字段（如大量使用 `mf_*`、`db_*`、`bb_*` 或 `cp_*` 中的某一类），`New Hypothesis` 应优先建议探索当前实验中使用较少或完全未使用的前缀类别。
+      - 如果当前实验的因子集中使用了某一前缀类别的字段（如大量使用 `mf_*`、`db_*`、`bb_*`、`cp_*` 或 `sw2_*` 中的某一类），`New Hypothesis` 应优先建议探索当前实验中使用较少或完全未使用的前缀类别。
       - 禁止建议仅更换窗口参数、归一化方式或变量名的微调方案。
     6. **未覆盖数据类别探索：**
-      - 审查当前实验因子使用的 variables，识别哪些数据前缀（db_*/mf_*/bb_*/cp_*）未被覆盖或覆盖不足。
+      - 审查当前实验因子使用的 variables，识别哪些数据前缀（db_*/mf_*/bb_*/cp_*/sw2_*）未被覆盖或覆盖不足。
       - `New Hypothesis` 优先建议探索当前实验未触及的数据类别。
 
     When judging the results:
@@ -288,7 +288,7 @@ factor_feedback_generation:
     你的 New Hypothesis 必须避免与上述历史因子重复（包括仅改变窗口/归一化/变量名的变体）。
     {% endif %}
 
-    请注意: 你的 New Hypothesis 只能建议使用 db_*/mf_*/bb_*/cp_* 前缀字段和日频价量字段。禁止建议不存在的数据源（如 sentiment_score、行业分类、宏观指标）。New Hypothesis 应与当前因子在字段组合和数学结构上有明显差异，且应优先建议探索当前实验中使用较少或完全未使用的前缀类别。
+    请注意: 你的 New Hypothesis 只能建议使用 db_*/mf_*/bb_*/cp_*/sw2_* 前缀字段和日频价量字段。禁止建议不存在的数据源（如 sentiment_score、宏观指标）。New Hypothesis 应与当前因子在字段组合和数学结构上有明显差异，且应优先建议探索当前实验中使用较少或完全未使用的前缀类别。
 
     Analyze the combined result in the context of its ability to:
     1. Support or refute the hypothesis.

@@ -206,7 +206,7 @@ qlib_factor_from_report_rich_style_description : |-
 qlib_factor_experiment_setting: |-
   | Dataset | Model    | Factors       | Data Split                                    |
   |---------|----------|---------------|-------------------------------------------------|
-  | AIstock A-share (non-ST, non-delisted)  | GRU_TimeSeries_Model | Alpha158 Plus + AIstock factors | Train: 2010-01-07 to 2018-12-31 <br> Valid: 2019-01-01 to 2020-12-31 <br> Test &nbsp;: 2021-01-01 to 2025-12-01 |
+  | AIstock A-share (non-ST, non-delisted)  | GRU_TimeSeries_Model | Alpha158 Plus + AIstock factors | Train: 2010-01-07 to 2018-12-31 <br> Valid: 2019-01-01 to 2020-12-31 <br> Test &nbsp;: 2021-01-01 to 2026-03-10 |
 
   **Important Note: Stock Code Format**
   - Although the dataset name is "AIstock A-share", all original HDF5/Parquet data in `instrument` are already unified in **Qlib style** (e.g., `000001.SZ`, `600000.SH`).
@@ -297,7 +297,7 @@ qlib_model_rich_style_description: |-
 qlib_model_experiment_setting: |-
   | Dataset | Model    | Factors       | Data Split                                    |
   |---------|----------|---------------|-------------------------------------------------|
-  | AIstock A-share (non-ST, non-delisted)  | 例如 GRU_TimeSeries_Model（也可替换为 LGB/MLP/Transformer 等其它模型） | 20 factors (Alpha158)  | Train: 2010-01-07 to 2018-12-31 <br> Valid: 2019-01-01 to 2020-12-31 <br> Test &nbsp;: 2021-01-01 to 2025-12-01 |
+  | AIstock A-share (non-ST, non-delisted)  | 例如 GRU_TimeSeries_Model（也可替换为 LGB/MLP/Transformer 等其它模型） | 20 factors (Alpha158)  | Train: 2010-01-07 to 2018-12-31 <br> Valid: 2019-01-01 to 2020-12-31 <br> Test &nbsp;: 2021-01-01 to 2026-03-10 |
 
   **Important Note: Stock Code Format**
   - Although the dataset name is "AIstock A-share", all data sources in `instrument` are already unified in **Qlib style** (e.g., `000001.SZ`, `600000.SH`).
@@ -481,12 +481,12 @@ qlib_factor_interface: |-
       - 使用 `how="left"` 保留所有 daily_pv.h5 的行，只添加存在的字段
       - 如果 static_factors.parquet 不存在或缺少字段，可以继续使用纯价量因子，不要强制报错
       - 可以根据实际需要调整加载的字段列表
-  - **可选静态字段（daily_basic / 资金流原始字段）**：当前工作目录下可能存在 `static_factors.parquet`（由上游数据准备阶段复制到因子执行目录），其索引同样为 MultiIndex(`datetime`, `instrument`)，包含 daily_basic / moneyflow 等原始字段（通常以 `db_` / `mf_` 等前缀命名）。
+  - **可选静态字段**：当前工作目录下可能存在 `static_factors.parquet`（由上游数据准备阶段复制到因子执行目录），其索引同样为 MultiIndex(`datetime`, `instrument`)，包含 `db_*`（每日基本面）、`mf_*`（资金流向）、`bb_*`（历史基本面）、`cp_*`（筹码分布）、`sw2_*`（申万L2行业板块）五类字段。
     - **列名白名单（硬约束）**：你只能使用 `static_factors_schema.csv` / `static_factors_schema.json` 中列出的字段名（系统会在数据目录中提供该 schema 文件的描述）。严禁凭经验“编造/猜测”字段名（例如 `mf_net_inflow_1d`、`mf_large_buy_ratio` 等）。
     - 如果你的因子定义确实依赖这些字段（例如流通市值、流通股本、换手率、资金净流入等），你 **必须** 显式读取并 join。为了节省内存，**严禁全量加载**，必须通过 `columns` 参数仅读取必要的列：
       ```python
       # 必须：仅读取计算所需的列，以避免 OOM (static_factors.parquet 很大)
-      required_static_cols = ["<col_1>", "<col_2>"] # 按需替换为实际所需列名（可从 schema 中选择任意 db_*/mf_*/bb_*/cp_* 字段）
+      required_static_cols = ["<col_1>", "<col_2>"] # 按需替换为实际所需列名（可从 schema 中选择任意 db_*/mf_*/bb_*/cp_*/sw2_* 字段）
       static_df = pd.read_parquet("static_factors.parquet", columns=required_static_cols).sort_index()
       
       # 注意：当前数据源的 instrument 已经是 Qlib 风格（600000.SH/000001.SZ），与 static_factors.parquet 完全对齐.

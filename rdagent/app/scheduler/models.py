@@ -6,10 +6,12 @@ These are placeholders; integrate with real ORM/DB in subsequent steps.
 
 from __future__ import annotations
 
+import socket
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 LOCAL_TZ = timezone(timedelta(hours=8))
+_HOSTNAME = socket.gethostname()
 
 
 @dataclass
@@ -26,8 +28,13 @@ class TaskRecord:
     manifest_hash: str | None = None
     workspace_path: str | None = None
     config_hash: str | None = None
+    command: str = "fin_quant"  # rdagent 子命令: fin_factor/fin_model/fin_quant
+    env_overrides: dict = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(LOCAL_TZ))
     updated_at: datetime = field(default_factory=lambda: datetime.now(LOCAL_TZ))
+    source: str = "scheduler"  # scheduler / manual
+    rdagent_log_dir: str | None = None  # log/ 下的目录名，用于关联手动任务
+    hostname: str = field(default_factory=lambda: _HOSTNAME)
 
 
 @dataclass

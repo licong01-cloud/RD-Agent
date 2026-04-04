@@ -11,6 +11,7 @@ from rdagent.scenarios.qlib.experiment.quant_experiment import QlibQuantScenario
 from rdagent.scenarios.qlib.proposal.field_utils import (
     collect_used_fields,
     format_field_usage_summary,
+    format_history_factor_summary,
     format_unused_field_whitelist,
     validate_variables,
 )
@@ -41,9 +42,11 @@ class QlibFactorHypothesisGen(FactorHypothesisGen):
             else "No previous hypothesis and feedback available since it's the first round."
         )
 
-        # --- 2A + 4A: 字段统计 + 未使用白名单 ---
+        # --- 2A + 4A: 字段统计 + 未使用白名单 + 历史因子摘要 ---
         field_usage_summary = ""
+        history_factor_summary = ""
         if len(trace.hist) > 0:
+            history_factor_summary = format_history_factor_summary(trace.hist, language="zh")
             prefix_fields = collect_used_fields(trace.hist, factor_only=True)
             field_usage_summary = format_field_usage_summary(
                 prefix_fields, n_rounds=len(trace.hist), language="zh"
@@ -79,6 +82,7 @@ class QlibFactorHypothesisGen(FactorHypothesisGen):
             ),
             "hypothesis_output_format": T("scenarios.qlib.prompts:factor_hypothesis_output_format").r(),
             "hypothesis_specification": T("scenarios.qlib.prompts:factor_hypothesis_specification").r()
+                + ("\n\n" + history_factor_summary if history_factor_summary else "")
                 + field_usage_summary,
         }
         return context_dict, True
@@ -120,7 +124,7 @@ class QlibFactorHypothesis2Experiment(FactorHypothesis2Experiment):
             else:
                 hypothesis_and_feedback = "No previous hypothesis and feedback available."
 
-        # --- 3A + 4A: 字段统计 + 未使用白名单注入 Experiment Generation ---
+        # --- 3A + 4A: 字段统计 + 未使用白名单 + 历史因子摘要 + 多样性约束注入 ---
         field_usage_rag = None
         if len(trace.hist) > 0:
             prefix_fields = collect_used_fields(trace.hist, factor_only=True)
@@ -128,6 +132,15 @@ class QlibFactorHypothesis2Experiment(FactorHypothesis2Experiment):
                 prefix_fields, n_rounds=len(trace.hist), language="en"
             )
             field_usage_rag += format_unused_field_whitelist(prefix_fields, language="en")
+            # Append history factor summary for dedup awareness
+            hist_summary = format_history_factor_summary(trace.hist, language="en")
+            if hist_summary:
+                field_usage_rag += "\n\n" + hist_summary
+            # Append diversity constraints
+            field_usage_rag += "\n\n## Factor Diversity Constraints (MANDATORY)\n"
+            field_usage_rag += "- At least 2 out of the new factors MUST use fields that have NEVER appeared in the history above.\n"
+            field_usage_rag += "- PROHIBITED: tweaking only window size, normalization method, or variable names of a historical factor.\n"
+            field_usage_rag += "- Fields used ≥3 times (marked ⚠overused above) are BANNED as the primary variable of any new factor."
 
         return {
             "target_hypothesis": str(hypothesis),

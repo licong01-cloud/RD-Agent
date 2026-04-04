@@ -1,30 +1,50 @@
 import inspect
 import json
+import os
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, TypedDict, cast
 
 
+def _should_colorize() -> bool:
+    """检测是否应启用 ANSI 颜色输出。
+
+    当 stdout/stderr 都不是 TTY（如子进程输出重定向到文件）时禁用颜色，
+    避免日志文件中充斥大量 ANSI 转义码导致前端显示乱码。
+    可通过环境变量 NO_COLOR=1 强制禁用，FORCE_COLOR=1 强制启用。
+    """
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("FORCE_COLOR"):
+        return True
+    return hasattr(sys.stderr, "isatty") and sys.stderr.isatty()
+
+
+_COLORIZE = _should_colorize()
+
+
 class LogColors:
     """
     ANSI color codes for use in console output.
+    Auto-disabled when output is not a terminal (e.g., redirected to file).
     """
 
-    RED = "\033[91m"
-    GREEN = "\033[92m"
-    YELLOW = "\033[93m"
-    BLUE = "\033[94m"
-    MAGENTA = "\033[95m"
-    CYAN = "\033[96m"
-    WHITE = "\033[97m"
-    GRAY = "\033[90m"
-    BLACK = "\033[30m"
+    RED = "\033[91m" if _COLORIZE else ""
+    GREEN = "\033[92m" if _COLORIZE else ""
+    YELLOW = "\033[93m" if _COLORIZE else ""
+    BLUE = "\033[94m" if _COLORIZE else ""
+    MAGENTA = "\033[95m" if _COLORIZE else ""
+    CYAN = "\033[96m" if _COLORIZE else ""
+    WHITE = "\033[97m" if _COLORIZE else ""
+    GRAY = "\033[90m" if _COLORIZE else ""
+    BLACK = "\033[30m" if _COLORIZE else ""
 
-    BOLD = "\033[1m"
-    ITALIC = "\033[3m"
+    BOLD = "\033[1m" if _COLORIZE else ""
+    ITALIC = "\033[3m" if _COLORIZE else ""
 
-    END = "\033[0m"
+    END = "\033[0m" if _COLORIZE else ""
 
     @classmethod
     def get_all_colors(cls: type["LogColors"]) -> list:

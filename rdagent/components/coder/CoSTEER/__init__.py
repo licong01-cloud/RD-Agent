@@ -1,3 +1,4 @@
+import gc
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -127,6 +128,7 @@ class CoSTEER(Developer[Experiment]):
             logger.log_object(evo_exp.sub_workspace_list, tag="evolving code")
             for sw in evo_exp.sub_workspace_list:
                 logger.info(f"evolving workspace: {sw}")
+            gc.collect()  # 释放 deepcopy/pickle 产生的碎片内存，缓解 glibc arena 膨胀
             if max_seconds is not None and (datetime.now() - start_datetime).total_seconds() > max_seconds:
                 logger.info(f"Reached max time limit {max_seconds} seconds, stop evolving")
                 reached_max_seconds = True

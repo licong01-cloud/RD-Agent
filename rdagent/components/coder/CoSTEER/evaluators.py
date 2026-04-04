@@ -203,7 +203,11 @@ class CoSTEERMultiFeedback(Feedback):
         return iter(self.feedback_list)
 
     def is_acceptable(self) -> bool:
-        return all(feedback.is_acceptable() for feedback in self.feedback_list)
+        valid_feedbacks = [f for f in self.feedback_list if f is not None]
+        if not valid_feedbacks:
+            return False
+        acceptable_count = sum(1 for f in valid_feedbacks if f.is_acceptable())
+        return acceptable_count / len(valid_feedbacks) >= 0.8
 
     def finished(self) -> bool:
         """

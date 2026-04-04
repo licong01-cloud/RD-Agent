@@ -7,7 +7,7 @@ benchmark: &benchmark 000300.SH
 
 data_handler_config: &data_handler_config
     start_time: 2010-01-07
-    end_time: 2025-12-01
+    end_time: 2026-03-10
     instruments: *market
     data_loader:
         class: CombinedAlpha158StaticLoader
@@ -32,6 +32,16 @@ data_handler_config: &data_handler_config
             static_path: "/home/lc999/data/aistock_factors/combined_static_factors.parquet"
             join: "outer"
 
+    fit_start_time: 2018-08-01
+    fit_end_time: 2022-12-31
+    infer_processors:
+        - class: RobustZScoreNorm
+          kwargs:
+              fields_group: feature
+              clip_outlier: true
+        - class: Fillna
+          kwargs:
+              fields_group: feature
     learn_processors:
         - class: DropnaLabel
         - class: CSZScoreNorm
@@ -49,7 +59,7 @@ port_analysis_config: &port_analysis_config
     backtest:
         start_time: 2021-01-01
         # clamp to bin range and avoid last calendar step
-        end_time: 2025-11-28
+        end_time: 2026-03-09
         account: 100000000
         benchmark: *benchmark
         exchange_kwargs:
@@ -87,7 +97,7 @@ task:
             segments:
                 train: [2010-01-07, 2018-12-31]
                 valid: [2019-01-01, 2020-12-31]
-                test: [2021-01-01, 2025-12-01]
+                test: [2021-01-01, 2026-03-10]
     record: 
         - class: SignalRecord
           module_path: qlib.workflow.record_temp

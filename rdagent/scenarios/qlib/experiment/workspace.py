@@ -55,6 +55,17 @@ class QlibFBWorkspace(FBWorkspace):
         conf_path.write_text(text, encoding="utf-8")
         return True
 
+    @staticmethod
+    def _detect_minute_freq(conf_path: Path) -> bool:
+        """检测 conf.yaml 是否配置了分钟线回测（freq: 1min/5min）。"""
+        if not conf_path.exists():
+            return False
+        try:
+            text = conf_path.read_text(encoding="utf-8")
+        except Exception:
+            return False
+        return "freq: 1min" in text or "freq: 5min" in text
+
     def execute(self, qlib_config_name: str = "conf.yaml", run_env: dict = {}, *args, **kwargs) -> str:
         if MODEL_COSTEER_SETTINGS.env_type == "docker":
             qtde = QTDockerEnv()
@@ -88,10 +99,19 @@ class QlibFBWorkspace(FBWorkspace):
         if self._disable_lightgbm_gpu_in_config(conf_path):
             logger.info("[LightGBM] Forced CPU mode by removing GPU/CUDA kwargs from config.")
 
+        # 分钟线使用 qrun_limit_minute.py（按天重建 Exchange，内存 121GB→200MB）
+        # 日线使用 qrun_limit.py（原始全量加载）
+        minute_runner = self.workspace_path / "qrun_limit_minute.py"
+        if self._detect_minute_freq(conf_path) and minute_runner.exists():
+            runner = "qrun_limit_minute.py"
+            logger.info("[Workspace] Minute freq detected, using qrun_limit_minute.py (per-day Exchange rebuild)")
+        else:
+            runner = "qrun_limit.py"
+
         # Run the Qlib backtest
         execute_qlib_log = qtde.check_output(
             local_path=str(self.workspace_path),
-            entry=f"qrun {qlib_config_name}",
+            entry=f"python {runner} {qlib_config_name}",
             env=effective_env,
         )
 
@@ -103,7 +123,7 @@ class QlibFBWorkspace(FBWorkspace):
                 )
                 execute_qlib_log = qtde.check_output(
                     local_path=str(self.workspace_path),
-                    entry=f"qrun {qlib_config_name}",
+                    entry=f"python {runner} {qlib_config_name}",
                     env=effective_env,
                 )
         logger.log_object(execute_qlib_log, tag="Qlib_execute_log")

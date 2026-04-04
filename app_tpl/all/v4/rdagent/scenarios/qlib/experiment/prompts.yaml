@@ -206,7 +206,7 @@ qlib_factor_from_report_rich_style_description : |-
 qlib_factor_experiment_setting: |-
   | Dataset | Model    | Factors       | Data Split                                    |
   |---------|----------|---------------|-------------------------------------------------|
-  | AIstock A-share (non-ST, non-delisted)  | GRU_TimeSeries_Model | Alpha158 Plus + AIstock factors | Train: 2018-08-01 to 2022-12-31 <br> Valid: 2023-01-01 to 2024-06-30 <br> Test &nbsp;: 2024-07-01 to 2025-12-01 |
+  | AIstock A-share (non-ST, non-delisted)  | GRU_TimeSeries_Model | Alpha158 Plus + AIstock factors | Train: 2018-08-01 to 2022-12-31 <br> Valid: 2023-01-01 to 2024-06-30 <br> Test &nbsp;: 2024-07-01 to 2026-03-10 |
 
   **Important Note: Stock Code Format**
   - Although the dataset name is "AIstock A-share", all original HDF5/Parquet data in `instrument` are already unified in **Qlib style** (e.g., `000001.SZ`, `600000.SH`).
@@ -217,7 +217,7 @@ qlib_factor_experiment_setting: |-
     - 对于主要实验，避免使用过于小的配置（例如 `n_epochs < 50`，Tabular 模型 `batch_size < 2048`）。
     - **超参数应根据模型类型合理调整：**
       - **Tabular 模型** (DatasetH): `batch_size: 4096-16384`，`n_epochs: 100-200`
-      - **TimeSeries 模型** (TSDatasetH): `batch_size: 2048-8192`（小模型<1MB在16GB GPU上内存充裕，大batch可充分利用GPU并行能力），`n_epochs: 200-300`
+      - **TimeSeries 模型** (TSDatasetH): `batch_size: 2048-8192`（模型<4MB在16GB GPU上内存充裕，大batch可充分利用GPU并行能力），`n_epochs: 200-300`
     - 建议配合 `early_stop: 10-30` 使用以防止过拟合。
   - **Parallelism Settings (CPU)**:
     - For components supporting `n_jobs`, prioritize setting to `n_jobs: 12` (close to the number of physical cores).
@@ -293,7 +293,7 @@ qlib_model_rich_style_description: |-
 qlib_model_experiment_setting: |-
   | Dataset | Model    | Factors       | Data Split                                    |
   |---------|----------|---------------|-------------------------------------------------|
-  | AIstock A-share (non-ST, non-delisted)  | 例如 GRU_TimeSeries_Model（也可替换为 LGB/MLP/Transformer 等其它模型） | 20 factors (Alpha158)  | Train: 2018-08-01 to 2022-12-31 <br> Valid: 2023-01-01 to 2024-06-30 <br> Test &nbsp;: 2024-07-01 to 2025-12-01 |
+  | AIstock A-share (non-ST, non-delisted)  | 例如 GRU_TimeSeries_Model（也可替换为 LGB/MLP/Transformer 等其它模型） | 20 factors (Alpha158)  | Train: 2018-08-01 to 2022-12-31 <br> Valid: 2023-01-01 to 2024-06-30 <br> Test &nbsp;: 2024-07-01 to 2026-03-10 |
 
   **Important Note: Stock Code Format**
   - Although the dataset name is "AIstock A-share", all data sources in `instrument` are already unified in **Qlib style** (e.g., `000001.SZ`, `600000.SH`).
@@ -308,7 +308,7 @@ model_hypothesis_specification: |-
      **Category A — Architecture Dimensions:**
      - **A1 Temporal Modeling**: RNN/LSTM/GRU → Temporal Attention → Multi-scale temporal convolution
      - **A2 Attention Mechanisms**: Self-attention → Cross-attention → Sparse/Linear attention
-     - **A3 Cross-sectional Modeling**: Stock-level features → Cross-stock attention → Graph-based interaction
+     - **A3 Cross-sectional Modeling**: Stock-level features → Cross-feature interaction → Feature-group attention. Note: Input features already contain embedded sector/industry information (sector OHLCV, sector valuation, sector money flow) as regular feature columns. Models can benefit from learning cross-feature interactions (e.g., feature-wise attention, bilinear layers, or gating mechanisms) that capture the relationship between stock-level and sector-level features, even though individual feature identities are not known at model level.
      - **A4 Positional/Temporal Encoding**: Learnable position embedding → Sinusoidal → Relative position encoding
      **Category B — Regularization & Stability Dimensions:**
      - **B1 Regularization**: Dropout → LayerNorm/BatchNorm → Residual connections → Stochastic depth
@@ -323,14 +323,17 @@ model_hypothesis_specification: |-
   7. Sometimes, when training performance is poor, adjusting hyperparameters (Category C dimensions) can also be an effective strategy for improvement.
   8. **模型规模与超参数约束：**
     - hidden_dim 推荐 64-128，不超过 256。Transformer/Attention 层数推荐 1-2 层，不超过 3 层。
-    - 总参数量控制在 1MB 以内。量化场景中简单模型（GRU/LSTM）往往比深层 Transformer 更实用。
+    - 总参数量控制在 4MB 以内（约 100 万参数）。金融量化场景信噪比极低（IC~0.05），模型价值在于架构创新而非参数堆叠。
+    - **Transformer FFN 维度约束**：使用 `nn.TransformerEncoderLayer` 时，必须显式设置 `dim_feedforward = 4 * d_model`（如 d_model=64 则 dim_feedforward=256）。PyTorch 默认 dim_feedforward=2048 会导致参数量爆炸（仅 FFN 就占 0.5MB/层），严格禁止使用默认值。
+    - **TCN/多尺度时序卷积**：使用 `nn.Conv1d` 构建时序卷积时，推荐 kernel_size 覆盖多个时间尺度（如 3, 5, 10），channels 不超过 128。因果卷积（causal convolution）需通过 padding 实现，禁止使用未来数据。
+    - **RevIN（可逆实例归一化）**：在 forward() 开头对输入做 instance normalization（per-sample per-feature 减均值除标准差），在输出前逆变换还原尺度。RevIN 层本身参数极少（仅 affine 参数），适合处理金融时序的非平稳性。实现时 affine 参数必须在 `__init__` 中创建。
     - 避免极小模型（hidden_dim<32, 单层）。
     - **超参数应根据模型类型 (model_type) 合理调整：**
       - **Tabular 模型** (DatasetH): `batch_size: 4096-16384`，`n_epochs: 100-200`，`early_stop: 10-20`
-      - **TimeSeries 模型** (TSDatasetH): `batch_size: 2048-8192`（小模型<1MB在16GB GPU上内存充裕，应充分利用GPU并行能力），`n_epochs: 200-300`，`early_stop: 20-30`
-      - **Learning Rate**: GRU/LSTM 推荐 `2e-4 ~ 5e-4`，Transformer 推荐 `1e-4 ~ 5e-4`，MLP/Tabular 推荐 `5e-4 ~ 1e-3`
+      - **TimeSeries 模型** (TSDatasetH): `batch_size: 2048-8192`（模型<4MB在16GB GPU上内存充裕，应充分利用GPU并行能力），`n_epochs: 200-300`，`early_stop: 20-30`
+      - **Learning Rate**: GRU/LSTM 推荐 `2e-4 ~ 5e-4`，Transformer 推荐 `1e-4 ~ 5e-4`，MLP/Tabular 推荐 `5e-4 ~ 1e-3`，TCN 推荐 `1e-4 ~ 5e-4`
       - **Weight Decay**: 小模型(<0.5MB) 推荐 `1e-5`，较大模型 推荐 `1e-4 ~ 1e-3`
-    - 选择超参数时，请在 hypothesis 中简要说明理由（如"TSDatasetH step_len=20，模型0.16MB，16GB GPU内存充裕，batch_size 选择 4096 以提高GPU利用率"）。
+    - 选择超参数时，请在 hypothesis 中简要说明理由（如"TSDatasetH step_len=20，模型0.8MB，16GB GPU内存充裕，batch_size 选择 4096 以提高GPU利用率"）。
   9. Use standard libraries for baseline models, but also explore custom architecture designs to investigate novel structures. After sufficient trials with traditional models, aim for innovation comparable to top-tier AI conferences (NeurIPS, ICLR, ICML, SIGKDD, etc.) in time series modeling.
      COMPLEXITY CONTROL RULES:
      - Each new hypothesis should introduce AT MOST ONE new architectural component compared to the best-performing previous model.
@@ -342,9 +345,10 @@ model_hypothesis_specification: |-
     - 残差连接的投影层 (`residual_proj`) 必须在 `__init__` 中预定义，不能在 `forward()` 中通过 `nn.Linear(...).to(x.device)` 动态创建。
 
 factor_hypothesis_specification: |-
-  1. **Factors per Generation:**
-    - **第一轮**: 产生 2-5 个因子，确保有足够的初始多样性。
-    - **后续轮次**: 产生 2-8 个因子，根据策略和实验需要灵活调整数量。
+  1. **因子生成策略（Factors per Generation）：**
+    - **第一轮**: 产生 2-3 个因子，覆盖 `db_*`/`mf_*`/`bb_*`/`cp_*`/`sw2_*` 五类数据集中至少两个。建议 1 个跨数据集交叉因子 + 1 个筹码形态或行业板块因子（可选第 3 个基础因子验证管道）。
+    - **后续轮次**: 严格 2 个因子。因子质量远比数量重要——2 个深思熟虑的高质量因子胜过 4 个平庸因子。每个因子必须有明确的经济学逻辑和差异化的数据来源。
+    - **因子效能递减警告**：随着 SOTA 因子池增长，新增因子的边际 IC 贡献会快速衰减。当 SOTA 因子已有 6 个以上时，应优先设计与现有因子正交性最强的方向（使用完全不同的字段前缀组合），而非追求数量。
   2. **Simple and Effective Factors First:**
     - Start with factors that are simple, easy to achieve and likely effective.
     - Concisely explain why these factors are expected to work.
@@ -423,7 +427,7 @@ qlib_factor_interface: |-
   【统一因子脚本模板（必须遵守，LLM 只能在中间区域写逻辑）】
   - 因子脚本应严格采用如下整体骨架，其中 **仅允许在标记的“FACTOR COMPUTATION AREA”内编写/修改代码**.
     - 在该区域内，你可以根据本轮假设自由设计因子与信号逻辑，不局限于简单的动量/波动率/量价关系；
-    - 说明：Alpha158/AE/daily_basic/bak_basic/cyq_perf/moneyflow 等特征通常在 Qlib 训练/回测侧由 DataHandler/YAML 进行拼接并作为模型输入；单个 `factor.py` 的运行时输入默认只保证 `daily_pv.h5`，若需要使用 `daily_basic(db_*)`、`moneyflow(mf_*)`、`bak_basic(bb_*)`、`cyq_perf(cp_*)` 等静态字段，必须显式读取并 join `static_factors.parquet`；本轮实验不强制策略必须依赖“量价因子”，重点在于保证数据格式与索引 contract 正确的前提下，充分释放因子的演进空间。
+    - 说明：Alpha158/AE/daily_basic/bak_basic/cyq_perf/moneyflow 等特征通常在 Qlib 训练/回测侧由 DataHandler/YAML 进行拼接并作为模型输入；单个 `factor.py` 的运行时输入默认只保证 `daily_pv.h5`，若需要使用 `daily_basic(db_*)`、`moneyflow(mf_*)`、`bak_basic(bb_*)`、`cyq_perf(cp_*)`、`sector_data(sw2_*)` 等静态字段，必须显式读取并 join `static_factors.parquet`；本轮实验不强制策略必须依赖“量价因子”，重点在于保证数据格式与索引 contract 正确的前提下，充分释放因子的演进空间。
     - **【禁止机器学习训练】**（硬约束）：
       - 严禁 import 或调用 `sklearn`、`lightgbm`、`xgboost`、`catboost`、`torch`、`tensorflow`、`keras` 等 ML 库；
       - 严禁执行 `.fit()`、`.fit_transform()`、`.fit_predict()`、`.backward()`、`optimizer.step()` 等训练操作；
@@ -491,13 +495,13 @@ qlib_factor_interface: |-
 
   【数据加载与字段名规范】
   - 主数据源为 `daily_pv.h5`，索引为 MultiIndex(`datetime`, `instrument`)，列名包括：`open`, `high`, `low`, `close`, `volume`, `amount`, `factor`。
-  - 支持通过显式 join 引入 `static_factors.parquet` 中的指定字段，包括 **daily_basic (db_*)**、**moneyflow (mf_*)**、**bak_basic (bb_*)** 和 **cyq_perf (cp_*)** 四个数据集的字段。基于这些丰富的数据维度，LLM 可以设计出融合价格行为、资金流向、基本面特征、筹码分布的有效多因子策略。
-  - **可选静态字段**：当前工作目录下可能存在 `static_factors.parquet`（由上游数据准备阶段复制到因子执行目录），其索引同样为 MultiIndex(`datetime`, `instrument`)，包含 `db_*`（每日基本面）、`mf_*`（资金流向）、`bb_*`（历史基本面）、`cp_*`（筹码分布）四类字段。各数据集的完整字段名、中文说明和单位请参考数据目录中的 `README.md` 文件（已在"source data"部分提供）。
+  - 支持通过显式 join 引入 `static_factors.parquet` 中的指定字段，包括 **daily_basic (db_*)**、**moneyflow (mf_*)**、**bak_basic (bb_*)**、**cyq_perf (cp_*)** 和 **sector_data (sw2_*)** 五个数据集的字段。基于这些丰富的数据维度，LLM 可以设计出融合价格行为、资金流向、基本面特征、筹码分布、行业板块的有效多因子策略。
+  - **可选静态字段**：当前工作目录下可能存在 `static_factors.parquet`，其索引同样为 MultiIndex(`datetime`, `instrument`)，包含 `db_*`（每日基本面）、`mf_*`（资金流向）、`bb_*`（历史基本面）、`cp_*`（筹码分布）、`sw2_*`（申万L2行业板块）五类字段。各数据集的完整字段名、中文说明和单位请参考数据目录中的 `README.md` 文件（已在"source data"部分提供）。
     - **列名白名单（硬约束）**：你只能使用 `static_factors_schema.csv` / `static_factors_schema.json` 或数据目录 `README.md` 中列出的字段名。严禁凭经验"编造/猜测"字段名（例如 `mf_net_inflow_1d`、`mf_large_buy_ratio` 等）。
     - 如果你的因子定义确实依赖这些字段（例如流通市值、流通股本、换手率、资金净流入等），你 **必须** 显式读取并 join。为了节省内存，**严禁全量加载**，必须通过 `columns` 参数仅读取必要的列：
       ```python
       # 必须：仅读取计算所需的列，以避免 OOM (static_factors.parquet 很大)
-      required_static_cols = ["<col_1>", "<col_2>"] # 按需替换为实际所需列名（从 schema 中选择任意 db_*/mf_*/bb_*/cp_* 字段）
+      required_static_cols = ["<col_1>", "<col_2>"] # 按需替换为实际所需列名（从 schema 中选择任意 db_*/mf_*/bb_*/cp_*/sw2_* 字段）
       static_df = pd.read_parquet("static_factors.parquet", columns=required_static_cols).sort_index()
       
       # 注意：当前数据源的 instrument 已经是 Qlib 风格（600000.SH/000001.SZ），与 static_factors.parquet 完全对齐.
@@ -642,10 +646,20 @@ factor_feedback_generation:
           - Avoid re-implementing previous factors as those that surpassed SOTA are already included in the factor library and will be used in each run.
       3. Final Goal: To continuously accumulate factors that surpass each iteration to maintain the best SOTA.
 
-    When judging the results:
-      1. Any small improvement should be considered for inclusion as SOTA (set `Replace Best Result` as yes).
-      2. If the new factor(s) shows an improvement in the annualized return, recommend it to replace the current best result.
-      3. Minor variations in other metrics are acceptable as long as the annualized return improves.
+    When judging the results (SOTA 替换判断标准 — 三路径规则):
+      **Path A — 全面超越:** 如果所有核心指标 (IC, annualized_return, max_drawdown, information_ratio) 均优于 SOTA，设置 `Replace Best Result` 为 "yes"。
+      **Path B — 单项突破:** 如果仅部分指标优于 SOTA，则需要至少一个超越指标的提升幅度 ≥ 10% 才可设置 `Replace Best Result` 为 "yes":
+         - IC improvement ≥ 10%:  (new_IC - sota_IC) / sota_IC ≥ 0.10
+         - Annualized return improvement ≥ 10%:  (new_return - sota_return) / sota_return ≥ 0.10
+         - Max drawdown improvement ≥ 10%:  (new_drawdown - sota_drawdown) / abs(sota_drawdown) ≥ 0.10  (i.e. drawdown becomes less negative, e.g. -0.10 is better than -0.15)
+         - Information ratio improvement ≥ 10%:  (new_IR - sota_IR) / sota_IR ≥ 0.10
+      **Path C — IC 绝对值门槛:** 如果因子组合 IC 绝对值 ≥ 0.055，设置 `Replace Best Result` 为 "yes"。
+      **Path D — 年化收益超越:** 如果年化收益高于 SOTA 的年化收益，设置 `Replace Best Result` 为 "yes"。
+      **Rejection rules:**
+        - 如果不满足 Path A/B/C/D 任何一条，设置 `Replace Best Result` 为 "no"。
+        - **禁止接受退化:** 如果所有核心指标均弱于 SOTA，必须 reject。
+        - **多指标退化保护:** 如果 4 个核心指标中有 3 个或更多退化超过 10%（即 (sota - new) / abs(sota) ≥ 0.10），即使有 1 个指标改善也必须 reject。
+        - **年化收益保护:** 如果 annualized_return 退化超过 10%（即 (sota_return - new_return) / abs(sota_return) ≥ 0.10），仅凭 max_drawdown 改善不能通过 Path B。此时需要 IC 或 information_ratio 中至少一个也有 ≥10% 改善才可通过 Path B。（回撤改善不能以牺牲年化收益为代价。）
 
     Consider Changing Direction for Significant Gaps with SOTA:
       - If the new results significantly differ from the SOTA, consider exploring a new direction (write new type factors).

@@ -224,6 +224,8 @@ class LLMConfigService:
                 timeout=60,
                 cwd=str(rdagent_root),
                 check=False,
+                encoding="utf-8",
+                errors="replace",
             )
 
             return {

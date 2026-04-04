@@ -291,6 +291,29 @@ def _build_schema(df: pd.DataFrame) -> list[dict[str, Any]]:
         "cp_cost_95pct": "95%成本分位（筹码分布）",
         "cp_weight_avg": "加权平均成本",
         "cp_winner_rate": "胜率（获利比例）",
+        # sector_data (Shenwan L2 industry)
+        "sw2_open": "申万L2行业开盘价",
+        "sw2_high": "申万L2行业最高价",
+        "sw2_low": "申万L2行业最低价",
+        "sw2_close": "申万L2行业收盘价",
+        "sw2_pct_change": "申万L2行业涨跌幅(%)",
+        "sw2_vol": "申万L2行业成交量",
+        "sw2_amount": "申万L2行业成交额",
+        "sw2_pe": "申万L2行业市盈率",
+        "sw2_pb": "申万L2行业市净率",
+        "sw2_total_mv": "申万L2行业总市值",
+        "sw2_mf_buy_sm_amt": "申万L2行业小单买入金额",
+        "sw2_mf_sell_sm_amt": "申万L2行业小单卖出金额",
+        "sw2_mf_buy_md_amt": "申万L2行业中单买入金额",
+        "sw2_mf_sell_md_amt": "申万L2行业中单卖出金额",
+        "sw2_mf_buy_lg_amt": "申万L2行业大单买入金额",
+        "sw2_mf_sell_lg_amt": "申万L2行业大单卖出金额",
+        "sw2_mf_buy_elg_amt": "申万L2行业超大单买入金额",
+        "sw2_mf_sell_elg_amt": "申万L2行业超大单卖出金额",
+        "sw2_mf_net_amt": "申万L2行业资金净流入金额",
+        "sw2_mf_buy_elg_vol": "申万L2行业超大单买入量",
+        "sw2_mf_sell_elg_vol": "申万L2行业超大单卖出量",
+        "sw2_mf_net_vol": "申万L2行业资金净流入量",
         # precomputed (traceable via precompute_daily_basic_factors.py)
         "value_pe_inv": "倒数市盈率（估值因子）：1/db_pe_ttm（优先）或 1/db_pe；分母为0或缺失=>NaN",
         "value_pb_inv": "倒数市净率（估值因子）：1/db_pb；分母为0或缺失=>NaN",
@@ -311,6 +334,8 @@ def _build_schema(df: pd.DataFrame) -> list[dict[str, Any]]:
             source = "bak_basic_raw"
         elif col_str.startswith("cp_"):
             source = "cyq_perf_raw"
+        elif col_str.startswith("sw2_"):
+            source = "sector_data_raw"
         elif col_str.startswith("ae_"):
             source = "ae_factor"
         else:
@@ -442,6 +467,8 @@ def _schema_cols_from_parquet_metadata(path: Path) -> list[dict[str, Any]] | Non
             source = "bak_basic_raw"
         elif name.startswith("cp_"):
             source = "cyq_perf_raw"
+        elif name.startswith("sw2_"):
+            source = "sector_data_raw"
         elif name.startswith("ae_"):
             source = "ae_factor"
         else:
@@ -739,6 +766,7 @@ def main() -> None:
     moneyflow_path = snapshot_root / "moneyflow.h5"
     bak_basic_path = snapshot_root / "bak_basic.h5"
     cyq_perf_path = snapshot_root / "cyq_perf.h5"
+    sector_data_path = snapshot_root / "sector_data.h5"
     daily_pv_path = snapshot_root / "daily_pv.h5"
 
     print("[INFO] snapshot_root:", snapshot_root)
@@ -765,6 +793,13 @@ def main() -> None:
     else:
         print(f"[WARN] cyq_perf.h5 not found: {cyq_perf_path}")
 
+    df_sd_raw = None
+    if sector_data_path.exists():
+        print("[INFO] Loading raw sector_data.h5 ...")
+        df_sd_raw = _read_table(sector_data_path, "sector_data_raw")
+    else:
+        print(f"[WARN] sector_data.h5 not found: {sector_data_path}")
+
     df_pv = None
     if daily_pv_path.exists():
         print("[INFO] Loading raw daily_pv.h5 ...")
@@ -782,6 +817,8 @@ def main() -> None:
         dfs.append(df_bb_raw)
     if df_cp_raw is not None:
         dfs.append(df_cp_raw)
+    if df_sd_raw is not None:
+        dfs.append(df_sd_raw)
 
     cand_tables: list[tuple[str, Path]] = [
         ("daily_basic_factors", aistock_factors_root / "daily_basic_factors" / "result.pkl"),

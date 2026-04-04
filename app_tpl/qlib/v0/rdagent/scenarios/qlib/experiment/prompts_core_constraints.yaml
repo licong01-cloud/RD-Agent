@@ -13,7 +13,7 @@ qlib_factor_interface_core_constraints: |-
   【统一因子脚本模板（必须遵守，LLM 只能在中间区域写逻辑）】
   - 因子脚本应严格采用如下整体骨架，其中 **仅允许在标记的"FACTOR COMPUTATION AREA"内编写/修改代码**.
     - 在该区域内，你可以根据本轮假设自由设计因子与信号逻辑，不局限于简单的动量/波动率/量价关系；
-    - 说明：Alpha158/AE/daily_basic 等特征通常在 Qlib 训练/回测侧由 DataHandler/YAML 进行拼接并作为模型输入；单个 `factor.py` 的运行时输入默认只保证 `daily_pv.h5`，若需要使用 `daily_basic/moneyflow` 等静态字段，必须显式读取并 join `static_factors.parquet`；
+    - 说明：Alpha158/AE/daily_basic 等特征通常在 Qlib 训练/回测侧由 DataHandler/YAML 进行拼接并作为模型输入；单个 `factor.py` 的运行时输入默认只保证 `daily_pv.h5`，若需要使用 `daily_basic(db_*)`、`moneyflow(mf_*)`、`bak_basic(bb_*)`、`cyq_perf(cp_*)`、`sector_data(sw2_*)` 等静态字段，必须显式读取并 join `static_factors.parquet`；
     - 本轮实验不强制策略必须依赖"量价因子"，重点在于保证数据格式与索引 contract 正确的前提下，充分释放模型与因子的演进空间。
 
     ```python

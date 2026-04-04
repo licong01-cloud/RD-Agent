@@ -312,11 +312,6 @@ def generate_data_folder_from_qlib() -> None:
         Path(FACTOR_COSTEER_SETTINGS.data_folder) / "README.md",
     )
 
-    repo_root = Path(__file__).resolve().parents[4]
-    repo_static_parquet = repo_root / "git_ignore_folder" / "factor_implementation_source_data" / "static_factors.parquet"
-    repo_static_schema_csv = repo_static_parquet.with_name("static_factors_schema.csv")
-    repo_static_schema_json = repo_static_parquet.with_name("static_factors_schema.json")
-
     factors_root = os.environ.get("AISTOCK_FACTORS_ROOT", "") or os.environ.get("AIstock_FACTORS_ROOT", "")
     if factors_root:
         factors_root_p = _to_unix_path(Path(factors_root)).resolve()
@@ -328,26 +323,17 @@ def generate_data_folder_from_qlib() -> None:
     ]
     aistock_static_parquet = next((p for p in aistock_static_candidates if p.exists()), None)
 
-    if repo_static_parquet.exists():
-        shutil.copy(
-            repo_static_parquet,
-            Path(FACTOR_COSTEER_SETTINGS.data_folder) / "static_factors.parquet",
-        )
-        if repo_static_schema_csv.exists():
-            shutil.copy(
-                repo_static_schema_csv,
-                Path(FACTOR_COSTEER_SETTINGS.data_folder) / "static_factors_schema.csv",
-            )
-        if repo_static_schema_json.exists():
-            shutil.copy(
-                repo_static_schema_json,
-                Path(FACTOR_COSTEER_SETTINGS.data_folder) / "static_factors_schema.json",
-            )
-    elif aistock_static_parquet is not None:
+    if aistock_static_parquet is not None:
         shutil.copy(
             aistock_static_parquet,
             Path(FACTOR_COSTEER_SETTINGS.data_folder) / "static_factors.parquet",
         )
+        schema_csv = aistock_static_parquet.with_name("static_factors_schema.csv")
+        schema_json = aistock_static_parquet.with_name("static_factors_schema.json")
+        if schema_csv.exists():
+            shutil.copy(schema_csv, Path(FACTOR_COSTEER_SETTINGS.data_folder) / "static_factors_schema.csv")
+        if schema_json.exists():
+            shutil.copy(schema_json, Path(FACTOR_COSTEER_SETTINGS.data_folder) / "static_factors_schema.json")
 
     Path(FACTOR_COSTEER_SETTINGS.data_folder_debug).mkdir(parents=True, exist_ok=True)
     shutil.copy(
@@ -359,26 +345,17 @@ def generate_data_folder_from_qlib() -> None:
         Path(FACTOR_COSTEER_SETTINGS.data_folder_debug) / "README.md",
     )
 
-    if repo_static_parquet.exists():
-        shutil.copy(
-            repo_static_parquet,
-            Path(FACTOR_COSTEER_SETTINGS.data_folder_debug) / "static_factors.parquet",
-        )
-        if repo_static_schema_csv.exists():
-            shutil.copy(
-                repo_static_schema_csv,
-                Path(FACTOR_COSTEER_SETTINGS.data_folder_debug) / "static_factors_schema.csv",
-            )
-        if repo_static_schema_json.exists():
-            shutil.copy(
-                repo_static_schema_json,
-                Path(FACTOR_COSTEER_SETTINGS.data_folder_debug) / "static_factors_schema.json",
-            )
-    elif aistock_static_parquet is not None:
+    if aistock_static_parquet is not None:
         shutil.copy(
             aistock_static_parquet,
             Path(FACTOR_COSTEER_SETTINGS.data_folder_debug) / "static_factors.parquet",
         )
+        schema_csv = aistock_static_parquet.with_name("static_factors_schema.csv")
+        schema_json = aistock_static_parquet.with_name("static_factors_schema.json")
+        if schema_csv.exists():
+            shutil.copy(schema_csv, Path(FACTOR_COSTEER_SETTINGS.data_folder_debug) / "static_factors_schema.csv")
+        if schema_json.exists():
+            shutil.copy(schema_json, Path(FACTOR_COSTEER_SETTINGS.data_folder_debug) / "static_factors_schema.json")
 
     # Optional: copy governance schemas into the data folder so LLMs/agents can access
     # consistent field meanings/units without needing external paths.
@@ -719,10 +696,12 @@ def get_data_folder_intro(fname_reg: str = ".*", flags: int = 0, variable_mappin
             The description of the data folder.
     """
 
+    prod_root = Path(FACTOR_COSTEER_SETTINGS.data_folder)
     debug_root = Path(FACTOR_COSTEER_SETTINGS.data_folder_debug)
     needs_regen = (
-        not Path(FACTOR_COSTEER_SETTINGS.data_folder).exists()
+        not prod_root.exists()
         or not debug_root.exists()
+        or not (prod_root / "static_factors.parquet").exists()
         or not (debug_root / "daily_pv.h5").exists()
         or not (debug_root / "static_factors.parquet").exists()
     )

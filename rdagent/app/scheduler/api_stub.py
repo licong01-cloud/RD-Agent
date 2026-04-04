@@ -50,13 +50,15 @@ def api_create_task(payload: dict) -> dict:
         loop_n=payload.get("loop_n", 1),
         all_duration=payload.get("all_duration", "1:00:00"),
         evolving_mode=payload.get("evolving_mode", "llm"),
+        command=payload.get("command", "fin_quant"),
         source_history_id=payload.get("source_history_id"),
         template_version=payload.get("template_version"),
         manifest_hash=payload.get("manifest_hash"),
+        env_overrides=payload.get("env_overrides", {}),
     )
     rec = create_task(rec)
     # Submit to in-process queue (placeholder). Replace with real queue in production.
-    submit_task(task_id=rec.name or str(rec.id))
+    submit_task(task_id=str(rec.id))
     return {"task": rec.__dict__}
 
 

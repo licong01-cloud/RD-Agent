@@ -10,10 +10,6 @@ from rdagent.log import rdagent_logger as logger
 from rdagent.oai.llm_utils import APIBackend
 from rdagent.scenarios.qlib.experiment.factor_experiment import QlibFactorScenario
 from rdagent.scenarios.qlib.experiment.quant_experiment import QlibQuantScenario
-from rdagent.scenarios.qlib.proposal.field_utils import (
-    collect_used_fields,
-    format_unused_field_whitelist,
-)
 from rdagent.utils import convert2bool
 from rdagent.utils.agent.tpl import T
 
@@ -79,35 +75,6 @@ class QlibFactorExperiment2Feedback(Experiment2Feedback):
         # Process the results to filter important metrics
         combined_result = process_results(current_result, sota_result)
 
-        # --- 2C: 历史因子摘要 ---
-        history_factor_summary = ""
-        if len(trace.hist) > 0:
-            lines = ["## 历史因子摘要 (New Hypothesis 须避免重复以下方向)"]
-            for idx, (hist_exp, hist_fb) in enumerate(trace.hist):
-                # 跳过模型轮（Quant 混合任务中 trace.hist 包含因子+模型）
-                if getattr(getattr(hist_exp, "hypothesis", None), "action", None) == "model":
-                    continue
-                briefs = []
-                for task in getattr(hist_exp, "sub_tasks", []):
-                    fname = getattr(task, "factor_name", None)
-                    if not fname:
-                        continue  # 跳过非因子任务
-                    variables = getattr(task, "variables", None)
-                    vars_str = ", ".join(variables.keys()) if isinstance(variables, dict) else ""
-                    briefs.append(f"{fname}({vars_str})")
-                if briefs:
-                    decision = "ACCEPTED" if hist_fb.decision else "rejected"
-                    lines.append(f"  Trial {idx+1} [{decision}]: {'; '.join(briefs)}")
-            if len(lines) > 1:
-                history_factor_summary = "\n".join(lines)
-
-        # --- 4A: 追加未使用字段白名单到反馈上下文 ---
-        if len(trace.hist) > 0:
-            prefix_fields = collect_used_fields(trace.hist, factor_only=True)
-            unused_whitelist = format_unused_field_whitelist(prefix_fields, language="zh")
-            if unused_whitelist:
-                history_factor_summary += "\n" + unused_whitelist
-
         # Generate the system prompt
         if isinstance(self.scen, (QlibQuantScenario, QlibFactorScenario)):
             sys_prompt = T("scenarios.qlib.prompts:factor_feedback_generation.system").r(
@@ -123,7 +90,6 @@ class QlibFactorExperiment2Feedback(Experiment2Feedback):
             hypothesis_text=hypothesis_text,
             task_details=tasks_factors,
             combined_result=combined_result,
-            history_factor_summary=history_factor_summary,
         )
 
         # Call the APIBackend to generate the response for hypothesis feedback
@@ -161,6 +127,45 @@ class QlibFactorExperiment2Feedback(Experiment2Feedback):
         new_hypothesis = _get_ci(response_json, "New Hypothesis", "No new hypothesis provided")
         reason = _get_ci(response_json, "Reasoning", "No reasoning provided")
         decision = convert2bool(_get_ci(response_json, "Replace Best Result", "no"))
+
+        # Hard veto: if AnnRet < baseline × 80%, reject regardless of LLM decision.
+        # "baseline" = the Alpha158-only experiment (sub_tasks=[], no generated factors).
+        # In loop 0 it is exp.based_experiments[0] (result populated by runner).
+        # In loop 1+ based_experiments[0].result is None (runner only fills [-1]),
+        # so we fall back to the first historical experiment's baseline via trace.
+        if decision and current_result is not None:
+            annret_key = "1day.excess_return_with_cost.annualized_return"
+            try:
+                baseline_annret = None
+                # Try current experiment's baseline first (works for loop 0)
+                if exp.based_experiments and not exp.based_experiments[0].sub_tasks:
+                    br = exp.based_experiments[0].result
+                    if br is not None:
+                        baseline_annret = float(br.loc[annret_key])
+                # Fallback: search trace history for the baseline result (loop 1+)
+                if baseline_annret is None:
+                    for hist_exp, _ in trace.hist:
+                        if hasattr(hist_exp, "based_experiments") and hist_exp.based_experiments:
+                            b0 = hist_exp.based_experiments[0]
+                            if not b0.sub_tasks and b0.result is not None:
+                                baseline_annret = float(b0.result.loc[annret_key])
+                                break
+                if baseline_annret is not None:
+                    current_annret = float(current_result.loc[annret_key])
+                    threshold = baseline_annret * 0.80
+                    if current_annret < threshold:
+                        logger.warning(
+                            f"[HARD VETO] AnnRet {current_annret:.4f} < baseline×80% ({threshold:.4f}). "
+                            f"Overriding LLM ACCEPT → REJECT."
+                        )
+                        decision = False
+                        reason = (
+                            f"{reason} | [HARD VETO] AnnRet ({current_annret:.4f}) dropped below "
+                            f"80% of baseline ({baseline_annret:.4f}), threshold={threshold:.4f}. "
+                            f"Factor combination is destructive to Alpha158 signal."
+                        )
+            except Exception as e:
+                logger.warning(f"[HARD VETO] Could not check AnnRet threshold: {e}")
 
         return HypothesisFeedback(
             observations=observations,
@@ -238,10 +243,48 @@ class QlibModelExperiment2Feedback(Experiment2Feedback):
                     return v
             return default
 
+        decision = convert2bool(_get_ci(response_json_hypothesis, "Decision", "false"))
+        reason = _get_ci(response_json_hypothesis, "Reasoning", "No reasoning provided")
+
+        # Hard veto: if AnnRet < baseline × 80%, reject regardless of LLM decision.
+        # For model experiments, baseline = Alpha158-only factor experiment (sub_tasks=[]).
+        # Search trace history for a factor experiment's baseline result.
+        if decision and exp.result is not None:
+            annret_key = "1day.excess_return_with_cost.annualized_return"
+            try:
+                from rdagent.scenarios.qlib.experiment.factor_experiment import QlibFactorExperiment
+                current_annret = float(exp.result.loc[annret_key])
+                baseline_annret = None
+                # Search trace for the Alpha158-only baseline (empty factor experiment)
+                for hist_exp, _ in trace.hist:
+                    if hasattr(hist_exp, "based_experiments") and hist_exp.based_experiments:
+                        b0 = hist_exp.based_experiments[0]
+                        if isinstance(b0, QlibFactorExperiment) and not b0.sub_tasks and b0.result is not None:
+                            baseline_annret = float(b0.result.loc[annret_key])
+                            break
+                # Fallback: use SOTA experiment's result (model loop without factor history)
+                if baseline_annret is None and SOTA_experiment is not None and SOTA_experiment.result is not None:
+                    baseline_annret = float(SOTA_experiment.result.loc[annret_key])
+
+                if baseline_annret is not None:
+                    threshold = baseline_annret * 0.80
+                    if current_annret < threshold:
+                        logger.warning(
+                            f"[HARD VETO] AnnRet {current_annret:.4f} < baseline×80% ({threshold:.4f}). "
+                            f"Overriding LLM ACCEPT → REJECT."
+                        )
+                        decision = False
+                        reason = (
+                            f"{reason} | [HARD VETO] AnnRet ({current_annret:.4f}) dropped below "
+                            f"80% of baseline ({baseline_annret:.4f}), threshold={threshold:.4f}."
+                        )
+            except Exception as e:
+                logger.warning(f"[HARD VETO] Could not check AnnRet threshold: {e}")
+
         return HypothesisFeedback(
             observations=_get_ci(response_json_hypothesis, "Observations", "No observations provided"),
             hypothesis_evaluation=_get_ci(response_json_hypothesis, "Feedback for Hypothesis", "No feedback provided"),
             new_hypothesis=_get_ci(response_json_hypothesis, "New Hypothesis", "No new hypothesis provided"),
-            reason=_get_ci(response_json_hypothesis, "Reasoning", "No reasoning provided"),
-            decision=convert2bool(_get_ci(response_json_hypothesis, "Decision", "false")),
+            reason=reason,
+            decision=decision,
         )
