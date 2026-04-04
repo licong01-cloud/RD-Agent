@@ -215,25 +215,30 @@ class FBWorkspace(Workspace):
             if data_file_path.name in {"result.h5", "execution.lock"}:
                 continue
             workspace_data_file_path = workspace_path / data_file_path.name
-            if workspace_data_file_path.exists():
+            if workspace_data_file_path.exists() or workspace_data_file_path.is_symlink():
                 workspace_data_file_path.unlink()
-            try:
-                os.link(data_file_path, workspace_data_file_path)
-                continue
-            except OSError:
-                pass
 
+            # 优先 symlink（零磁盘开销，跨文件系统兼容）
+            # 如果源是 symlink，resolve 到真实路径再链接
+            real_source = data_file_path.resolve() if data_file_path.is_symlink() else data_file_path
             if platform.system() in ("Linux", "Darwin"):
                 try:
-                    workspace_data_file_path.symlink_to(data_file_path)
+                    workspace_data_file_path.symlink_to(real_source)
                     continue
                 except OSError:
                     pass
 
+            # fallback: 硬链接（仅同文件系统）
+            try:
+                os.link(real_source, workspace_data_file_path)
+                continue
+            except OSError:
+                pass
+
             # Last resort: copy small files only.
             # Copying large H5 files would quickly fill up the disk and is usually unnecessary.
             try:
-                size = data_file_path.stat().st_size
+                size = real_source.stat().st_size
             except OSError:
                 size = 0
             if size > 50 * 1024 * 1024:
@@ -241,7 +246,7 @@ class FBWorkspace(Workspace):
                     f"Failed to link/symlink large file into workspace: {data_file_path} -> {workspace_data_file_path}. "
                     "Refusing to copy large files. Please check filesystem permissions/symlink settings."
                 )
-            shutil.copy2(data_file_path, workspace_data_file_path)
+            shutil.copy2(real_source, workspace_data_file_path)
 
     DEL_KEY = "__DEL__"
 
@@ -276,14 +281,24 @@ class FBWorkspace(Workspace):
         """
         return list(self.workspace_path.iterdir())
 
+    # 二进制文件后缀：直接 copy 到 workspace，不进 file_dict（用于 benchmark parquet 等）
+    BINARY_SUFFIXES = {".parquet", ".pkl", ".bin"}
+
     def inject_code_from_folder(self, folder_path: Path) -> None:
         """
         Load the workspace from the folder
         """
+        self.prepare()
         for file_path in folder_path.rglob("*"):
             if file_path.suffix in (".py", ".yaml", ".md"):
                 relative_path = file_path.relative_to(folder_path)
                 self.inject_files(**{str(relative_path): file_path.read_text()})
+            elif file_path.suffix in self.BINARY_SUFFIXES:
+                relative_path = file_path.relative_to(folder_path)
+                target = self.workspace_path / relative_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                import shutil
+                shutil.copy2(file_path, target)
 
     def inject_code_from_file_dict(self, workspace: FBWorkspace) -> None:
         """

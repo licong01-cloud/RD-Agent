@@ -77,6 +77,10 @@ def create_app() -> FastAPI:
     from rdagent.app.api_endpoints.qe_evolution_api import router as qe_evolution_router
     app.include_router(qe_evolution_router)
 
+    # System Metrics API (节点心跳/资源指标/版本信息)
+    from rdagent.app.api_endpoints.system_metrics_api import router as system_metrics_router
+    app.include_router(system_metrics_router)
+
     # Results API：本期作为 AIstock 初始化/增量同步的主接口。
     # 权威来源：log/<task_id>/ 与 log/<task_id>/__session__/ （不依赖 registry.sqlite / loop / SQLite）。
 
@@ -1347,24 +1351,18 @@ def create_app() -> FastAPI:
                             try:
                                 parts = n.strip("()' ").split("', '")
                                 parsed.append(parts[1] if len(parts) > 1 else parts[0])
-                            except Exception:
-                                parsed.append(n)
+                            except Exception as e:
+                                raise ValueError(f"MultiIndex 列名解析失败: {n!r}: {e}") from e
                         else:
                             if n.lower() not in ("datetime", "instrument"):
                                 parsed.append(n)
                     sota_factors = parsed
                     sota_source = "parquet_schema"
                 except Exception as e:
-                    sota_source = f"parquet_read_error: {e}"
+                    return {"ok": False, "task_id": str(task_id), "error": f"parquet schema 读取失败 ({pq}): {e}"}
 
         if not sota_factors:
-            # 回退：从 sub_tasks 中收集因子名
-            sub_tasks = getattr(factor_exp, "sub_tasks", None) or []
-            for st in sub_tasks:
-                name = getattr(st, "factor_name", None) or getattr(st, "name", None)
-                if name:
-                    sota_factors.append(str(name))
-            sota_source = "sub_tasks_fallback" if sota_factors else "no_sota_factors_found"
+            return {"ok": False, "task_id": str(task_id), "error": "no_sota_factors_found: parquet 不存在或列为空"}
 
         # ---------- 2) Alpha 基线因子列表（从 workspace yaml 配置文件） ----------
         # Alpha 基线因子定义在 conf_combined_factors_dynamic.yaml 或
@@ -1408,42 +1406,10 @@ def create_app() -> FastAPI:
                                 alpha_source = f"workspace/{_yf}:alpha158_config.feature[1]"
                                 break
                     except Exception as e:
-                        alpha_source = f"yaml_parse_error({_yf}): {e}"
-
-        # 回退：从 model_meta.json 读取（兼容旧版本）
-        if not alpha_factors and ws_native is not None and (ws_native / "model_meta.json").exists():
-            try:
-                import json as _json
-                meta_text = (ws_native / "model_meta.json").read_text(encoding="utf-8")
-                meta_obj = _json.loads(meta_text)
-                handler_kw = meta_obj.get("dataset_conf", {}).get("kwargs", {}).get("handler", {}).get("kwargs", {})
-                for proc in handler_kw.get("infer_processors", []):
-                    if proc.get("class") == "FilterCol":
-                        alpha_factors = proc.get("kwargs", {}).get("col_list", [])
-                        alpha_source = "workspace/model_meta.json"
-                        break
-            except Exception as e:
-                if not alpha_source:
-                    alpha_source = f"model_meta_parse_error: {e}"
+                        return {"ok": False, "task_id": str(task_id), "error": f"yaml 配置解析失败 ({_yf}): {e}"}
 
         if not alpha_factors:
-            # 回退：从 file_dict 读取 model_meta.json
-            fd, _ = _extract_file_dict_from_sub_workspaces(factor_exp)
-            if isinstance(fd, dict) and "model_meta.json" in fd:
-                try:
-                    import json as _json
-                    raw = fd["model_meta.json"]
-                    text = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
-                    meta_obj = _json.loads(text)
-                    handler_kw = meta_obj.get("dataset_conf", {}).get("kwargs", {}).get("handler", {}).get("kwargs", {})
-                    for proc in handler_kw.get("infer_processors", []):
-                        if proc.get("class") == "FilterCol":
-                            alpha_factors = proc.get("kwargs", {}).get("col_list", [])
-                            alpha_source = "file_dict/model_meta.json"
-                            break
-                except Exception as e:
-                    if not alpha_source:
-                        alpha_source = f"file_dict_meta_parse_error: {e}"
+            return {"ok": False, "task_id": str(task_id), "error": "alpha_factors 未找到: workspace yaml 中无 alpha158_config.feature"}
 
         # ---------- 3) 模型特征数（从 workspace mlruns params.pkl） ----------
         model_feature_count: int | None = None
@@ -1463,22 +1429,7 @@ def create_app() -> FastAPI:
                             model_feature_count = int(inner.num_feature())
                             model_source = f"mlruns/{params_candidates[-1].relative_to(ws_native)}"
                     except Exception as e:
-                        model_source = f"model_load_error: {e}"
-            # 也检查根目录 params.pkl
-            if model_feature_count is None:
-                root_params = ws_native / "params.pkl"
-                if root_params.exists():
-                    try:
-                        import pickle as _pkl
-                        with root_params.open("rb") as _f:
-                            model_obj = _pkl.load(_f)
-                        inner = getattr(model_obj, "model", model_obj)
-                        if hasattr(inner, "num_feature"):
-                            model_feature_count = int(inner.num_feature())
-                            model_source = "workspace/params.pkl"
-                    except Exception as e:
-                        model_source = f"root_params_load_error: {e}"
-
+                        return {"ok": False, "task_id": str(task_id), "error": f"mlruns params.pkl 加载失败 ({params_candidates[-1]}): {e}"}
         # ---------- 4) 对齐验证 ----------
         expected_total = len(alpha_factors) + len(sota_factors)
         is_aligned = (model_feature_count is not None and expected_total == model_feature_count)
@@ -2692,6 +2643,8 @@ def create_app() -> FastAPI:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                 )
                 return proc.returncode, proc.stdout
             except Exception as e:
@@ -2979,6 +2932,16 @@ def create_app() -> FastAPI:
                 except Exception:
                     continue
             
+            # ===== 删除 scheduler 命令行输出日志 =====
+            scheduler_log = _repo_root() / "git_ignore_folder" / "logs" / "scheduler_tasks" / f"{task_id}.log"
+            if scheduler_log.exists():
+                scheduler_log.unlink()
+                deleted_items.append({
+                    "type": "scheduler_log",
+                    "path": str(scheduler_log),
+                    "size_mb": 0
+                })
+
             return {
                 "ok": True,
                 "task_id": task_id,

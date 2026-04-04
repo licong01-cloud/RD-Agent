@@ -49,10 +49,10 @@ ALLOWED_FILENAMES = {
 }
 
 # 允许的文件扩展名
-ALLOWED_EXTENSIONS = {".yaml", ".yml", ".py", ".txt", ".json", ".csv"}
+ALLOWED_EXTENSIONS = {".yaml", ".yml", ".py", ".txt", ".json", ".csv", ".b64"}
 
-# 单文件最大大小 (1MB)
-MAX_FILE_SIZE = 1 * 1024 * 1024
+# 单文件最大大小 (10MB — parquet 等二进制文件 base64 编码后较大)
+MAX_FILE_SIZE = 10 * 1024 * 1024
 
 
 def _validate_exp_id(exp_id: str) -> None:

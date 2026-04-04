@@ -110,11 +110,19 @@ async def _run_qlib_backtest(task_id: str, loop_id: str, config: Dict[str, Any],
 
         # 写入实验文件
         if experiment_files:
+            import base64
             for rel_path, content in experiment_files.items():
-                file_path = loop_dir / rel_path
-                file_path.parent.mkdir(parents=True, exist_ok=True)
-                file_path.write_text(content, encoding="utf-8")
-                _append_log(loop_dir, f"[INFO] Wrote experiment file: {rel_path}")
+                if rel_path.endswith(".b64"):
+                    # base64 编码的二进制文件（如 benchmark_sh000300.parquet.b64）
+                    actual_path = loop_dir / rel_path[:-4]  # 去掉 .b64 后缀
+                    actual_path.parent.mkdir(parents=True, exist_ok=True)
+                    actual_path.write_bytes(base64.b64decode(content))
+                    _append_log(loop_dir, f"[INFO] Wrote binary file: {rel_path[:-4]} (decoded from b64)")
+                else:
+                    file_path = loop_dir / rel_path
+                    file_path.parent.mkdir(parents=True, exist_ok=True)
+                    file_path.write_text(content, encoding="utf-8")
+                    _append_log(loop_dir, f"[INFO] Wrote experiment file: {rel_path}")
 
         # 将环境变量注入，确保 model.py 等模块可被 qrun 导入
         env = os.environ.copy()
@@ -142,26 +150,33 @@ async def _run_qlib_backtest(task_id: str, loop_id: str, config: Dict[str, Any],
         log_file_path = loop_dir / "run.log"
         log_fd = os.open(str(log_file_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND)
 
-        # 在独立会话中执行子进程，使其在 uvicorn --reload 时存活
-        process = await asyncio.create_subprocess_shell(
+        # 使用 subprocess.Popen 而非 asyncio.create_subprocess_shell:
+        # 显式 close_fds=True 防止 uvicorn server socket (fd) 泄漏到子进程，
+        # 否则子进程持有端口导致 API 重启时 "Address already in use"
+        import subprocess as _subprocess
+        _proc = _subprocess.Popen(
             final_cmd,
+            shell=True,
             stdout=log_fd,
-            stderr=asyncio.subprocess.STDOUT,
+            stderr=_subprocess.STDOUT,
             env=env,
-            cwd=loop_dir,
+            cwd=str(loop_dir),
             start_new_session=True,
+            close_fds=True,
         )
         os.close(log_fd)  # 父进程关闭 fd 副本，子进程保留自己的副本
 
         # 写入子进程的真实 PID（而非 FastAPI worker PID）
-        (loop_dir / "pid.txt").write_text(str(process.pid))
-        _append_log(loop_dir, f"[INFO] Subprocess started, pid={process.pid}")
+        (loop_dir / "pid.txt").write_text(str(_proc.pid))
+        _append_log(loop_dir, f"[INFO] Subprocess started, pid={_proc.pid}")
 
-        # 等待完成（如果 uvicorn reload 导致父进程重启，此处会被取消，但子进程继续运行）
-        await process.wait()
+        # 在线程池中等待子进程完成（不阻塞事件循环）
+        # 如果 uvicorn reload 导致父进程重启，此 await 会被取消，但子进程继续运行
+        loop = asyncio.get_event_loop()
+        returncode = await loop.run_in_executor(None, _proc.wait)
 
-        if process.returncode != 0:
-            raise RuntimeError(f"QLib backtest failed with return code {process.returncode}")
+        if returncode != 0:
+            raise RuntimeError(f"QLib backtest failed with return code {returncode}")
 
         # 记录状态为 completed
         status_file.write_text("completed")
@@ -189,13 +204,21 @@ async def stream_task_logs(task_id: str):
 
     async def event_generator():
         seen_offsets: Dict[str, int] = {}
+        idle_count = 0
+        _MAX_IDLE = 300  # 300秒无新日志则终止 SSE
         while True:
             if not task_dir.exists():
                 payload = {"status": "waiting", "logs": [f"Task directory not found yet: {task_id}"]}
                 yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
                 await asyncio.sleep(1)
+                idle_count += 1
+                if idle_count >= _MAX_IDLE:
+                    payload = {"status": "timeout", "logs": ["SSE stream timeout: task directory not found"]}
+                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    return
                 continue
 
+            had_new_lines = False
             loop_dirs = sorted([p for p in task_dir.iterdir() if p.is_dir()], key=lambda p: p.name)
             for loop_dir in loop_dirs:
                 log_file = loop_dir / "run.log"
@@ -210,8 +233,28 @@ async def stream_task_logs(task_id: str):
                     seen_offsets[file_key] = f.tell()
 
                 if new_lines:
+                    had_new_lines = True
                     payload = {"status": "running", "logs": [f"[{loop_dir.name}] {line}" for line in new_lines]}
                     yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+            # 检查最新 loop 的 status.txt 是否为终态
+            if loop_dirs:
+                latest_status_file = loop_dirs[-1] / "status.txt"
+                if latest_status_file.exists():
+                    st = latest_status_file.read_text().strip()
+                    if st in ("completed", "failed"):
+                        payload = {"status": st, "logs": [f"Loop finished with status: {st}"]}
+                        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                        return
+
+            if had_new_lines:
+                idle_count = 0
+            else:
+                idle_count += 1
+                if idle_count >= _MAX_IDLE:
+                    payload = {"status": "timeout", "logs": ["SSE stream timeout: no new logs"]}
+                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    return
 
             await asyncio.sleep(1)
 
@@ -292,6 +335,88 @@ async def get_loop_status(task_id: str, loop_id: str):
     # 其他未知状态（如 interrupted），直接返回
     return {"status": status}
 
+@router.post("/tasks/{task_id}/loops/{loop_id}/kill")
+async def kill_loop(task_id: str, loop_id: str):
+    """
+    终止正在运行的 Loop 进程。
+
+    通过 pid.txt 获取子进程 PID，发送 SIGTERM 给进程组（优雅终止）。
+    如果进程未在 5 秒内退出，发送 SIGKILL（强制终止）。
+    使用 asyncio.sleep 避免阻塞事件循环。
+    """
+    import signal
+    loop_dir = _get_loop_dir(task_id, loop_id)
+    pid_file = loop_dir / "pid.txt"
+    status_file = loop_dir / "status.txt"
+
+    if not pid_file.exists():
+        raise HTTPException(status_code=404, detail=f"No pid.txt found for {task_id}/{loop_id}")
+
+    try:
+        pid = int(pid_file.read_text().strip())
+    except (ValueError, OSError) as e:
+        raise HTTPException(status_code=400, detail=f"Invalid pid.txt: {e}")
+
+    if pid <= 0:
+        raise HTTPException(status_code=400, detail=f"Invalid PID value: {pid}")
+
+    killed = False
+    error_detail = None
+    try:
+        os.kill(pid, 0)  # Check if alive
+
+        # 尝试杀进程组（包括子进程），失败则回退到单进程
+        try:
+            pgid = os.getpgid(pid)
+            os.killpg(pgid, signal.SIGTERM)
+            _append_log(loop_dir, f"[KILL] Sent SIGTERM to process group pgid={pgid} (pid={pid})")
+        except (ProcessLookupError, OSError):
+            os.kill(pid, signal.SIGTERM)
+            _append_log(loop_dir, f"[KILL] Sent SIGTERM to pid={pid} (pgid fallback)")
+
+        # 非阻塞等待进程退出
+        for _ in range(10):
+            await asyncio.sleep(0.5)
+            try:
+                os.kill(pid, 0)
+            except (ProcessLookupError, OSError):
+                killed = True
+                break
+
+        if not killed:
+            # Force kill
+            try:
+                pgid = os.getpgid(pid)
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    pass
+            _append_log(loop_dir, f"[KILL] Sent SIGKILL to pid={pid}")
+            killed = True
+
+    except (ProcessLookupError, OSError):
+        # Process already dead
+        killed = True
+        _append_log(loop_dir, f"[KILL] pid={pid} already dead")
+    except Exception as e:
+        error_detail = str(e)
+        _append_log(loop_dir, f"[KILL] Unexpected error killing pid={pid}: {e}")
+        logger.error(f"Kill loop {task_id}/{loop_id} pid={pid} error: {e}")
+
+    # Mark status as cancelled
+    if status_file.exists():
+        current = status_file.read_text().strip()
+        if current == "running":
+            status_file.write_text("cancelled")
+            _append_log(loop_dir, f"[KILL] Marked status as cancelled")
+
+    result = {"killed": killed, "pid": pid, "status": "cancelled"}
+    if error_detail:
+        result["error"] = error_detail
+    return result
+
 @router.get("/tasks/{task_id}/loops/{loop_id}/metrics")
 async def get_loop_metrics(task_id: str, loop_id: str):
     """
@@ -323,13 +448,11 @@ async def get_loop_metrics(task_id: str, loop_id: str):
 async def get_loop_enhanced_metrics(task_id: str, loop_id: str):
     """
     获取 LOOP 增强诊断指标（IC 时间序列、训练过程、收益曲线等）。
-    主路径：从 qlib_results_enhanced.json 提取 5 个诊断子段。
-    兼容回退：尝试独立文件（ic_diagnostics.json 等）。
+    从 qlib_results_enhanced.json 提取诊断子段，文件不存在则 404。
     """
     loop_dir = _get_loop_dir(task_id, loop_id)
     task_dir = _get_task_dir(task_id)
 
-    # --- 主路径: 从 qlib_results_enhanced.json 提取 ---
     enhanced_file = None
     for search_dir in [loop_dir, task_dir]:
         candidate = search_dir / "qlib_results_enhanced.json"
@@ -337,45 +460,29 @@ async def get_loop_enhanced_metrics(task_id: str, loop_id: str):
             enhanced_file = candidate
             break
 
-    if enhanced_file is not None:
-        with open(enhanced_file, "r", encoding="utf-8") as f:
-            full_data = json.load(f)
+    if enhanced_file is None:
+        raise HTTPException(status_code=404, detail=f"qlib_results_enhanced.json not found in {loop_dir} or {task_dir}")
 
-        # 提取 5 个诊断子段
-        _SECTION_KEYS = [
-            "ic_diagnostics", "return_curves", "training_diagnostics",
-            "trade_diagnostics", "prediction_diagnostics",
-        ]
-        result = {}
-        for key in _SECTION_KEYS:
-            if key in full_data:
-                result[key] = full_data[key]
+    with open(enhanced_file, "r", encoding="utf-8") as f:
+        full_data = json.load(f)
 
-        # IC key 标准化: ic_dates → dates (前端期望 dates)
-        ic = result.get("ic_diagnostics")
-        if ic and "ic_dates" in ic and "dates" not in ic:
-            ic["dates"] = ic.pop("ic_dates")
-
-        if result:
-            return result
-
-    # --- 兼容回退: 尝试独立文件 ---
+    _SECTION_KEYS = [
+        "ic_diagnostics", "return_curves", "training_diagnostics",
+        "trade_diagnostics", "prediction_diagnostics",
+        "feature_importance", "top_stocks", "bottom_stocks", "stock_trades",
+    ]
     result = {}
-    _FALLBACK_FILES = {
-        "ic_diagnostics": "ic_diagnostics.json",
-        "return_curves": "return_curves.json",
-        "training_diagnostics": "training_diagnostics.json",
-        "trade_diagnostics": "trade_diagnostics.json",
-        "prediction_diagnostics": "prediction_diagnostics.json",
-    }
-    for key, filename in _FALLBACK_FILES.items():
-        fpath = loop_dir / filename
-        if fpath.exists():
-            with open(fpath, "r", encoding="utf-8") as f:
-                result[key] = json.load(f)
+    for key in _SECTION_KEYS:
+        if key in full_data:
+            result[key] = full_data[key]
+
+    # IC key 标准化: ic_dates → dates (前端期望 dates)
+    ic = result.get("ic_diagnostics")
+    if ic and "ic_dates" in ic and "dates" not in ic:
+        ic["dates"] = ic.pop("ic_dates")
 
     if not result:
-        raise HTTPException(status_code=404, detail="Enhanced metrics not available yet")
+        raise HTTPException(status_code=500, detail=f"qlib_results_enhanced.json exists but contains no diagnostic sections")
 
     return result
 
