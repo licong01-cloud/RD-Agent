@@ -86,10 +86,17 @@ def _load_all_close_prices(qlib_bin: Path) -> pd.DataFrame:
         n_values = min(len(values), len(calendar) - cal_start_idx)
         values = values[:n_values]
         dates = calendar[cal_start_idx : cal_start_idx + n_values]
+        # Respect inst_start from all.txt (IPO filter applied by snapshot_writer)
+        start_ts = pd.Timestamp(inst_start)
+        mask = dates >= start_ts
+        dates = dates[mask]
+        values = values[mask]
+        if len(dates) == 0:
+            continue
         df = pd.DataFrame(
             {"close": values},
             index=pd.MultiIndex.from_arrays(
-                [dates, [inst_upper] * n_values], names=["datetime", "instrument"]
+                [dates, [inst_upper] * len(dates)], names=["datetime", "instrument"]
             ),
         )
         df.loc[df["close"] == 0.0, "close"] = np.nan

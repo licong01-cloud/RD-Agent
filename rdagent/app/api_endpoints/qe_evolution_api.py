@@ -63,6 +63,8 @@ class LoopRunRequest(BaseModel):
     config: Dict[str, Any]
     experiment_files: Optional[Dict[str, str]] = None
     wsl_command: Optional[str] = None
+    callback_url: Optional[str] = None
+    model_source: Optional[Dict[str, Any]] = None
 
 class LoopRunResponse(BaseModel):
     loop_id: str
@@ -81,7 +83,7 @@ def _append_log(loop_dir: Path, message: str):
     with open(log_file, "a", encoding="utf-8") as f:
         f.write(message + "\n")
 
-async def _run_qlib_backtest(task_id: str, loop_id: str, config: Dict[str, Any], experiment_files: Optional[Dict[str, str]], wsl_command: Optional[str]):
+async def _run_qlib_backtest(task_id: str, loop_id: str, config: Dict[str, Any], experiment_files: Optional[Dict[str, str]], wsl_command: Optional[str] = None, callback_url: Optional[str] = None, model_source: Optional[Dict[str, Any]] = None):
     """
     后台任务：执行 QLib 回测。
 
@@ -128,6 +130,38 @@ async def _run_qlib_backtest(task_id: str, loop_id: str, config: Dict[str, Any],
         env = os.environ.copy()
         env["PYTHONPATH"] = f"{loop_dir}:{env.get('PYTHONPATH', '')}"
         env.setdefault("PYTHONUNBUFFERED", "1")
+
+        # model_source mlruns 符号链接（策略演进复复用源任务训练的模型）
+        if model_source:
+            cross_node = model_source.get("cross_node", False)
+            dst_mlruns = loop_dir / "mlruns"
+
+            if cross_node:
+                # 跨节点：从 experiment_files 中解压 mlruns_params.tar.gz
+                tar_b64_file = loop_dir / "mlruns_params.tar.gz"
+                if tar_b64_file.exists():
+                    import tarfile, io
+                    tar_data = tar_b64_file.read_bytes()
+                    with tarfile.open(fileobj=io.BytesIO(tar_data), mode="r:gz") as tar:
+                        tar.extractall(path=loop_dir)
+                    tar_b64_file.unlink()
+                    _append_log(loop_dir, f"[INFO] Cross-node mlruns extracted to {dst_mlruns}")
+                else:
+                    _append_log(loop_dir, "[WARN] Cross-node mode but mlruns_params.tar.gz not found")
+            else:
+                # 同节点：符号链接
+                # qlib task_train 将 params.pkl 保存在 workspace 根级 mlruns/ 下，
+                # 而 Loop*/mlruns/ 仅包含 QE 自身记录的元数据（无模型权重）。
+                # 因此优先链接根级 mlruns，fallback 到 loop 级。
+                src_task = model_source.get("source_task_id", "")
+                src_loop = model_source.get("source_loop", "")
+                if src_task and src_loop:
+                    src_mlruns_root = WORKSPACE_BASE / src_task / "mlruns"
+                    src_mlruns_loop = WORKSPACE_BASE / src_task / src_loop / "mlruns"
+                    src_mlruns = src_mlruns_root if src_mlruns_root.exists() else src_mlruns_loop
+                    if src_mlruns.exists() and not dst_mlruns.exists():
+                        os.symlink(str(src_mlruns), str(dst_mlruns))
+                        _append_log(loop_dir, f"[INFO] Symlink mlruns: {src_mlruns} → {dst_mlruns}")
 
         # 构造执行命令
         if wsl_command:
@@ -183,6 +217,21 @@ async def _run_qlib_backtest(task_id: str, loop_id: str, config: Dict[str, Any],
         _append_log(loop_dir, f"[DONE] loop={loop_id} status=completed")
         logger.info(f"Completed QLib backtest for {loop_id}")
 
+        # 通知 AIstock backend（Loop 完成回调）
+        if callback_url:
+            try:
+                import httpx as _httpx
+                _cb_payload = {
+                    "loop_id": f"{task_id}_{loop_id}",
+                    "task_id": task_id,
+                    "status": "completed",
+                }
+                async with httpx.AsyncClient(timeout=10) as _cb:
+                    await _cb.post(callback_url, json=_cb_payload)
+                logger.info(f"Callback sent to {callback_url} for {loop_id}")
+            except Exception as cb_err:
+                logger.warning(f"Callback failed for {loop_id}: {cb_err}")
+
     except Exception as e:
         logger.error(f"Backtest failed for {loop_id}: {e}")
         # 仅在状态未被健康检查更新时标记为 failed
@@ -194,6 +243,28 @@ async def _run_qlib_backtest(task_id: str, loop_id: str, config: Dict[str, Any],
             status_file.write_text("failed")
             (loop_dir / "error.log").write_text(str(e))
         _append_log(loop_dir, f"[ERROR] loop={loop_id} error={str(e)}")
+
+@router.get("/tasks/{task_id}/loops/{loop_id}/mlruns-params")
+async def download_mlruns_params(task_id: str, loop_id: str):
+    """打包 loop 的 mlruns 中 params.pkl 及其目录结构，返回 tar.gz。"""
+    import tarfile, io, glob as _glob
+    loop_dir = _get_loop_dir(task_id, loop_id)
+    mlruns_dir = loop_dir / "mlruns"
+    if not mlruns_dir.exists():
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=404, content={"error": "mlruns not found"})
+    params_files = _glob.glob(str(mlruns_dir / "**" / "params.pkl"), recursive=True)
+    if not params_files:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=404, content={"error": "params.pkl not found"})
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for pf in params_files:
+            arcname = os.path.relpath(pf, loop_dir)
+            tar.add(pf, arcname=arcname)
+    buf.seek(0)
+    from fastapi.responses import Response
+    return Response(content=buf.read(), media_type="application/gzip")
 
 @router.get("/tasks/{task_id}/logs")
 async def stream_task_logs(task_id: str):
@@ -237,15 +308,31 @@ async def stream_task_logs(task_id: str):
                     payload = {"status": "running", "logs": [f"[{loop_dir.name}] {line}" for line in new_lines]}
                     yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-            # 检查最新 loop 的 status.txt 是否为终态
+            # 检查是否所有 loop 都到达终态（支持并行策略演进场景）
             if loop_dirs:
-                latest_status_file = loop_dirs[-1] / "status.txt"
-                if latest_status_file.exists():
-                    st = latest_status_file.read_text().strip()
-                    if st in ("completed", "failed"):
-                        payload = {"status": st, "logs": [f"Loop finished with status: {st}"]}
-                        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-                        return
+                all_terminal = True
+                any_loop_has_status = False
+                for ld in loop_dirs:
+                    sf = ld / "status.txt"
+                    if sf.exists():
+                        any_loop_has_status = True
+                        st = sf.read_text().strip()
+                        if st not in ("completed", "failed"):
+                            all_terminal = False
+                            break
+                    else:
+                        all_terminal = False
+                        break
+                if any_loop_has_status and all_terminal:
+                    final_status = "completed"
+                    for ld in loop_dirs:
+                        sf = ld / "status.txt"
+                        if sf.exists() and sf.read_text().strip() == "failed":
+                            final_status = "failed"
+                            break
+                    payload = {"status": final_status, "logs": [f"All loops finished with status: {final_status}"]}
+                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    return
 
             if had_new_lines:
                 idle_count = 0
@@ -272,6 +359,7 @@ async def create_and_run_loop(task_id: str, request: LoopRunRequest, background_
         background_tasks.add_task(
             _run_qlib_backtest, task_id, loop_id, request.config,
             request.experiment_files, request.wsl_command,
+            request.callback_url, request.model_source,
         )
         
         return LoopRunResponse(
@@ -467,9 +555,12 @@ async def get_loop_enhanced_metrics(task_id: str, loop_id: str):
         full_data = json.load(f)
 
     _SECTION_KEYS = [
+        "summary",
         "ic_diagnostics", "return_curves", "training_diagnostics",
         "trade_diagnostics", "prediction_diagnostics",
         "feature_importance", "top_stocks", "bottom_stocks", "stock_trades",
+        "factor_analysis", "absolute_returns", "all_stocks", "stock_pnl_summary",
+        "limit_analysis",
     ]
     result = {}
     for key in _SECTION_KEYS:

@@ -259,6 +259,7 @@ EVAL_WINDOWS = {
     "out_sample": ("2024-07-01", None),
     "recent_6m": (-126, None),
     "recent_3m": (-63, None),
+    "recent_1m": (-21, None),
 }
 
 REQUIRED_DAYS = {
@@ -266,6 +267,7 @@ REQUIRED_DAYS = {
     "out_sample": 0,
     "recent_6m": 126,
     "recent_3m": 63,
+    "recent_1m": 21,
 }
 
 
@@ -314,6 +316,302 @@ def _align_instrument_names(close_df: pd.DataFrame, factors_df: pd.DataFrame) ->
 
     logger.warning("Instrument name alignment: no reliable mapping found, using as-is")
     return close_df
+
+
+# ================================================================
+# Standalone per-factor computation (extracted from closure for reuse)
+# ================================================================
+
+def _compute_factor_metrics_impl(
+    fname: str,
+    f_arr_full: np.ndarray,
+    dates: pd.DatetimeIndex,
+    fwd_arr: np.ndarray,
+    fwd_arrs: dict[str, np.ndarray],
+    close_unstacked: pd.DataFrame,
+    data_start: str,
+    data_end: str,
+    calc_batch_id: str,
+) -> tuple[list, list]:
+    """Compute all eval-window metrics for a single factor (thread-safe, read-only).
+
+    Returns (factor_results, factor_reports).
+    """
+    grp_full = _group_returns_from_matrices(f_arr_full, fwd_arr)
+
+    factor_results = []
+    factor_reports = []
+
+    for window_name, window_spec in EVAL_WINDOWS.items():
+        try:
+            mask, w_start, w_end = _resolve_date_mask(dates, window_spec, data_start, data_end)
+            if mask.sum() == 0:
+                factor_reports.append({
+                    "factor_name": fname, "eval_window": window_name, "status": "skipped",
+                    "error_message": f"数据天数不足: 实际0天, 需要{REQUIRED_DAYS.get(window_name, 0)}天",
+                    "n_trading_days": 0, "required_days": REQUIRED_DAYS.get(window_name, 0),
+                    "data_start": None, "data_end": None,
+                    "data_source": "parquet", "calc_engine": "rdagent",
+                    "calculated_at": datetime.now(timezone.utc).isoformat(),
+                })
+                continue
+
+            req_days = REQUIRED_DAYS.get(window_name, 0)
+            actual_days = int(mask.sum())
+            if req_days > 0 and actual_days < req_days:
+                factor_reports.append({
+                    "factor_name": fname, "eval_window": window_name, "status": "skipped",
+                    "error_message": f"数据天数不足: 实际{actual_days}天, 需要{req_days}天",
+                    "n_trading_days": actual_days, "required_days": req_days,
+                    "data_start": w_start, "data_end": w_end,
+                    "data_source": "parquet", "calc_engine": "rdagent",
+                    "calculated_at": datetime.now(timezone.utc).isoformat(),
+                })
+                continue
+
+            f_w = f_arr_full[mask]
+            r_w = fwd_arr[mask]
+
+            f_w_z = _robust_zscore_matrix(f_w)
+            r_w_z = _robust_zscore_matrix(r_w)
+            ic_p = _pearson_ic_from_matrices(f_w_z, r_w_z)
+
+            r_w_csz = _cs_zscore_matrix(r_w)
+            ic_p_csz = _pearson_ic_from_matrices(f_w_z, r_w_csz)
+
+            ic_s = _pearson_ic_from_matrices(_rank_matrix(f_w), _rank_matrix(r_w))
+
+            ic_p_clean = ic_p[~np.isnan(ic_p)]
+            ic_s_clean = ic_s[~np.isnan(ic_s)]
+            ic_csz_clean = ic_p_csz[~np.isnan(ic_p_csz)]
+
+            ic_mean = float(ic_p_clean.mean()) if len(ic_p_clean) > 0 else None
+            ic_std = float(ic_p_clean.std()) if len(ic_p_clean) > 0 else None
+            ric_mean = float(ic_s_clean.mean()) if len(ic_s_clean) > 0 else None
+            ric_std = float(ic_s_clean.std()) if len(ic_s_clean) > 0 else None
+            ic_csz_mean = float(ic_csz_clean.mean()) if len(ic_csz_clean) > 0 else None
+
+            result = {
+                "factor_name": fname, "eval_window": window_name,
+                "calc_batch_id": calc_batch_id,
+                "data_start": w_start, "data_end": w_end,
+                "return_horizon": "1d", "universe": "all",
+                "calculated_at": datetime.now(timezone.utc).isoformat(),
+                "ic_mean": ic_mean, "ic_std": ic_std, "ic_csz_mean": ic_csz_mean,
+                "rank_ic_mean": ric_mean, "rank_ic_std": ric_std,
+                "icir": float(ic_mean / ic_std) if ic_mean and ic_std and ic_std > 0 else None,
+                "rank_icir": float(ric_mean / ric_std) if ric_mean and ric_std and ric_std > 0 else None,
+                "ic_positive_ratio": float((ic_p_clean > 0).mean()) if len(ic_p_clean) > 0 else None,
+            }
+
+            lo = _long_only_from_group_arr(grp_full, mask)
+            result.update(lo)
+            result["group_return_monotonicity"] = _monotonicity_from_group_arr(grp_full, mask)
+
+            if window_name == "full":
+                result["turnover"] = _turnover_from_matrix(f_arr_full)
+                result["ic_decay_half_life"] = _ic_decay_half_life(f_arr_full, close_unstacked)
+            else:
+                result["turnover"] = None
+                result["ic_decay_half_life"] = None
+
+            if window_name == "full":
+                f_ranked_full = _rank_matrix(f_w)
+                for pname, p_arr in fwd_arrs.items():
+                    r_p = p_arr[mask]
+                    r_ranked_p = _rank_matrix(r_p)
+                    ic_mp = _pearson_ic_from_matrices(f_ranked_full, r_ranked_p)
+                    ic_mp_clean = ic_mp[~np.isnan(ic_mp)]
+                    result[f"rank_ic_{pname}"] = float(ic_mp_clean.mean()) if len(ic_mp_clean) > 0 else None
+            else:
+                for pname in HOLDING_PERIODS:
+                    result[f"rank_ic_{pname}"] = None
+
+            n_total = f_w.size
+            n_valid = np.count_nonzero(~np.isnan(f_w))
+            result["coverage"] = float(n_valid / n_total) if n_total > 0 else 0.0
+            result["n_trading_days"] = int(mask.sum())
+
+            factor_results.append(result)
+            factor_reports.append({
+                "factor_name": fname, "eval_window": window_name, "status": "ok",
+                "error_message": None, "n_trading_days": int(mask.sum()),
+                "required_days": REQUIRED_DAYS.get(window_name, 0),
+                "data_start": w_start, "data_end": w_end,
+                "data_source": "parquet", "calc_engine": "rdagent",
+                "calculated_at": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as e:
+            logger.warning(f"Failed {window_name} for {fname}: {e}")
+            _n_days = int(mask.sum()) if 'mask' in locals() and mask is not None else None
+            _w_start = w_start if 'w_start' in locals() else None
+            _w_end = w_end if 'w_end' in locals() else None
+            factor_reports.append({
+                "factor_name": fname, "eval_window": window_name, "status": "error",
+                "error_message": str(e), "n_trading_days": _n_days,
+                "required_days": REQUIRED_DAYS.get(window_name, 0),
+                "data_start": _w_start, "data_end": _w_end,
+                "data_source": "parquet", "calc_engine": "rdagent",
+                "calculated_at": datetime.now(timezone.utc).isoformat(),
+            })
+
+    return factor_results, factor_reports
+
+
+# ================================================================
+# Streaming API: prepare once, compute per-factor independently
+# ================================================================
+
+def prepare_shared_context(
+    qlib_bin_path: Optional[Path] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    instrument_hint: Optional[set[str]] = None,
+) -> dict[str, Any]:
+    """One-time shared data preparation: load close prices + compute forward returns.
+
+    Returns context dict for use with compute_single_factor_metrics().
+    """
+    import time
+    t0 = time.time()
+    calc_batch_id = str(uuid.uuid4())
+
+    logger.info("prepare_shared_context: loading close prices...")
+    close_df = read_close_prices(
+        qlib_bin_path, start_date=start_date, end_date=end_date,
+        instrument_filter=instrument_hint,
+    )
+    logger.info(f"Close prices loaded: {len(close_df)} rows, {time.time()-t0:.1f}s")
+
+    close_unstacked = close_df["close"].unstack(level="instrument")
+
+    fwd_ret_mats: dict[str, pd.DataFrame] = {}
+    for period_name, shift_n in HOLDING_PERIODS.items():
+        fwd_ret_mats[period_name] = close_unstacked.shift(-shift_n) / close_unstacked.shift(-1) - 1
+
+    dates = close_unstacked.index
+    data_start = start_date or str(dates.min().date())
+    data_end = end_date or str(dates.max().date())
+
+    logger.info(f"Shared context ready: {len(dates)} dates × {len(close_unstacked.columns)} instruments, "
+                f"{data_start} ~ {data_end}, {time.time()-t0:.1f}s")
+
+    return {
+        "close_unstacked": close_unstacked,
+        "close_df": close_df,
+        "fwd_ret_mats": fwd_ret_mats,
+        "dates": dates,
+        "data_start": data_start,
+        "data_end": data_end,
+        "calc_batch_id": calc_batch_id,
+    }
+
+
+def compute_single_factor_metrics(
+    fname: str,
+    factor_df: pd.DataFrame,
+    ctx: dict[str, Any],
+) -> dict[str, Any]:
+    """Compute metrics for a single factor using shared context.
+
+    Parameters
+    ----------
+    fname : factor name
+    factor_df : DataFrame with single column, MultiIndex(datetime, instrument)
+    ctx : dict from prepare_shared_context()
+
+    Returns dict with keys: factor_name, metrics (dict of window→metrics), reports.
+    """
+    import math
+    import time
+    t0 = time.time()
+
+    close_unstacked = ctx["close_unstacked"]
+    fwd_ret_mats = ctx["fwd_ret_mats"]
+
+    # Extract single factor series
+    if isinstance(factor_df, pd.DataFrame) and factor_df.shape[1] >= 1:
+        factor_series = factor_df.iloc[:, 0]
+    else:
+        factor_series = factor_df
+
+    factor_unstacked = factor_series.unstack(level="instrument")
+
+    # Align instruments: close (qlib "000001.SZ") vs factor (tushare "SZ000001")
+    factor_insts = set(factor_unstacked.columns)
+    close_insts = set(close_unstacked.columns)
+    overlap = len(factor_insts & close_insts)
+
+    if overlap < len(factor_insts) * 0.3 and overlap < 100:
+        # Try "000001.SZ" → "SZ000001" conversion
+        mapping = {}
+        for c in close_unstacked.columns:
+            parts = c.split(".")
+            if len(parts) == 2:
+                mapping[c] = parts[1] + parts[0]
+        if len(set(mapping.values()) & factor_insts) > len(factor_insts) * 0.3:
+            logger.info(f"compute_single_factor_metrics({fname}): renaming close instruments (qlib→tushare)")
+            close_unstacked = close_unstacked.rename(columns=mapping)
+            fwd_ret_mats = {k: v.rename(columns=mapping) for k, v in fwd_ret_mats.items()}
+        else:
+            raise ValueError(
+                f"因子与 close 股票命名不匹配且无法自动转换: "
+                f"factor样例={list(factor_insts)[:3]}, close样例={list(close_insts)[:3]}, overlap={overlap}"
+            )
+
+    # Align: factor ∩ close (以 close 为统一基准)
+    common_insts = sorted(close_unstacked.columns.intersection(factor_unstacked.columns))
+    if len(common_insts) < 10:
+        raise ValueError(f"股票交集过少: {len(common_insts)}, factor={len(factor_insts)}, close={len(close_insts)}")
+
+    c_aligned = close_unstacked[common_insts]
+    f_aligned = factor_unstacked.reindex(index=c_aligned.index, columns=common_insts)
+
+    fwd_ret_mat = fwd_ret_mats["1d"][common_insts]
+    fwd_arrs = {pname: df[common_insts].values for pname, df in fwd_ret_mats.items()}
+
+    dates = c_aligned.index
+    fwd_arr = fwd_ret_mat.values
+    f_arr_full = f_aligned.values
+
+    factor_results, factor_reports = _compute_factor_metrics_impl(
+        fname=fname,
+        f_arr_full=f_arr_full,
+        dates=dates,
+        fwd_arr=fwd_arr,
+        fwd_arrs=fwd_arrs,
+        close_unstacked=c_aligned,
+        data_start=ctx["data_start"],
+        data_end=ctx["data_end"],
+        calc_batch_id=ctx["calc_batch_id"],
+    )
+
+    # Sanitize NaN/Inf → None
+    for rec in factor_results:
+        for k, v in rec.items():
+            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                rec[k] = None
+
+    # Reorganize: group by eval_window
+    metrics_by_window = {}
+    for rec in factor_results:
+        window = rec.get("eval_window", "")
+        metrics_by_window[window] = {
+            k: v for k, v in rec.items()
+            if k not in ("factor_name", "eval_window", "calc_batch_id",
+                         "data_source", "calc_engine", "calculated_at")
+        }
+
+    duration = time.time() - t0
+    logger.info(f"compute_single_factor_metrics({fname}): {len(common_insts)} insts, "
+                f"{len(factor_results)} windows ok, {duration:.1f}s")
+
+    return {
+        "factor_name": fname,
+        "metrics": metrics_by_window,
+        "reports": factor_reports,
+        "duration": round(duration, 2),
+    }
 
 
 # ================================================================
@@ -412,165 +710,21 @@ def compute_all_factors_metrics(
     t2 = time.time()
 
     def _compute_single_factor(fi_fname):
-        """Compute all eval-window metrics for a single factor (thread-safe, read-only shared data)."""
+        """Wrapper for parallel dispatch."""
         fi, fname = fi_fname
         f_mat_df = factor_mats[fname]
-        f_arr_full = f_mat_df.values  # (n_dates, n_instruments)
-
-        # Pre-compute group returns for full range (reused across windows)
-        grp_full = _group_returns_from_matrices(f_arr_full, fwd_arr)
-
-        factor_results = []
-        factor_reports = []
-
-        for window_name, window_spec in EVAL_WINDOWS.items():
-            try:
-                mask, w_start, w_end = _resolve_date_mask(dates, window_spec, data_start, data_end)
-                if mask.sum() == 0:
-                    factor_reports.append({
-                        "factor_name": fname,
-                        "eval_window": window_name,
-                        "status": "skipped",
-                        "error_message": f"数据天数不足: 实际0天, 需要{REQUIRED_DAYS.get(window_name, 0)}天",
-                        "n_trading_days": 0,
-                        "required_days": REQUIRED_DAYS.get(window_name, 0),
-                        "data_start": None,
-                        "data_end": None,
-                        "data_source": "parquet",
-                        "calc_engine": "rdagent",
-                        "calculated_at": datetime.now(timezone.utc).isoformat(),
-                    })
-                    continue
-
-                req_days = REQUIRED_DAYS.get(window_name, 0)
-                actual_days = int(mask.sum())
-                if req_days > 0 and actual_days < req_days:
-                    factor_reports.append({
-                        "factor_name": fname,
-                        "eval_window": window_name,
-                        "status": "skipped",
-                        "error_message": f"数据天数不足: 实际{actual_days}天, 需要{req_days}天",
-                        "n_trading_days": actual_days,
-                        "required_days": req_days,
-                        "data_start": w_start,
-                        "data_end": w_end,
-                        "data_source": "parquet",
-                        "calc_engine": "rdagent",
-                        "calculated_at": datetime.now(timezone.utc).isoformat(),
-                    })
-                    continue
-
-                f_w = f_arr_full[mask]
-                r_w = fwd_arr[mask]
-
-                # === Pearson IC（标准做法）：因子+收益均做RobustZScore ===
-                f_w_z = _robust_zscore_matrix(f_w)
-                r_w_z = _robust_zscore_matrix(r_w)
-                ic_p = _pearson_ic_from_matrices(f_w_z, r_w_z)
-
-                # === Pearson IC（辅助-截面）：因子RobustZScore + 收益CSZScore ===
-                r_w_csz = _cs_zscore_matrix(r_w)
-                ic_p_csz = _pearson_ic_from_matrices(f_w_z, r_w_csz)
-
-                # === Rank IC (Spearman)：无需预处理 ===
-                ic_s = _pearson_ic_from_matrices(_rank_matrix(f_w), _rank_matrix(r_w))
-
-                ic_p_clean = ic_p[~np.isnan(ic_p)]
-                ic_s_clean = ic_s[~np.isnan(ic_s)]
-                ic_csz_clean = ic_p_csz[~np.isnan(ic_p_csz)]
-
-                ic_mean = float(ic_p_clean.mean()) if len(ic_p_clean) > 0 else None
-                ic_std = float(ic_p_clean.std()) if len(ic_p_clean) > 0 else None
-                ric_mean = float(ic_s_clean.mean()) if len(ic_s_clean) > 0 else None
-                ric_std = float(ic_s_clean.std()) if len(ic_s_clean) > 0 else None
-                ic_csz_mean = float(ic_csz_clean.mean()) if len(ic_csz_clean) > 0 else None
-
-                result = {
-                    "factor_name": fname,
-                    "eval_window": window_name,
-                    "calc_batch_id": calc_batch_id,
-                    "data_start": w_start,
-                    "data_end": w_end,
-                    "return_horizon": "1d",
-                    "universe": "all",
-                    "calculated_at": datetime.now(timezone.utc).isoformat(),
-                    "ic_mean": ic_mean,
-                    "ic_std": ic_std,
-                    "ic_csz_mean": ic_csz_mean,
-                    "rank_ic_mean": ric_mean,
-                    "rank_ic_std": ric_std,
-                    "icir": float(ic_mean / ic_std) if ic_mean and ic_std and ic_std > 0 else None,
-                    "rank_icir": float(ric_mean / ric_std) if ric_mean and ric_std and ric_std > 0 else None,
-                    "ic_positive_ratio": float((ic_p_clean > 0).mean()) if len(ic_p_clean) > 0 else None,
-                }
-
-                # Group returns — long-only top group metrics (A股纯多头)
-                lo = _long_only_from_group_arr(grp_full, mask)
-                result.update(lo)
-                result["group_return_monotonicity"] = _monotonicity_from_group_arr(grp_full, mask)
-
-                # Turnover & IC decay: only for 'full' window
-                if window_name == "full":
-                    result["turnover"] = _turnover_from_matrix(f_arr_full)
-                    result["ic_decay_half_life"] = _ic_decay_half_life(
-                        f_arr_full, close_unstacked
-                    )
-                else:
-                    result["turnover"] = None
-                    result["ic_decay_half_life"] = None
-
-                # === 多持有期 Rank IC（only for 'full' window，避免重复计算） ===
-                if window_name == "full":
-                    f_ranked_full = _rank_matrix(f_w)
-                    for pname, p_arr in fwd_arrs.items():
-                        r_p = p_arr[mask]
-                        r_ranked_p = _rank_matrix(r_p)
-                        ic_mp = _pearson_ic_from_matrices(f_ranked_full, r_ranked_p)
-                        ic_mp_clean = ic_mp[~np.isnan(ic_mp)]
-                        result[f"rank_ic_{pname}"] = float(ic_mp_clean.mean()) if len(ic_mp_clean) > 0 else None
-                else:
-                    for pname in HOLDING_PERIODS:
-                        result[f"rank_ic_{pname}"] = None
-
-                # Coverage
-                n_total = f_w.size
-                n_valid = np.count_nonzero(~np.isnan(f_w))
-                result["coverage"] = float(n_valid / n_total) if n_total > 0 else 0.0
-                result["n_trading_days"] = int(mask.sum())
-
-                factor_results.append(result)
-                factor_reports.append({
-                    "factor_name": fname,
-                    "eval_window": window_name,
-                    "status": "ok",
-                    "error_message": None,
-                    "n_trading_days": int(mask.sum()),
-                    "required_days": REQUIRED_DAYS.get(window_name, 0),
-                    "data_start": w_start,
-                    "data_end": w_end,
-                    "data_source": "parquet",
-                    "calc_engine": "rdagent",
-                    "calculated_at": datetime.now(timezone.utc).isoformat(),
-                })
-            except Exception as e:
-                logger.warning(f"Failed {window_name} for {fname}: {e}")
-                _n_days = int(mask.sum()) if 'mask' in locals() and mask is not None else None
-                _w_start = w_start if 'w_start' in locals() else None
-                _w_end = w_end if 'w_end' in locals() else None
-                factor_reports.append({
-                    "factor_name": fname,
-                    "eval_window": window_name,
-                    "status": "error",
-                    "error_message": str(e),
-                    "n_trading_days": _n_days,
-                    "required_days": REQUIRED_DAYS.get(window_name, 0),
-                    "data_start": _w_start,
-                    "data_end": _w_end,
-                    "data_source": "parquet",
-                    "calc_engine": "rdagent",
-                    "calculated_at": datetime.now(timezone.utc).isoformat(),
-                })
-
+        f_arr_full = f_mat_df.values
+        factor_results, factor_reports = _compute_factor_metrics_impl(
+            fname=fname,
+            f_arr_full=f_arr_full,
+            dates=dates,
+            fwd_arr=fwd_arr,
+            fwd_arrs=fwd_arrs,
+            close_unstacked=close_unstacked,
+            data_start=data_start,
+            data_end=data_end,
+            calc_batch_id=calc_batch_id,
+        )
         return fi, factor_results, factor_reports
 
     # Parallel execution: each factor is independent (read-only shared matrices)

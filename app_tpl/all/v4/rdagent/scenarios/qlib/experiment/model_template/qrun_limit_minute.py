@@ -1,10 +1,13 @@
-"""分钟线回测专用 runner：按天重建 Exchange + benchmark 注入。
+"""分钟线回测专用 runner：benchmark 注入 + qlib 内存优化参数。
 
 基于 qrun_limit.py，新增：
-1. apply_minute_memory_patch(): monkey-patch NestedExecutor 按天重建 Exchange.quote
-   内存 121GB → ~200MB/天，消除 swap thrashing
-2. load_benchmark_series(): 加载预计算的 SH000300 日收益率，注入 backtest config
+1. load_benchmark_series(): 加载预计算的 SH000300 日收益率，注入 backtest config
    解决 benchmark=None 导致所有收益/风险指标 NaN 的问题
+
+分钟线内存优化（121GB → 200MB/天）已移入 qlib 源码:
+  - exchange.py: Exchange.get_quote_from_qlib() 批次加载 + ensure_data_for_day()
+  - backtest.py: collect_data_loop 在 generate_trade_decision 前调用 ensure_data_for_day
+  环境变量: QLIB_MINUTE_FULL_LOAD=1 跳过批次加载, QLIB_MINUTE_BATCH_DAYS=20 控制批次大小
 
 回退方式：将 workspace.py 的 entry 改回 "python qrun_limit.py" 即可使用原始全量加载模式。
 
@@ -60,6 +63,15 @@ def patch_backtest_config(config: dict):
                 lt = val.get('limit_threshold')
                 if isinstance(lt, list):
                     val['limit_threshold'] = tuple(lt)
+                # v24 策略需要 $high/$low/$open/$up_limit_price/$down_limit_price/$prev_close
+                # Exchange 默认不加载, 通过 subscribe_fields 注入
+                v24_fields = ['$high', '$low', '$open',
+                              '$up_limit_price', '$down_limit_price', '$prev_close']
+                existing = set(val.get('subscribe_fields', []))
+                missing = [f for f in v24_fields if f not in existing]
+                if missing:
+                    val.setdefault('subscribe_fields', [])
+                    val['subscribe_fields'].extend(missing)
             elif key == 'backtest' and isinstance(val, dict):
                 patch_backtest_config(val)
             else:
@@ -148,160 +160,6 @@ def inject_benchmark(config: dict, benchmark_series):
             inject_benchmark(item, benchmark_series)
 
 
-_BATCH_TRADING_DAYS = 20  # 每次加载的交易日数量（20天≈1交易月）
-
-
-def _reload_exchange_for_day(exchange, trade_start_time, trade_end_time):
-    """将 Exchange 的 quote 数据重建为从 trade_start_time 起 N 个交易日的分钟线数据。
-
-    跳过条件：如果当前交易日在已加载的 [_loaded_start, _loaded_end] 范围内，则不重复加载。
-    批量加载 _BATCH_TRADING_DAYS 个交易日，减少 D.features() 调用次数，
-    408 天回测数据加载时间从 35.5min 降至 ~20.7min（-42%）。
-    """
-    import pandas as pd
-    from qlib.data import D
-    from qlib.backtest.high_performance_ds import NumpyQuote
-
-    day_key = pd.Timestamp(trade_start_time).normalize()
-
-    # 检查当前日是否在已加载的批次范围内
-    loaded_start = getattr(exchange, '_loaded_start', None)
-    loaded_end = getattr(exchange, '_loaded_end', None)
-    if loaded_start is not None and loaded_start <= day_key <= loaded_end:
-        return  # 当天数据已在批次中，跳过
-
-    # 获取从当前日到回测结束的交易日历，确定批次边界
-    backtest_end = getattr(exchange, 'end_time', trade_end_time)
-    cal = D.calendar(start_time=trade_start_time, end_time=backtest_end, freq="day")
-    if len(cal) == 0:
-        return
-    batch_end_day = cal[min(_BATCH_TRADING_DAYS - 1, len(cal) - 1)]
-    batch_end_time = pd.Timestamp(batch_end_day).normalize() + pd.Timedelta(hours=23, minutes=59, seconds=59)
-
-    # 清理旧 NumpyQuote 的数据和缓存（必须在加载新数据前完成）
-    old_quote = getattr(exchange, 'quote', None)
-    old_df = getattr(exchange, 'quote_df', None)
-
-    # 先删除 exchange.quote 引用，防止其他代码访问旧实例
-    if hasattr(exchange, 'quote'):
-        exchange.quote = None
-
-    if old_quote is not None:
-        # 1. 清理类级别的 lru_cache（必须在清空 data 之前，防止缓存持有 data 引用）
-        if hasattr(old_quote.get_data, 'cache_clear'):
-            old_quote.get_data.cache_clear()
-        # 2. 显式清空数据字典（持有分钟线大数据）
-        if hasattr(old_quote, 'data') and isinstance(old_quote.data, dict):
-            old_quote.data.clear()
-
-    # 强制 GC 释放旧内存后再加载新数据
-    del old_quote, old_df
-    gc.collect()
-
-    day_df = D.features(
-        exchange.codes, exchange.all_fields,
-        trade_start_time, batch_end_time,
-        freq=exchange.freq, disk_cache=False,
-    )
-    day_df.columns = exchange.all_fields
-    exchange.quote_df = day_df
-    exchange._update_limit(exchange.limit_threshold)
-    exchange.quote = NumpyQuote(exchange.quote_df, exchange.freq)
-    exchange._loaded_start = day_key
-    exchange._loaded_end = pd.Timestamp(batch_end_day).normalize()
-
-    del day_df
-    gc.collect()
-
-
-def apply_minute_memory_patch():
-    """Monkey-patch NestedExecutor 按天重建 Exchange.quote，121GB → 200MB。
-
-    Hook 点：
-    1. Exchange.get_quote_from_qlib — 分钟线只加载第一天数据
-    2. NestedExecutor._init_sub_trading — 每个交易日开始时重建 Exchange.quote
-    3. TopkDropoutStrategy.generate_trade_decision — 策略生成订单前先更新 Exchange 数据
-       （解决时序问题：策略在 _init_sub_trading 之前运行，需要当天数据判断 is_stock_tradable）
-
-    通过环境变量 QLIB_MINUTE_FULL_LOAD=1 可跳过 patch（适用于 128GB+ 内存机器）。
-    """
-    if os.environ.get("QLIB_MINUTE_FULL_LOAD") == "1":
-        print("[INFO] QLIB_MINUTE_FULL_LOAD=1, skipping minute memory patch")
-        return
-
-    # 限制 qlib 并行度，减少 fork 子进程的 COW 内存压力
-    # 默认 kernels=28 会导致 28 个子进程各自继承父进程内存
-    C["kernels"] = 4
-    print(f"[INFO] Limited qlib kernels to 4 (was {C.get('kernels', 'default')})")
-
-    from qlib.data import D
-    from qlib.backtest.executor import NestedExecutor
-    from qlib.backtest.exchange import Exchange
-    from qlib.backtest.high_performance_ds import NumpyQuote
-
-    # Patch 1: Exchange.get_quote_from_qlib — 分钟线只加载第一天
-    _orig_get_quote = Exchange.get_quote_from_qlib
-
-    def _patched_get_quote(self):
-        if self.freq in ('1min', '5min'):
-            import pandas as pd
-            if len(self.codes) == 0:
-                self.codes = D.instruments()
-            # 首次加载 _BATCH_TRADING_DAYS 个交易日
-            cal = D.calendar(start_time=self.start_time, end_time=self.end_time, freq="day")
-            if len(cal) == 0:
-                _orig_get_quote(self)
-                return
-            batch_end_day = cal[min(_BATCH_TRADING_DAYS - 1, len(cal) - 1)]
-            batch_end_time = pd.Timestamp(batch_end_day).normalize() + pd.Timedelta(hours=23, minutes=59, seconds=59)
-            self.quote_df = D.features(
-                self.codes, self.all_fields,
-                self.start_time, batch_end_time,
-                freq=self.freq, disk_cache=False,
-            )
-            self.quote_df.columns = self.all_fields
-            self.trade_w_adj_price = (
-                (self.quote_df["$factor"].isna() & ~self.quote_df["$close"].isna()).any()
-            )
-            self._update_limit(self.limit_threshold)
-            self._loaded_start = pd.Timestamp(self.start_time).normalize()
-            self._loaded_end = pd.Timestamp(batch_end_day).normalize()
-        else:
-            _orig_get_quote(self)
-
-    Exchange.get_quote_from_qlib = _patched_get_quote
-
-    # Patch 2: NestedExecutor._init_sub_trading — 每天重建 quote（内层执行前）
-    _orig_init_sub = NestedExecutor._init_sub_trading
-
-    def _patched_init_sub(self, trade_decision):
-        trade_start_time, trade_end_time = self.trade_calendar.get_step_time()
-        exchange = self.trade_exchange
-        if exchange.freq in ('1min', '5min'):
-            _reload_exchange_for_day(exchange, trade_start_time, trade_end_time)
-        _orig_init_sub(self, trade_decision)
-
-    NestedExecutor._init_sub_trading = _patched_init_sub
-
-    # Patch 3: TopkDropoutStrategy.generate_trade_decision — 策略生成订单前更新 Exchange
-    from qlib.contrib.strategy.signal_strategy import TopkDropoutStrategy
-    _orig_gen_trade = TopkDropoutStrategy.generate_trade_decision
-
-    def _patched_gen_trade(self, execute_result=None):
-        exchange = self.trade_exchange
-        if exchange.freq in ('1min', '5min'):
-            try:
-                trade_start_time, trade_end_time = self.trade_calendar.get_step_time()
-                _reload_exchange_for_day(exchange, trade_start_time, trade_end_time)
-            except IndexError:
-                pass  # 最后一步越界，跳过 reload
-        return _orig_gen_trade(self, execute_result)
-
-    TopkDropoutStrategy.generate_trade_decision = _patched_gen_trade
-
-    print("[INFO] Minute memory patch applied: per-day Exchange rebuild enabled")
-
-
 def main():
     yaml_path = sys.argv[1] if len(sys.argv) > 1 else "conf.yaml"
 
@@ -330,9 +188,6 @@ def main():
     # 注入 benchmark Series（在 qlib init 之后，fallback 需要 D.features）
     benchmark_series = load_benchmark_series(config)
     inject_benchmark(config, benchmark_series)
-
-    # 应用分钟线内存优化 patch（必须在 qlib.init 之后）
-    apply_minute_memory_patch()
 
     # Run training + backtesting
     experiment_name = config.get("experiment_name", "workflow")

@@ -3,22 +3,19 @@
 
 替代 Qlib 内置 TWAPStrategy 作为 NestedExecutor 的 inner_strategy。
 
-规则 (按优先级):
+规则:
   P0 (任意时刻, 最高优先级):
     - 买入股票 + 当前价格 <= 跌停价 → 全量买入 (跌停抄底)
     - 卖出股票 + 当前价格 >= 涨停价 → 全量卖出 (涨停高卖)
-  Phase B (14:30-14:50, 每分钟检测):
-    - 涨停BUY股开板 (limit_up消失) → 全量突击买入 (burst buy)
-    - 抓住短暂开板窗口，优先于 Phase A 再分配
-  Phase A (14:50 触发一次):
-    - 仍未开板的涨停股资金再分配给健康股票
-    - 最后 10 分钟 TWAP 执行加仓量
   P3 (14:30~15:00 尾盘):
     - 剩余订单均匀 TWAP 执行
+  P4 (14:55 触发一次):
+    - 检测被涨停卡住的买入订单 (成交率 < 20%)
+    - 将闲置资金按比例加仓到正常成交的买入股票
 
 A股交易时间: 09:30-11:30 (120min) + 13:00-15:00 (120min) = 240min/天
 尾盘 14:30-15:00 = 第210-239分钟 (0-indexed)
-再分配触发 14:50 = 第230分钟
+再分配触发 14:55 = 第235分钟
 """
 
 import numpy as np
@@ -29,30 +26,34 @@ from qlib.backtest.utils import get_start_end_idx
 
 # 14:30 = 第210个交易分钟 (0-indexed)
 TAIL_START_OFFSET = 210
-# 14:50 = 第230个交易分钟, 触发闲置资金再分配 (原14:55, 提前到14:50给10分钟TWAP)
-REALLOC_OFFSET = 230
+# 14:55 = 第235个交易分钟, 触发闲置资金再分配
+REALLOC_OFFSET = 235
 # 买入订单成交率低于此值视为被卡住
 BLOCKED_FILL_THRESHOLD = 0.2
 
 
 class TailTWAPWithLimitStrategy(TWAPStrategy):
-    """尾盘TWAP + P0涨跌停全量执行 + Phase B开板突击买入 + Phase A再分配。
+    """尾盘TWAP + P0涨跌停全量执行 + P4闲置资金再分配。
 
     继承 TWAPStrategy 以复用 reset() 中的 trade_amount_remain 初始化。
     完全重写 generate_trade_decision() 实现自定义执行逻辑。
     """
 
-    def __init__(self, start_time=None, end_time=None, split_count=None, **kwargs):
-        """过滤 conf.yaml 中执行算法参数，避免 BaseStrategy.__init__ 收到未知 kwargs。"""
-        import inspect
-        from qlib.strategy.base import BaseStrategy
-        valid_keys = set(inspect.signature(BaseStrategy.__init__).parameters.keys()) - {'self'}
-        filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_keys}
-        super().__init__(**filtered_kwargs)
-        # 止损参数默认值（reset 时从外层决策覆盖）
-        self._stop_loss_pct = 0
-        self._cost_basis = {}
-        self._stop_loss_triggered = set()
+    def __init__(self, start_time=None, end_time=None, split_count=None,
+                 lookback_days=None, participation_rate=None, **kwargs):
+        """接受 conf.yaml 中 execution_algo_params 传入的参数。
+
+        Qlib init_instance_by_config 会把 inner_strategy.kwargs 全部传到 __init__。
+        TWAPStrategy.__init__ 不接受这些参数，必须在此拦截，否则 TypeError。
+        """
+        super().__init__()
+        # 这些参数当前未使用（执行时序由 TAIL_START_OFFSET 等常量控制），
+        # 但预留字段以便将来从 conf.yaml 动态覆盖。
+        self._cfg_start_time = start_time
+        self._cfg_end_time = end_time
+        self._cfg_split_count = split_count
+        self._cfg_lookback_days = lookback_days
+        self._cfg_participation_rate = participation_rate
 
     def reset(self, outer_trade_decision=None, **kwargs):
         super().reset(outer_trade_decision=outer_trade_decision, **kwargs)
@@ -65,22 +66,14 @@ class TailTWAPWithLimitStrategy(TWAPStrategy):
             # 再分配额外买入量: {stock_id: extra_shares}
             self._realloc_extra = {}
             self._realloc_done = False
-            self._burst_bought = set()  # Phase B 已突击买入的股票
-            # 止损参数（从外层策略传入，可选）
-            self._stop_loss_pct = getattr(outer_trade_decision, "stop_loss_pct", 0)
-            self._cost_basis = getattr(outer_trade_decision, "cost_basis", {})
-            self._stop_loss_triggered = set()  # 本日已触发止损的股票
 
     def _do_realloc(self, trade_start_time, trade_end_time):
-        """14:50 触发: 检测被卡住的买入订单, 将闲置资金加仓到正常股票。"""
+        """14:55 触发: 检测被卡住的买入订单, 将闲置资金加仓到正常股票。"""
         blocked_cash = 0.0
         healthy_buys = []  # (stock_id, current_price)
 
         for order in self.outer_trade_decision.get_decision():
             if order.direction != Order.BUY:
-                continue
-            # Phase B 已突击买入的股票不参与再分配
-            if order.stock_id in self._burst_bought:
                 continue
             orig = self._original_amount.get(order.stock_id, 0)
             if orig <= 1e-5:
@@ -159,66 +152,18 @@ class TailTWAPWithLimitStrategy(TWAPStrategy):
             trade_step
         )
 
-        # ================================================
-        # 实时止损检查（每根分钟线，全天有效）
-        # 从外层策略获取 cost_basis 和 stop_loss_pct，触发时立即卖出
-        # 如果外层未设置止损（stop_loss_pct=0），自动跳过
-        # ================================================
-        stop_loss_orders = []
-        if self._stop_loss_pct > 0 and self._cost_basis:
-            for code, avg_cost in self._cost_basis.items():
-                if code in self._stop_loss_triggered or avg_cost <= 0:
-                    continue
-                # 获取当前分钟的成交价
-                try:
-                    cur_price = self.trade_exchange.get_deal_price(
-                        stock_id=code,
-                        start_time=trade_start_time,
-                        end_time=trade_end_time,
-                        direction=OrderDir.SELL,
-                    )
-                except Exception:
-                    continue
-                if cur_price is None:
-                    continue
-                try:
-                    cur_price = float(cur_price)
-                except (TypeError, ValueError):
-                    continue
-                if not np.isfinite(cur_price) or cur_price <= 0:
-                    continue
-                threshold = avg_cost * (1.0 - self._stop_loss_pct)
-                if cur_price <= threshold:
-                    pos_amount = self.trade_position.get_stock_amount(code=code)
-                    if pos_amount > 0:
-                        stop_loss_orders.append(Order(
-                            stock_id=code,
-                            amount=pos_amount,
-                            start_time=trade_start_time,
-                            end_time=trade_end_time,
-                            direction=Order.SELL,
-                        ))
-                        self._stop_loss_triggered.add(code)
-
         # 判断是否进入尾盘 (14:30-15:00)
         is_tail = rel_trade_step >= TAIL_START_OFFSET
 
         # ================================================
-        # Phase A: 14:50 触发闲置资金再分配 (仅一次)
+        # P4: 14:55 触发闲置资金再分配 (仅一次)
         # ================================================
         if rel_trade_step >= REALLOC_OFFSET and not self._realloc_done:
             self._realloc_done = True
             self._do_realloc(trade_start_time, trade_end_time)
 
         order_list = []
-        # 收集已触发止损的股票 ID，避免与外层 dropout 卖单重复
-        stop_loss_stock_ids = {o.stock_id for o in stop_loss_orders}
-
         for order in self.outer_trade_decision.get_decision():
-            # 已触发止损的股票跳过外层订单（止损优先，避免双重卖出）
-            if order.stock_id in stop_loss_stock_ids:
-                continue
-
             # 停牌检测
             if self.trade_exchange.check_stock_suspended(
                 stock_id=order.stock_id,
@@ -299,45 +244,13 @@ class TailTWAPWithLimitStrategy(TWAPStrategy):
                             )
                             self._p0_done.add(order.stock_id)
                             continue
-                except Exception:
-                    pass  # quote 数据访问异常，跳过P0检测
-
-            # ================================================
-            # Phase B: 涨停开板突击买入 (14:30-14:50)
-            # ================================================
-            if (
-                is_tail
-                and rel_trade_step < REALLOC_OFFSET
-                and order.direction == Order.BUY
-                and order.stock_id not in self._burst_bought
-            ):
-                try:
-                    limit_up = self.trade_exchange.quote.get_data(
-                        order.stock_id,
-                        trade_start_time,
-                        trade_end_time,
-                        field="$limit_up",
-                        method="ts_data_last",
+                except (KeyError, IndexError) as e:
+                    # quote 中缺少该股票/时间段的涨跌停数据 → 跳过P0但必须记录
+                    import logging as _logging
+                    _logging.getLogger(__name__).warning(
+                        "[TailTWAP] P0 涨跌停检测失败: stock=%s, error=%s",
+                        order.stock_id, e,
                     )
-                    if limit_up is not None and not np.isnan(limit_up) and limit_up < 0.5:
-                        # 涨停标记消失 = 开板 → 全量突击买入
-                        order_list.append(
-                            Order(
-                                stock_id=order.stock_id,
-                                amount=amount_remain,
-                                start_time=trade_start_time,
-                                end_time=trade_end_time,
-                                direction=order.direction,
-                            )
-                        )
-                        self._burst_bought.add(order.stock_id)
-                        continue
-                except Exception:
-                    pass  # quote 数据访问异常，跳过 Phase B 检测
-
-            # Phase B 已突击买入的股票跳过后续 TWAP
-            if order.stock_id in self._burst_bought:
-                continue
 
             # ================================================
             # P3: 尾盘TWAP (14:30-15:00)
@@ -352,7 +265,7 @@ class TailTWAPWithLimitStrategy(TWAPStrategy):
 
             amount_delta = amount_remain / remaining_steps
 
-            # 加上再分配的额外量 (14:50后生效, 均摊到剩余分钟)
+            # 加上再分配的额外量 (14:55后生效, 均摊到剩余分钟)
             extra = self._realloc_extra.get(order.stock_id, 0)
             if extra > 1e-5 and order.direction == Order.BUY:
                 amount_delta += extra / remaining_steps
@@ -388,4 +301,4 @@ class TailTWAPWithLimitStrategy(TWAPStrategy):
                     )
                 )
 
-        return TradeDecisionWO(order_list=stop_loss_orders + order_list, strategy=self)
+        return TradeDecisionWO(order_list=order_list, strategy=self)
