@@ -48,6 +48,29 @@ class ScoreWeightedTopkStrategyV2(ScoreWeightedTopkStrategy):
     3. 补仓模式也卖出跌出 TopK 的持仓，避免现金枯竭死锁
     """
 
+
+    def _can_sell_under_hold_thresh(self, sid, trade_start_time):
+        hold_thresh = float(getattr(self, "hold_thresh", 0) or 0)
+        if hold_thresh <= 0:
+            return True
+        time_per_step = self.trade_calendar.get_freq()
+        try:
+            hold_count = self.trade_position.get_stock_count(sid, bar=time_per_step)
+        except TypeError:
+            hold_count = self.trade_position.get_stock_count(sid)
+        if hold_count is None:
+            raise RuntimeError(
+                f"[ScoreWeightedV2] hold_thresh check returned None for {sid}; "
+                "refusing to sell silently"
+            )
+        if float(hold_count) < hold_thresh:
+            logger.info(
+                "[ScoreWeightedV2] hold_thresh blocked sell: stock=%s hold_count=%s threshold=%s date=%s",
+                sid, hold_count, hold_thresh, trade_start_time,
+            )
+            return False
+        return True
+
     def generate_trade_decision(self, execute_result=None):
         trade_step = self.trade_calendar.get_trade_step()
         trade_start_time, trade_end_time = self.trade_calendar.get_step_time(trade_step)
@@ -74,7 +97,9 @@ class ScoreWeightedTopkStrategyV2(ScoreWeightedTopkStrategy):
         current_holdings = list(self.trade_position.get_stock_list())
 
         # 3. TopK 候选
-        ranked = scores.sort_values(ascending=False)
+        # kind='mergesort': stable sort ensures deterministic tie-breaking
+        # across different CPU SIMD (AVX-512 vs AVX2) — fixes cross-node divergence
+        ranked = scores.sort_values(ascending=False, kind='mergesort')
         topk_stocks = set(ranked.head(self.topk).index.tolist())
 
         # ── Fix #2: 幽灵持仓强制卖出 ──
@@ -131,21 +156,36 @@ class ScoreWeightedTopkStrategyV2(ScoreWeightedTopkStrategy):
             )
 
         # 合并幽灵持仓卖出
-        all_sells = list(actual_sells) + ghost_sells
-        self._diag_stats["ndrop_filtered"] = len(sell_candidates) - len(actual_sells)
+        requested_sells = list(actual_sells) + ghost_sells
+        all_sells = []
+        hold_blocked_sells = []
+        for sid in requested_sells:
+            if self._can_sell_under_hold_thresh(sid, trade_start_time):
+                all_sells.append(sid)
+            else:
+                hold_blocked_sells.append(sid)
+        all_sells_set = set(all_sells)
+        retained_count = len([s for s in current_holdings if s not in all_sells_set])
+        max_buy_slots = max(0, self.topk - retained_count)
+        if len(actual_buys) > max_buy_slots:
+            actual_buys = actual_buys[:max_buy_slots]
+        self._diag_stats["hold_blocked_sells"] = len(hold_blocked_sells)
+        self._diag_stats["ndrop_filtered"] = len(sell_candidates) - len(actual_sells) + len(hold_blocked_sells)
+
 
         # 6. 计算最终持仓列表和权重
         # 此时 final_holdings 中所有股票都在 scores.index 中，无需再过滤
-        final_holdings = [s for s in current_holdings if s not in all_sells] + actual_buys
-        final_scores = np.array([float(scores[s]) for s in final_holdings])
-        weights = self._compute_weights(final_scores)
+        final_holdings = [s for s in current_holdings if s not in all_sells_set] + actual_buys
+        scored_final_holdings = [s for s in final_holdings if s in scores.index]
+        final_scores = np.array([float(scores[s]) for s in scored_final_holdings])
+        weights = self._compute_weights(final_scores) if len(scored_final_holdings) else np.array([])
 
-        if len(weights) == 0:
+        if len(weights) == 0 and not all_sells:
             return TradeDecisionWO([], self)
 
         # 构建 symbol -> weight 映射
         weight_map = {}
-        for i, sid in enumerate(final_holdings):
+        for i, sid in enumerate(scored_final_holdings):
             if i < len(weights):
                 weight_map[sid] = float(weights[i])
 
