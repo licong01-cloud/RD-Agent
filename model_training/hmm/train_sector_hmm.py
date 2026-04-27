@@ -158,6 +158,170 @@ def apply_zscore(obs: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     return standardized, means, stds
 
 
+# ─── 优化函数 ───
+
+def _infer_n_features(hmm) -> int:
+    means = np.asarray(getattr(hmm, "means_", np.empty((0, 0))))
+    if means.ndim == 2 and means.shape[1] > 0:
+        return int(means.shape[1])
+    covars = np.asarray(hmm.covars_)
+    if covars.ndim == 3:
+        return int(covars.shape[1])
+    if covars.ndim == 2 and hmm.covariance_type != "tied":
+        return int(covars.shape[1])
+    if covars.ndim == 2:
+        return int(covars.shape[0])
+    raise ValueError("Cannot infer HMM feature dimension for covariance validation")
+
+
+def _covars_as_full_matrices(hmm) -> np.ndarray:
+    """Return covariance as full matrices, independent of hmmlearn storage shape."""
+    covars = np.asarray(hmm.covars_, dtype=np.float64)
+    n_components = int(hmm.n_components)
+    n_features = _infer_n_features(hmm)
+
+    if covars.ndim == 3:
+        return covars.copy()
+    if covars.ndim == 2:
+        if hmm.covariance_type == "tied" and covars.shape == (n_features, n_features):
+            return np.repeat(covars[None, :, :], n_components, axis=0)
+        return np.array([np.diag(row) for row in covars], dtype=np.float64)
+    if covars.ndim == 1:
+        return np.array([np.eye(n_features) * value for value in covars], dtype=np.float64)
+
+    raise ValueError(f"Unsupported covariance shape for {hmm.covariance_type}: {covars.shape}")
+
+
+def _set_hmm_covars_from_full_matrices(hmm, full_covars: np.ndarray) -> None:
+    """Store fixed covariances through hmmlearn's setter using the expected shape."""
+    cov_type = hmm.covariance_type
+    if cov_type == "diag":
+        hmm.covars_ = np.diagonal(full_covars, axis1=1, axis2=2).copy()
+    elif cov_type == "full":
+        hmm.covars_ = full_covars
+    elif cov_type == "tied":
+        hmm.covars_ = full_covars[0]
+    elif cov_type == "spherical":
+        hmm.covars_ = np.diagonal(full_covars, axis1=1, axis2=2).mean(axis=1)
+    else:
+        raise ValueError(f"Unsupported covariance_type: {cov_type}")
+
+
+def covariance_bound_stats(hmm, max_covar: float = 10.0, min_covar: float = 1e-3) -> Dict[str, Any]:
+    """Validate saved covariance bounds and return compact diagnostics."""
+    full_covars = _covars_as_full_matrices(hmm)
+    cov_type = hmm.covariance_type
+
+    if cov_type in {"diag", "spherical"}:
+        values = np.diagonal(full_covars, axis1=1, axis2=2)
+        value_name = "variance"
+    else:
+        eigvals = [np.linalg.eigvalsh((mat + mat.T) / 2) for mat in full_covars]
+        values = np.concatenate(eigvals) if eigvals else np.array([], dtype=np.float64)
+        value_name = "eigenvalue"
+
+    if values.size == 0:
+        raise ValueError("Cannot validate empty HMM covariance values")
+
+    min_value = float(np.min(values))
+    max_value = float(np.max(values))
+    max_abs_entry = float(np.max(np.abs(full_covars)))
+    within_bounds = min_value >= min_covar - 1e-9 and max_value <= max_covar + 1e-9
+    if not within_bounds:
+        raise ValueError(
+            f"HMM covariance {value_name}s out of bounds after fix: "
+            f"min={min_value:.6g}, max={max_value:.6g}, "
+            f"expected=[{min_covar}, {max_covar}]"
+        )
+
+    return {
+        "covariance_bound_type": value_name,
+        "covariance_min_after": min_value,
+        "covariance_max_after": max_value,
+        "covariance_max_abs_entry_after": max_abs_entry,
+    }
+
+
+def validate_and_fix_covariance(hmm, max_covar: float = 10.0, min_covar: float = 1e-3):
+    """Validate and persistently fix abnormal covariance values.
+
+    Do not mutate ``hmm.covars_[i]`` in place: for hmmlearn this may be a
+    detached view, especially for ``covariance_type='diag'``. Instead rebuild
+    the full covariance representation and write it back through the setter.
+    """
+    cov_type = hmm.covariance_type
+    full_covars = _covars_as_full_matrices(hmm)
+    fixed = False
+    anomaly_count = 0
+
+    if cov_type in {"diag", "spherical"}:
+        diag_vals = np.diagonal(full_covars, axis1=1, axis2=2).copy()
+        anomaly_mask = (diag_vals > max_covar) | (diag_vals < min_covar)
+        anomaly_count = int(np.sum(anomaly_mask))
+        if anomaly_count:
+            diag_vals = np.clip(diag_vals, min_covar, max_covar)
+            full_covars = np.array([np.diag(row) for row in diag_vals], dtype=np.float64)
+            fixed = True
+    elif cov_type in {"full", "tied"}:
+        matrices = [full_covars[0]] if cov_type == "tied" else list(full_covars)
+        fixed_matrices = []
+        for mat in matrices:
+            sym = (mat + mat.T) / 2
+            eigvals, eigvecs = np.linalg.eigh(sym)
+            anomaly_mask = (eigvals > max_covar) | (eigvals < min_covar)
+            anomaly_count += int(np.sum(anomaly_mask))
+            eigvals_fixed = np.clip(eigvals, min_covar, max_covar)
+            if np.any(anomaly_mask):
+                fixed = True
+            fixed_mat = eigvecs @ np.diag(eigvals_fixed) @ eigvecs.T
+            fixed_matrices.append((fixed_mat + fixed_mat.T) / 2)
+        full_covars = (
+            np.repeat(fixed_matrices[0][None, :, :], hmm.n_components, axis=0)
+            if cov_type == "tied"
+            else np.array(fixed_matrices, dtype=np.float64)
+        )
+    else:
+        raise ValueError(f"Unsupported covariance_type: {cov_type}")
+
+    if fixed:
+        _set_hmm_covars_from_full_matrices(hmm, full_covars)
+
+    covariance_bound_stats(hmm, max_covar=max_covar, min_covar=min_covar)
+    return fixed, anomaly_count
+
+
+def smooth_transition_matrix(transmat: np.ndarray, alpha: float = 0.1, min_self_trans: float = 0.3) -> np.ndarray:
+    """平滑转移矩阵."""
+    n_states = transmat.shape[0]
+    smoothed = transmat.copy()
+
+    # Dirichlet 平滑
+    for i in range(n_states):
+        smoothed[i] = (transmat[i] + alpha) / (1 + alpha * n_states)
+
+    # 约束最小自转移概率
+    for i in range(n_states):
+        if smoothed[i, i] < min_self_trans:
+            old_self = smoothed[i, i]
+            smoothed[i, i] = min_self_trans
+            remaining = 1 - min_self_trans
+            other_sum = smoothed[i].sum() - old_self
+            if other_sum > 0:
+                for j in range(n_states):
+                    if i != j:
+                        smoothed[i, j] = smoothed[i, j] / other_sum * remaining
+            else:
+                for j in range(n_states):
+                    if i != j:
+                        smoothed[i, j] = remaining / (n_states - 1)
+
+    # 确保每行和为 1
+    for i in range(n_states):
+        smoothed[i] /= smoothed[i].sum()
+
+    return smoothed
+
+
 # ─── 训练 ───
 
 def train_all_sectors(cfg: HMMTrainConfig) -> Tuple[Dict[str, Any], Dict]:
@@ -189,9 +353,12 @@ def train_all_sectors(cfg: HMMTrainConfig) -> Tuple[Dict[str, Any], Dict]:
     print(f"  行业数: {len(sector_data)}, CSI300 天数: {len(csi300)}")
     print(f"  涨停数据行业数: {len(limit_up_data)}, 跌停数据行业数: {len(limit_down_data)}")
     print(f"  滚动窗口: {cfg.rolling_window}日, Z-score: {cfg.zscore}, 跌停: {cfg.use_limit_down}")
+    print(f"  优化: min_covar=1e-3, 转移矩阵平滑(alpha=0.1), 最小自转移=0.3")
 
     models = {}
     skipped = 0
+    fixed_count = 0
+    total_anomalies = 0
 
     # 第一遍：收集所有行业的原始观测矩阵（用于全局 z-score 统计）
     sector_obs_raw = {}
@@ -241,9 +408,22 @@ def train_all_sectors(cfg: HMMTrainConfig) -> Tuple[Dict[str, Any], Dict]:
                 n_components=cfg.n_states,
                 covariance_type=cfg.covariance_type,
                 n_iter=cfg.n_iter,
+                min_covar=1e-3,  # 新增: 最小协方差阈值
                 random_state=42,
             )
             hmm.fit(obs_train)
+
+            # 验证并修复协方差
+            fixed, anomaly_count = validate_and_fix_covariance(hmm, max_covar=10.0, min_covar=1e-3)
+            cov_stats = covariance_bound_stats(hmm, max_covar=10.0, min_covar=1e-3)
+            if fixed:
+                fixed_count += 1
+                total_anomalies += anomaly_count
+                print(f"    {sector_code} ({sector_name}): 修复 {anomaly_count} 个异常协方差")
+
+            # 平滑转移矩阵
+            hmm.transmat_ = smooth_transition_matrix(hmm.transmat_, alpha=0.1, min_self_trans=0.3)
+
         except Exception as e:
             print(f"    {sector_code} ({sector_name}) 训练失败: {e}")
             skipped += 1
@@ -284,6 +464,9 @@ def train_all_sectors(cfg: HMMTrainConfig) -> Tuple[Dict[str, Any], Dict]:
             "obs_features": cfg.obs_features,
             "rolling_window": cfg.rolling_window,
             "use_limit_down": cfg.use_limit_down,
+            "covariance_fixed": bool(fixed),
+            "covariance_anomaly_count": int(anomaly_count),
+            **cov_stats,
         }
         # 保存 z-score 参数（推断时需要使用相同的标准化）
         if cfg.zscore and global_zscore_mean is not None:
@@ -293,6 +476,7 @@ def train_all_sectors(cfg: HMMTrainConfig) -> Tuple[Dict[str, Any], Dict]:
         models[sector_code] = model_info
 
     print(f"  训练完成: {len(models)} 个行业, 跳过 {skipped} 个")
+    print(f"  协方差修复: {fixed_count} 个行业, 共 {total_anomalies} 个异常值")
     return models, {
         "sector_data": sector_data, "csi300": csi300, "market_vol": market_vol,
         "limit_up_data": limit_up_data, "limit_down_data": limit_down_data,
