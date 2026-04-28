@@ -147,7 +147,10 @@ async def _run_qlib_backtest(task_id: str, loop_id: str, config: Dict[str, Any],
                     tar_b64_file.unlink()
                     _append_log(loop_dir, f"[INFO] Cross-node mlruns extracted to {dst_mlruns}")
                 else:
-                    _append_log(loop_dir, "[WARN] Cross-node mode but mlruns_params.tar.gz not found")
+                    msg = "Cross-node mode requires mlruns_params.tar.gz, but it was not provided"
+                    status_file.write_text("failed")
+                    _append_log(loop_dir, f"[ERROR] {msg}")
+                    raise RuntimeError(msg)
             else:
                 # 同节点：符号链接
                 # qlib task_train 将 params.pkl 保存在 workspace 根级 mlruns/ 下，
