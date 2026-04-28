@@ -5,6 +5,10 @@
    解决 benchmark=None 导致所有收益/风险指标 NaN 的问题
 2. --backtest-only: 跳过模型训练，从已有 mlruns 加载模型直接回测
    用于失败 Loop 恢复（训练已完成、回测失败）或策略对比分析
+3. --train-only: 只训练模型+生成 pred.pkl，跳过回测（PortAnaRecord）
+   用于多Alpha分布式架构：从节点只训练，主节点统一回测
+4. --pred-backtest: 从已有 combined_prediction.pkl 直接跑 IC分析+选股+回测
+   用于多Alpha统一回测：主节点合并各组预测后执行完整回测
 
 分钟线内存优化（121GB → 200MB/天）已移入 qlib 源码:
   - exchange.py: Exchange.get_quote_from_qlib() 批次加载 + ensure_data_for_day()
@@ -14,8 +18,10 @@
 回退方式：将 workspace.py 的 entry 改回 "python qrun_limit.py" 即可使用原始全量加载模式。
 
 用法：
-  python qrun_limit_minute.py conf.yaml                  # 完整训练+回测
-  python qrun_limit_minute.py conf.yaml --backtest-only   # 跳过训练，只回测
+  python qrun_limit_minute.py conf.yaml                                    # 完整训练+回测
+  python qrun_limit_minute.py conf.yaml --backtest-only                     # 跳过训练，只回测
+  python qrun_limit_minute.py conf.yaml --train-only                        # 只训练，跳过回测
+  python qrun_limit_minute.py conf.yaml --pred-backtest combined_pred.pkl   # 从预测文件直接回测
 """
 import argparse
 import gc
@@ -68,10 +74,11 @@ def patch_backtest_config(config: dict):
                 lt = val.get('limit_threshold')
                 if isinstance(lt, list):
                     val['limit_threshold'] = tuple(lt)
-                # v24 策略需要 $high/$low/$open/$up_limit_price/$down_limit_price/$prev_close
-                # Exchange 默认不加载, 通过 subscribe_fields 注入
+                # V24/V25 strategies need extra minute fields; V25 uses $factor
+                # to convert adjusted OHLC back to raw prices before raw limit/pre_close checks.
+                # Exchange does not load them by default; inject through subscribe_fields.
                 v24_fields = ['$high', '$low', '$open',
-                              '$up_limit_price', '$down_limit_price', '$prev_close']
+                              '$up_limit_price', '$down_limit_price', '$prev_close', '$factor']
                 existing = set(val.get('subscribe_fields', []))
                 missing = [f for f in v24_fields if f not in existing]
                 if missing:
@@ -170,6 +177,10 @@ def main():
     parser.add_argument("yaml_path", nargs="?", default="conf.yaml")
     parser.add_argument("--backtest-only", action="store_true",
                         help="跳过模型训练，从已有 mlruns 加载模型直接回测")
+    parser.add_argument("--train-only", action="store_true",
+                        help="只训练模型+生成 pred.pkl，跳过回测（多Alpha从节点模式）")
+    parser.add_argument("--pred-backtest", type=str, metavar="PRED_PKL",
+                        help="从指定的 prediction pkl 文件直接跑 IC分析+选股+回测（多Alpha统一回测）")
     args = parser.parse_args()
 
     # Jinja2 渲染 → YAML 解析
@@ -200,14 +211,186 @@ def main():
 
     experiment_name = config.get("experiment_name", "workflow")
 
-    if args.backtest_only:
+    if args.pred_backtest:
+        # ── Pred-backtest 模式：从 combined prediction 直接跑 IC+选股+回测 ──
+        pred_path = Path(args.pred_backtest)
+        if not pred_path.exists():
+            raise FileNotFoundError(
+                f"--pred-backtest: prediction 文件不存在: {pred_path.resolve()}"
+            )
+        print(f"[INFO] Pred-backtest mode: loading prediction from {pred_path}")
+        _run_pred_backtest(config, experiment_name, pred_path)
+    elif args.backtest_only:
         # ── Backtest-only 模式：跳过训练，加载已有模型 ──
         print("[INFO] Backtest-only mode: skipping model training, loading existing model")
         _run_backtest_only(config, experiment_name)
+    elif args.train_only:
+        # ── Train-only 模式：训练+生成pred.pkl，跳过回测 ──
+        print("[INFO] Train-only mode: training model + generating predictions, skipping backtest")
+        _run_train_only(config, experiment_name)
     else:
         # ── 完整模式：训练 + 回测 ──
         recorder = task_train(config.get("task"), experiment_name=experiment_name)
         recorder.save_objects(config=config)
+
+
+def _run_pred_backtest(config: dict, experiment_name: str, pred_path: Path):
+    """从已有的 prediction pkl 文件直接执行 IC分析 + 选股 + 分钟线回测。
+
+    用于多Alpha统一回测：主节点合并各组 pred.pkl 后，用 combined prediction
+    执行完整的选股策略（TopK）+ 分钟线执行（TailTWAP）+ 回测分析。
+
+    流程：
+    1. 加载 combined_prediction.pkl（MultiIndex: datetime × instrument → score）
+    2. 初始化 dataset（只需要 test segment 的 label，用于 SigAnaRecord 计算 IC）
+    3. 创建新 recorder，注入 pred.pkl
+    4. 执行 SigAnaRecord（IC/ICIR 分析）
+    5. 执行 PortAnaRecord（选股+分钟线回测：收益/回撤/Sharpe/换手率/持仓）
+    """
+    import copy
+    import pickle
+    import pandas as pd
+    from qlib.utils import init_instance_by_config
+    from qlib.workflow import R
+    from qlib.data.dataset import Dataset
+
+    # 1. 加载 prediction
+    with open(pred_path, "rb") as f:
+        pred_df = pickle.load(f)
+
+    if isinstance(pred_df, pd.Series):
+        pred_df = pred_df.to_frame("score")
+    if not isinstance(pred_df, pd.DataFrame):
+        raise TypeError(
+            f"--pred-backtest: prediction 文件内容类型错误: {type(pred_df).__name__}，"
+            f"期望 pd.DataFrame 或 pd.Series"
+        )
+    if not isinstance(pred_df.index, pd.MultiIndex):
+        raise ValueError(
+            f"--pred-backtest: prediction 必须是 MultiIndex (datetime, instrument)，"
+            f"实际 index 类型: {type(pred_df.index).__name__}"
+        )
+
+    print(f"[INFO] Loaded prediction: {len(pred_df)} rows, "
+          f"columns={list(pred_df.columns)}, "
+          f"date range: {pred_df.index.get_level_values(0).min()} ~ "
+          f"{pred_df.index.get_level_values(0).max()}")
+
+    # 2. 初始化 dataset（需要 label 用于 SigAnaRecord 计算 IC）
+    task_config = copy.deepcopy(config.get("task"))
+    dataset: Dataset = init_instance_by_config(task_config["dataset"], accept_types=Dataset)
+    dataset.config(dump_all=False, recursive=True)
+
+    # 从 dataset 提取 label（SigAnaRecord 依赖 label.pkl 存在于 recorder 中）
+    from qlib.data.dataset.handler import DataHandlerLP
+    from qlib.data.dataset import DatasetH
+    from qlib.utils import class_casting
+    with class_casting(dataset, DatasetH):
+        try:
+            raw_label = dataset.prepare(segments="test", col_set="label", data_key=DataHandlerLP.DK_R)
+        except TypeError:
+            raw_label = dataset.prepare(segments="test", col_set="label")
+    if raw_label is None or (hasattr(raw_label, 'empty') and raw_label.empty):
+        raise RuntimeError(
+            "--pred-backtest: 无法从 dataset 获取 label。"
+            "SigAnaRecord 需要 label 来计算 IC/ICIR。"
+            "请检查 conf.yaml 的 dataset 配置和数据路径。"
+        )
+    print(f"[INFO] Extracted label from dataset: {len(raw_label)} rows")
+
+    # 3. 构建 records 列表：跳过 SignalRecord（不需要模型预测），保留 SigAnaRecord + PortAnaRecord
+    records_config = task_config.get("record", [])
+    if isinstance(records_config, dict):
+        records_config = [records_config]
+
+    filtered_records = []
+    for rec in records_config:
+        rec_class = rec.get("class", "")
+        if "SignalRecord" in rec_class:
+            # SignalRecord 需要 model 来生成 pred.pkl，pred-backtest 模式下跳过
+            # pred.pkl 已经直接注入 recorder
+            print(f"[INFO] Pred-backtest: skipping {rec_class} (prediction already provided)")
+            continue
+        filtered_records.append(rec)
+
+    if not filtered_records:
+        raise RuntimeError(
+            "--pred-backtest: 过滤后没有可执行的 record。"
+            "conf.yaml 必须包含 SigAnaRecord 和/或 PortAnaRecord。"
+        )
+
+    # 检查必须有 PortAnaRecord（回测是核心目的）
+    has_port_ana = any("PortAna" in r.get("class", "") for r in filtered_records)
+    if not has_port_ana:
+        raise RuntimeError(
+            "--pred-backtest: conf.yaml 中缺少 PortAnaRecord。"
+            "统一回测必须包含 PortAnaRecord 才能执行选股+回测。"
+        )
+
+    # 4. 创建新 recorder，注入 pred.pkl + label.pkl，执行 records
+    # SigAnaRecord 和 PortAnaRecord 不包含 <MODEL>/<DATASET> 占位符，
+    # 不需要 fill_placeholder。直接用 init_instance_by_config 实例化。
+
+    with R.start(experiment_name=experiment_name):
+        recorder = R.get_recorder()
+        # 注入 prediction 和 label 到 recorder
+        # SigAnaRecord 依赖: pred.pkl + label.pkl（check() 验证两者都存在）
+        # PortAnaRecord 依赖: pred.pkl（从 recorder 加载预测信号）
+        recorder.save_objects(**{"pred.pkl": pred_df, "label.pkl": raw_label})
+        print(f"[INFO] Injected pred.pkl + label.pkl into recorder: {recorder.info['id']}")
+
+        for record_config in filtered_records:
+            rec_class = record_config.get("class", "")
+            print(f"[INFO] Executing: {rec_class}")
+            r = init_instance_by_config(
+                record_config,
+                recorder=recorder,
+                default_module="qlib.workflow.record_temp",
+                try_kwargs={"dataset": dataset},
+            )
+            r.generate()
+            print(f"[INFO] Completed: {rec_class}")
+
+        recorder.save_objects(config=config)
+
+    print("[INFO] Pred-backtest completed: IC analysis + portfolio backtest done")
+
+
+def _run_train_only(config: dict, experiment_name: str):
+    """只训练模型 + 生成 pred.pkl，跳过回测（PortAnaRecord）。
+
+    用于多Alpha分布式架构：从节点只负责训练，主节点收集 pred.pkl 后统一回测。
+    保留 SignalRecord（生成 pred.pkl）和 SigAnaRecord（计算 IC 指标），
+    移除 PortAnaRecord（回测）以避免需要 v24 执行策略和分钟线数据。
+    """
+    import copy
+    from qlib.utils import init_instance_by_config
+    from qlib.workflow import R
+    from qlib.data.dataset import Dataset
+    from qlib.model.trainer import fill_placeholder
+
+    task_config = copy.deepcopy(config.get("task"))
+
+    # 过滤 records：移除 PortAnaRecord（回测），保留 SignalRecord + SigAnaRecord
+    records = task_config.get("record", [])
+    if isinstance(records, dict):
+        records = [records]
+
+    filtered_records = []
+    for rec in records:
+        rec_class = rec.get("class", "")
+        # PortAnaRecord 是回测记录，train-only 模式下跳过
+        if "PortAna" in rec_class:
+            print(f"[INFO] Train-only: skipping {rec_class}")
+            continue
+        filtered_records.append(rec)
+
+    task_config["record"] = filtered_records
+
+    # 执行训练（task_train 内部会执行 filtered_records 中的 SignalRecord + SigAnaRecord）
+    recorder = task_train(task_config, experiment_name=experiment_name)
+    recorder.save_objects(config=config)
+    print("[INFO] Train-only completed: model trained, pred.pkl generated")
 
 
 def _run_backtest_only(config: dict, experiment_name: str):

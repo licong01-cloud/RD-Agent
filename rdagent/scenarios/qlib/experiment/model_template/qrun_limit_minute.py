@@ -68,10 +68,11 @@ def patch_backtest_config(config: dict):
                 lt = val.get('limit_threshold')
                 if isinstance(lt, list):
                     val['limit_threshold'] = tuple(lt)
-                # v24 策略需要 $high/$low/$open/$up_limit_price/$down_limit_price/$prev_close
-                # Exchange 默认不加载, 通过 subscribe_fields 注入
+                # V24/V25 strategies need extra minute fields; V25 uses $factor
+                # to convert adjusted OHLC back to raw prices before raw limit/pre_close checks.
+                # Exchange does not load them by default; inject through subscribe_fields.
                 v24_fields = ['$high', '$low', '$open',
-                              '$up_limit_price', '$down_limit_price', '$prev_close']
+                              '$up_limit_price', '$down_limit_price', '$prev_close', '$factor']
                 existing = set(val.get('subscribe_fields', []))
                 missing = [f for f in v24_fields if f not in existing]
                 if missing:
