@@ -266,11 +266,14 @@ class ScoreWeightedTopkStrategyV2(ScoreWeightedTopkStrategy):
         self._diag_stats["buys"] = len(buy_orders)
 
         # 备选股（供 inner_strategy TAIL_SUBSTITUTE 使用）
-        backup_depth = 15
-        backup_sids = ranked.iloc[self.topk:self.topk + backup_depth].index.tolist()
+        # 修复：提供完整的高排名候选列表，不限制在 topk 之外
+        # TAIL_SUBSTITUTE 会按排名从高到低选择可交易的股票
+        backup_depth = 100
+        backup_sids = ranked.iloc[:self.topk + backup_depth].index.tolist()
+        already_ordered = set(actual_buys)
         self._backup_candidates = [
             (sid, float(ranked[sid])) for sid in backup_sids
-            if sid not in current_holdings
+            if sid not in current_holdings and sid not in already_ordered
         ]
 
         if cur_dt is not None:
