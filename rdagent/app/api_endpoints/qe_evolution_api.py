@@ -637,6 +637,34 @@ async def cleanup_task_workspace(task_id: str):
     return {"ok": True, "task_id": task_id}
 
 
+@router.delete("/tasks/{task_id}/loops/{loop_id}")
+async def cleanup_loop_workspace(task_id: str, loop_id: str):
+    """
+    Delete a single Loop workspace under one task.
+
+    This endpoint is intentionally scoped to task_id/loop_id so AIstock rerun
+    can remove stale Loop artifacts without deleting sibling Loop results.
+    """
+    task_dir = _get_task_dir(task_id).resolve()
+    loop_dir = (_get_loop_dir(task_id, loop_id)).resolve()
+    try:
+        loop_dir.relative_to(task_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="loop_id resolves outside task workspace") from exc
+
+    if not loop_dir.exists():
+        return {"ok": True, "task_id": task_id, "loop_id": loop_id, "existed": False}
+    if not loop_dir.is_dir():
+        raise HTTPException(status_code=500, detail=f"Loop workspace is not a directory: {loop_id}")
+
+    try:
+        shutil.rmtree(loop_dir)
+        return {"ok": True, "task_id": task_id, "loop_id": loop_id, "existed": True}
+    except Exception as e:
+        logger.error(f"Failed to clean up loop workspace {task_id}/{loop_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/config")
 async def get_workspace_config():
     """
