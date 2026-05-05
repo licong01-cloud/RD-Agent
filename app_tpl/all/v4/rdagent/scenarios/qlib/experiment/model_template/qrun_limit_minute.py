@@ -40,6 +40,8 @@ import qlib
 from qlib.config import C
 
 
+
+
 def render_yaml_template(yaml_path: str) -> str:
     """用环境变量渲染 Jinja2 模板，返回渲染后的 YAML 字符串。"""
     with open(yaml_path, "r") as f:
@@ -60,7 +62,7 @@ def patch_backtest_config(config: dict):
     if isinstance(config, dict):
         for key, val in config.items():
             if key == 'exchange_kwargs' and isinstance(val, dict):
-                lt = val.get('limit_threshold')
+                _maybe_enable_board_lot_exchange(val); lt = val.get('limit_threshold')
                 if isinstance(lt, list):
                     val['limit_threshold'] = tuple(lt)
                 # v24 策略需要 $high/$low/$open/$up_limit_price/$down_limit_price/$prev_close
@@ -104,7 +106,7 @@ def load_benchmark_series(config=None):
     try:
         from qlib.data import D
         # 从 config 提取回测区间
-        start, end = "2024-07-01", "2026-03-10"
+        start, end = "2024-07-01", "2026-04-28"
         if config:
             _extract_backtest_range(config, lambda s, e: None)  # just to find range
             # 简单递归查找 backtest.start_time / end_time
@@ -194,6 +196,18 @@ def main():
     recorder = task_train(config.get("task"), experiment_name=experiment_name)
     recorder.save_objects(config=config)
 
+
+
+def _maybe_enable_board_lot_exchange(exchange_kwargs: dict) -> None:
+    """Enable stock-aware Qlib Exchange rounding when V25.1 requests it."""
+
+    if not exchange_kwargs.pop('board_lot_trade_unit', False):
+        return
+    exchange_kwargs['trade_unit'] = None
+    from qe_board_lot_exchange import install_board_lot_exchange_patch
+
+    install_board_lot_exchange_patch()
+    print("[INFO] Enabled board-lot-aware Qlib Exchange patch")
 
 if __name__ == '__main__':
     main()
