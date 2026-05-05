@@ -229,7 +229,7 @@ async def _run_qlib_backtest(task_id: str, loop_id: str, config: Dict[str, Any],
                     "task_id": task_id,
                     "status": "completed",
                 }
-                async with httpx.AsyncClient(timeout=10) as _cb:
+                async with _httpx.AsyncClient(timeout=10) as _cb:
                     await _cb.post(callback_url, json=_cb_payload)
                 logger.info(f"Callback sent to {callback_url} for {loop_id}")
             except Exception as cb_err:
@@ -249,7 +249,17 @@ async def _run_qlib_backtest(task_id: str, loop_id: str, config: Dict[str, Any],
 
 @router.get("/tasks/{task_id}/loops/{loop_id}/mlruns-params")
 async def download_mlruns_params(task_id: str, loop_id: str):
-    """打包 loop 的 mlruns 中 params.pkl 及其目录结构，返回 tar.gz。"""
+    """打包 loop 的 mlruns 中训练好的模型 run 完整目录，返回 tar.gz。
+
+    背景：仅打包 params.pkl 时，下游 mlflow 找不到 experiment 目录的 meta.yaml，
+    会触发 MissingConfigException 并 fallback 到 loose params.pkl 加载，
+    后者依赖 PYTHONPATH 中存在自定义 model 模块，跨节点常因模块缺失而 pickle
+    反序列化失败 (No module named 'model')，导致 backtest-only 复用模型彻底失败。
+
+    修复：定位每个 params.pkl 后，沿目录上溯打包整个 run 目录（含 meta.yaml /
+    metrics / params / tags / artifacts）以及对应 experiment 目录的 meta.yaml，
+    确保下游 R.get_exp(...) + recorder.load_object(...) 能走主路径。
+    """
     import tarfile, io, glob as _glob
     loop_dir = _get_loop_dir(task_id, loop_id)
     mlruns_dir = loop_dir / "mlruns"
@@ -260,11 +270,37 @@ async def download_mlruns_params(task_id: str, loop_id: str):
     if not params_files:
         from fastapi.responses import JSONResponse
         return JSONResponse(status_code=404, content={"error": "params.pkl not found"})
+
+    # 收集需要打包的路径集合（去重，保持目录结构）。
+    # mlruns 标准布局：mlruns/<exp_id>/<run_id>/artifacts/params.pkl
+    # 即 params.pkl 的祖父是 run_dir，曾祖父是 exp_dir。
+    files_to_pack: set[Path] = set()
+    seen_exp_meta: set[Path] = set()
+    for pf in params_files:
+        pf_path = Path(pf)
+        artifacts_dir = pf_path.parent
+        run_dir = artifacts_dir.parent if artifacts_dir.name == "artifacts" else pf_path.parent
+        exp_dir = run_dir.parent
+        # 整个 run 目录（含 meta.yaml/metrics/params/tags/artifacts/...）
+        if run_dir.is_dir():
+            for p in run_dir.rglob("*"):
+                if p.is_file():
+                    files_to_pack.add(p)
+        # experiment 级别 meta.yaml（mlflow R.get_exp 必读）
+        exp_meta = exp_dir / "meta.yaml"
+        if exp_meta not in seen_exp_meta and exp_meta.is_file():
+            files_to_pack.add(exp_meta)
+            seen_exp_meta.add(exp_meta)
+
+    if not files_to_pack:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=500, content={"error": "params.pkl found but run/exp dirs missing"})
+
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for pf in params_files:
-            arcname = os.path.relpath(pf, loop_dir)
-            tar.add(pf, arcname=arcname)
+        for fp in sorted(files_to_pack):
+            arcname = os.path.relpath(str(fp), str(loop_dir))
+            tar.add(str(fp), arcname=arcname)
     buf.seek(0)
     from fastapi.responses import Response
     return Response(content=buf.read(), media_type="application/gzip")
@@ -620,6 +656,78 @@ async def download_loop_assets(task_id: str, loop_id: str):
         filename=f"{loop_id}_assets.zip",
         media_type="application/zip"
     )
+
+@router.get("/tasks/{task_id}/loops/{loop_id}/files/{file_path:path}")
+async def get_workspace_file(task_id: str, loop_id: str, file_path: str):
+    """读取 workspace 中的指定文件（用于多Alpha跨节点收集 multi_alpha_results.json 等）。
+
+    安全：限制在 loop_dir 内，防止路径穿越攻击。
+    """
+    loop_dir = _get_loop_dir(task_id, loop_id)
+    if not loop_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Loop workspace not found: {task_id}/{loop_id}")
+
+    target = (loop_dir / file_path).resolve()
+    loop_dir_resolved = loop_dir.resolve()
+
+    # 防止路径穿越
+    try:
+        target.relative_to(loop_dir_resolved)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="路径越界")
+
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+
+    # 根据扩展名决定 content-type
+    suffix = target.suffix.lower()
+    media_type = "application/octet-stream"
+    if suffix == ".json":
+        media_type = "application/json"
+    elif suffix in (".txt", ".log"):
+        media_type = "text/plain"
+    elif suffix == ".pkl":
+        media_type = "application/octet-stream"
+
+    return FileResponse(path=target, media_type=media_type, filename=target.name)
+
+
+@router.get("/tasks/{task_id}/loops/{loop_id}/groups/{group_name}/predictions")
+async def get_group_predictions(task_id: str, loop_id: str, group_name: str):
+    """下载指定组的 pred.pkl 文件（用于跨节点收集预测进行 meta 合并）。
+
+    查找顺序：
+      1. group_{group_name}/output/pred.pkl
+      2. group_{group_name}/mlruns/**/artifacts/pred.pkl
+    """
+    loop_dir = _get_loop_dir(task_id, loop_id)
+    if not loop_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Loop workspace not found: {task_id}/{loop_id}")
+
+    group_dir = loop_dir / f"group_{group_name}"
+    if not group_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Group not found: {group_name}")
+
+    # 查找 pred.pkl
+    candidates = [
+        group_dir / "output" / "pred.pkl",
+        group_dir / "pred.pkl",
+    ]
+    # 兜底：在 mlruns/artifacts 中搜索
+    if not any(p.exists() for p in candidates):
+        for p in group_dir.rglob("pred.pkl"):
+            candidates.append(p)
+
+    for pred_path in candidates:
+        if pred_path.exists() and pred_path.is_file():
+            return FileResponse(
+                path=pred_path,
+                media_type="application/octet-stream",
+                filename=f"group_{group_name}_pred.pkl",
+            )
+
+    raise HTTPException(status_code=404, detail=f"pred.pkl not found for group {group_name}")
+
 
 @router.delete("/tasks/{task_id}")
 async def cleanup_task_workspace(task_id: str):
