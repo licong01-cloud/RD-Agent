@@ -11,13 +11,16 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import hashlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 
 
 router = APIRouter(prefix="/api/v1/qe_workspace/factor-cache", tags=["factor-cache"])
+
+_STREAM_CHUNK_SIZE = 1024 * 1024
 
 
 def _default_cache_dir() -> Path:
@@ -90,6 +93,93 @@ def _atomic_write_text(path: Path, text: str) -> None:
     _atomic_write_bytes(path, text.encode("utf-8"))
 
 
+def _validate_meta_payload(payload: Any) -> Dict[str, Any]:
+    meta = payload.get("meta") if isinstance(payload, dict) and isinstance(payload.get("meta"), dict) else payload
+    if not isinstance(meta, dict) or not isinstance(meta.get("factors", {}), dict):
+        raise HTTPException(status_code=400, detail="meta payload must be an object with factors object")
+    return meta
+
+
+def _atomic_write_fileobj(path: Path, fileobj: Any) -> int:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Optional[Path] = None
+    size = 0
+    try:
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            dir=str(path.parent),
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        ) as tmp:
+            tmp_path = Path(tmp.name)
+            while True:
+                chunk = fileobj.read(_STREAM_CHUNK_SIZE)
+                if not chunk:
+                    break
+                size += len(chunk)
+                tmp.write(chunk)
+        if size <= 0:
+            raise HTTPException(status_code=400, detail=f"empty factor cache file: {path.name}")
+        tmp_path.replace(path)
+        return size
+    except Exception:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        raise
+
+
+async def _atomic_write_request_stream(
+    path: Path,
+    request: Request,
+    *,
+    expected_size: Optional[int] = None,
+    expected_sha256: Optional[str] = None,
+) -> Dict[str, Any]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Optional[Path] = None
+    size = 0
+    digest = hashlib.sha256()
+    try:
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            dir=str(path.parent),
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        ) as tmp:
+            tmp_path = Path(tmp.name)
+            async for chunk in request.stream():
+                if not chunk:
+                    continue
+                size += len(chunk)
+                digest.update(chunk)
+                tmp.write(chunk)
+        if size <= 0:
+            raise HTTPException(status_code=400, detail=f"empty factor cache file: {path.name}")
+        if expected_size is not None and size != expected_size:
+            raise HTTPException(
+                status_code=400,
+                detail=f"factor cache file size mismatch: expected={expected_size} actual={size}",
+            )
+        actual_sha256 = digest.hexdigest()
+        if expected_sha256 and expected_sha256.lower() != actual_sha256:
+            raise HTTPException(
+                status_code=400,
+                detail="factor cache file sha256 mismatch",
+            )
+        tmp_path.replace(path)
+        return {"size_bytes": size, "sha256": actual_sha256}
+    except Exception:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        raise
+
+
 @router.get("/meta")
 def get_factor_cache_meta(cache_dir: Optional[str] = Query(None)) -> Dict[str, Any]:
     root = _resolve_cache_root(cache_dir)
@@ -123,6 +213,54 @@ def get_factor_cache_factor_status(
     }
 
 
+@router.put("/factors/{factor_name}/file")
+async def upload_factor_cache_file(
+    factor_name: str,
+    request: Request,
+    cache_dir: Optional[str] = Query(None),
+    expected_size: Optional[int] = Query(None, ge=0),
+    expected_sha256: Optional[str] = Query(None),
+) -> Dict[str, Any]:
+    name = _safe_factor_name(factor_name)
+    root = _resolve_cache_root(cache_dir)
+    target = root / "single" / _safe_factor_file_name(name)
+    result = await _atomic_write_request_stream(
+        target,
+        request,
+        expected_size=expected_size,
+        expected_sha256=expected_sha256,
+    )
+    return {
+        "ok": True,
+        "cache_dir": str(root),
+        "factor_name": name,
+        "filename": target.name,
+        **result,
+    }
+
+
+@router.post("/meta")
+async def update_factor_cache_meta(
+    request: Request,
+    cache_dir: Optional[str] = Query(None),
+) -> Dict[str, Any]:
+    root = _resolve_cache_root(cache_dir)
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"invalid meta JSON payload: {exc}") from exc
+    meta = _validate_meta_payload(payload)
+    _atomic_write_text(
+        root / "_meta.json",
+        json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True),
+    )
+    return {
+        "ok": True,
+        "cache_dir": str(root),
+        "meta_factor_count": len(meta.get("factors") or {}),
+    }
+
+
 @router.post("/sync")
 async def sync_factor_cache_bundle(
     meta_json: str = Form(...),
@@ -137,8 +275,7 @@ async def sync_factor_cache_bundle(
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"invalid sync JSON payload: {exc}") from exc
 
-    if not isinstance(merged_meta, dict) or not isinstance(merged_meta.get("factors", {}), dict):
-        raise HTTPException(status_code=400, detail="meta_json must be an object with factors object")
+    merged_meta = _validate_meta_payload(merged_meta)
     if not isinstance(factor_names_raw, list):
         raise HTTPException(status_code=400, detail="factor_names_json must be a JSON list")
 
@@ -160,16 +297,17 @@ async def sync_factor_cache_bundle(
         if filename in seen:
             raise HTTPException(status_code=400, detail=f"duplicate factor cache file: {filename}")
         seen.add(filename)
-        content = await upload.read()
-        if not content:
-            raise HTTPException(status_code=400, detail=f"empty factor cache file: {filename}")
         target = root / "single" / filename
-        _atomic_write_bytes(target, content)
+        try:
+            upload.file.seek(0)
+        except Exception:
+            pass
+        size_bytes = _atomic_write_fileobj(target, upload.file)
         uploaded.append(
             {
                 "factor_name": expected_files[filename],
                 "filename": filename,
-                "size_bytes": len(content),
+                "size_bytes": size_bytes,
             }
         )
 
