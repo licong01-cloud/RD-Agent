@@ -81,6 +81,10 @@ def create_app() -> FastAPI:
     from rdagent.app.api_endpoints.system_metrics_api import router as system_metrics_router
     app.include_router(system_metrics_router)
 
+    # QE factor-value cache API (AIstock -> execution-node cache sync)
+    from rdagent.app.api_endpoints.factor_cache_api import router as factor_cache_router
+    app.include_router(factor_cache_router)
+
     # Results API：本期作为 AIstock 初始化/增量同步的主接口。
     # 权威来源：log/<task_id>/ 与 log/<task_id>/__session__/ （不依赖 registry.sqlite / loop / SQLite）。
 
