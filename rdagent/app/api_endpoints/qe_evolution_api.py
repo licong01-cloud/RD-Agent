@@ -18,7 +18,7 @@ import stat
 import zipfile
 import asyncio
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Dict, Any, Optional
 
 try:
@@ -146,6 +146,7 @@ def _fail_recorder_isolation(
     source_mlruns: Optional[Path] = None,
 ):
     status_file.write_text("failed")
+    (loop_dir / "error.log").write_text(f"{code}: {message}", encoding="utf-8")
     _write_recorder_isolation_manifest(
         loop_dir,
         status="failed",
@@ -202,11 +203,20 @@ def _validate_recorder_isolation(
 def _safe_extract_mlruns_tar(tar, destination: Path):
     destination_real = destination.resolve(strict=False)
     for member in tar.getmembers():
-        member_name = member.name.replace("\\", "/")
-        if member_name.startswith("/") or ".." in Path(member_name).parts:
+        raw_member_name = member.name.replace("\\", "/")
+        member_path_posix = PurePosixPath(raw_member_name)
+        if raw_member_name.startswith("/") or ".." in member_path_posix.parts:
             raise RuntimeError(f"QE_BACKTEST_UNSAFE_MLRUNS_TAR: unsafe member path {member.name}")
         if member.issym() or member.islnk():
             raise RuntimeError(f"QE_BACKTEST_UNSAFE_MLRUNS_TAR: link member is not allowed {member.name}")
+        if not (member.isdir() or member.isfile()):
+            raise RuntimeError(f"QE_BACKTEST_UNSAFE_MLRUNS_TAR: special member is not allowed {member.name}")
+        member_parts = member_path_posix.parts
+        if member_parts[:1] == (".",):
+            member_parts = member_parts[1:]
+        if member_parts[:1] != ("mlruns",):
+            raise RuntimeError(f"QE_BACKTEST_UNSAFE_MLRUNS_TAR: member outside mlruns {member.name}")
+        member_name = "/".join(member_parts)
         member_path = (destination / member_name).resolve(strict=False)
         if not _is_relative_to(member_path, destination_real):
             raise RuntimeError(f"QE_BACKTEST_UNSAFE_MLRUNS_TAR: member escapes destination {member.name}")
@@ -273,7 +283,16 @@ async def _run_qlib_backtest(task_id: str, loop_id: str, config: Dict[str, Any],
                     import tarfile, io
                     tar_data = tar_b64_file.read_bytes()
                     with tarfile.open(fileobj=io.BytesIO(tar_data), mode="r:gz") as tar:
-                        _safe_extract_mlruns_tar(tar, loop_dir)
+                        try:
+                            _safe_extract_mlruns_tar(tar, loop_dir)
+                        except RuntimeError as exc:
+                            _fail_recorder_isolation(
+                                loop_dir,
+                                status_file,
+                                "QE_BACKTEST_UNSAFE_MLRUNS_TAR",
+                                str(exc),
+                                target_mlruns=dst_mlruns,
+                            )
                     tar_b64_file.unlink()
                     _validate_recorder_isolation(loop_dir, status_file, dst_mlruns)
                     _append_log(loop_dir, f"[INFO] Cross-node mlruns extracted to {dst_mlruns}")
