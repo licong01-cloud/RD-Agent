@@ -14,6 +14,7 @@ QE (QuantEvolver) 演进 API 端点
 import logging
 import os
 import shutil
+import stat
 import zipfile
 import asyncio
 import json
@@ -83,6 +84,134 @@ def _append_log(loop_dir: Path, message: str):
     with open(log_file, "a", encoding="utf-8") as f:
         f.write(message + "\n")
 
+RECORDER_ISOLATION_MANIFEST = "qe_recorder_isolation.json"
+
+
+def _path_has_link_or_reparse_point(path: Path) -> bool:
+    """Return true for symlinks and Windows junction/reparse points."""
+    try:
+        if path.is_symlink():
+            return True
+        attrs = path.lstat().st_file_attributes
+    except AttributeError:
+        return False
+    except FileNotFoundError:
+        return False
+    return bool(attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
+def _realpath_text(path: Path) -> str:
+    return os.path.normcase(os.path.realpath(os.fspath(path)))
+
+
+def _is_relative_to(child: Path, parent: Path) -> bool:
+    try:
+        child.resolve(strict=False).relative_to(parent.resolve(strict=False))
+        return True
+    except ValueError:
+        return False
+
+
+def _write_recorder_isolation_manifest(
+    loop_dir: Path,
+    *,
+    status: str,
+    target_mlruns: Path,
+    source_mlruns: Optional[Path] = None,
+    reason: Optional[str] = None,
+):
+    payload = {
+        "recorder_isolation_status": status,
+        "target_mlruns": str(target_mlruns),
+        "target_mlruns_realpath": _realpath_text(target_mlruns),
+        "target_mlruns_is_symlink_or_reparse": _path_has_link_or_reparse_point(target_mlruns),
+        "source_mlruns": str(source_mlruns) if source_mlruns else None,
+        "source_mlruns_realpath": _realpath_text(source_mlruns) if source_mlruns else None,
+    }
+    if reason:
+        payload["reason"] = reason
+    (loop_dir / RECORDER_ISOLATION_MANIFEST).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _fail_recorder_isolation(
+    loop_dir: Path,
+    status_file: Path,
+    code: str,
+    message: str,
+    *,
+    target_mlruns: Path,
+    source_mlruns: Optional[Path] = None,
+):
+    status_file.write_text("failed")
+    _write_recorder_isolation_manifest(
+        loop_dir,
+        status="failed",
+        target_mlruns=target_mlruns,
+        source_mlruns=source_mlruns,
+        reason=code,
+    )
+    _append_log(loop_dir, f"[ERROR] {code}: {message}")
+    raise RuntimeError(f"{code}: {message}")
+
+
+def _validate_recorder_isolation(
+    loop_dir: Path,
+    status_file: Path,
+    target_mlruns: Path,
+    source_mlruns: Optional[Path] = None,
+):
+    if _path_has_link_or_reparse_point(target_mlruns):
+        _fail_recorder_isolation(
+            loop_dir,
+            status_file,
+            "QE_BACKTEST_TARGET_MLRUNS_IS_SYMLINK",
+            f"target mlruns must be loop-local, not a symlink/reparse point: {target_mlruns}",
+            target_mlruns=target_mlruns,
+            source_mlruns=source_mlruns,
+        )
+    if source_mlruns is not None:
+        if _realpath_text(source_mlruns) == _realpath_text(target_mlruns):
+            _fail_recorder_isolation(
+                loop_dir,
+                status_file,
+                "QE_BACKTEST_SOURCE_TARGET_REALPATH_COLLISION",
+                f"source and target mlruns resolve to the same path: {source_mlruns} == {target_mlruns}",
+                target_mlruns=target_mlruns,
+                source_mlruns=source_mlruns,
+            )
+        if _is_relative_to(target_mlruns, source_mlruns):
+            _fail_recorder_isolation(
+                loop_dir,
+                status_file,
+                "QE_BACKTEST_TARGET_MLRUNS_UNDER_SOURCE",
+                f"target mlruns must not be inside source mlruns: {target_mlruns} under {source_mlruns}",
+                target_mlruns=target_mlruns,
+                source_mlruns=source_mlruns,
+            )
+    _write_recorder_isolation_manifest(
+        loop_dir,
+        status="passed",
+        target_mlruns=target_mlruns,
+        source_mlruns=source_mlruns,
+    )
+
+
+def _safe_extract_mlruns_tar(tar, destination: Path):
+    destination_real = destination.resolve(strict=False)
+    for member in tar.getmembers():
+        member_name = member.name.replace("\\", "/")
+        if member_name.startswith("/") or ".." in Path(member_name).parts:
+            raise RuntimeError(f"QE_BACKTEST_UNSAFE_MLRUNS_TAR: unsafe member path {member.name}")
+        if member.issym() or member.islnk():
+            raise RuntimeError(f"QE_BACKTEST_UNSAFE_MLRUNS_TAR: link member is not allowed {member.name}")
+        member_path = (destination / member_name).resolve(strict=False)
+        if not _is_relative_to(member_path, destination_real):
+            raise RuntimeError(f"QE_BACKTEST_UNSAFE_MLRUNS_TAR: member escapes destination {member.name}")
+    tar.extractall(path=destination)
+
 async def _run_qlib_backtest(task_id: str, loop_id: str, config: Dict[str, Any], experiment_files: Optional[Dict[str, str]], wsl_command: Optional[str] = None, callback_url: Optional[str] = None, model_source: Optional[Dict[str, Any]] = None):
     """
     后台任务：执行 QLib 回测。
@@ -131,40 +260,71 @@ async def _run_qlib_backtest(task_id: str, loop_id: str, config: Dict[str, Any],
         env["PYTHONPATH"] = f"{loop_dir}:{env.get('PYTHONPATH', '')}"
         env.setdefault("PYTHONUNBUFFERED", "1")
 
-        # model_source mlruns 符号链接（策略演进复复用源任务训练的模型）
+        # model_source must never make the target recorder a symlink to the
+        # source recorder. AIstock sends cross-node params payloads for this path.
         if model_source:
             cross_node = model_source.get("cross_node", False)
             dst_mlruns = loop_dir / "mlruns"
 
             if cross_node:
-                # 跨节点：从 experiment_files 中解压 mlruns_params.tar.gz
+                # Cross-node mode unpacks a params payload into this loop.
                 tar_b64_file = loop_dir / "mlruns_params.tar.gz"
                 if tar_b64_file.exists():
                     import tarfile, io
                     tar_data = tar_b64_file.read_bytes()
                     with tarfile.open(fileobj=io.BytesIO(tar_data), mode="r:gz") as tar:
-                        tar.extractall(path=loop_dir)
+                        _safe_extract_mlruns_tar(tar, loop_dir)
                     tar_b64_file.unlink()
+                    _validate_recorder_isolation(loop_dir, status_file, dst_mlruns)
                     _append_log(loop_dir, f"[INFO] Cross-node mlruns extracted to {dst_mlruns}")
                 else:
-                    msg = "Cross-node mode requires mlruns_params.tar.gz, but it was not provided"
-                    status_file.write_text("failed")
-                    _append_log(loop_dir, f"[ERROR] {msg}")
-                    raise RuntimeError(msg)
+                    msg = "cross-node model_source requires mlruns_params.tar.gz, but it was not provided"
+                    _fail_recorder_isolation(
+                        loop_dir,
+                        status_file,
+                        "QE_BACKTEST_SOURCE_PARAMS_PAYLOAD_MISSING",
+                        msg,
+                        target_mlruns=dst_mlruns,
+                    )
             else:
-                # 同节点：符号链接
-                # qlib task_train 将 params.pkl 保存在 workspace 根级 mlruns/ 下，
-                # 而 Loop*/mlruns/ 仅包含 QE 自身记录的元数据（无模型权重）。
-                # 因此优先链接根级 mlruns，fallback 到 loop 级。
+                # Same-node legacy symlink mode is intentionally disabled: it
+                # lets target runs write into source mlruns and can corrupt metrics.
                 src_task = model_source.get("source_task_id", "")
                 src_loop = model_source.get("source_loop", "")
                 if src_task and src_loop:
                     src_mlruns_root = WORKSPACE_BASE / src_task / "mlruns"
                     src_mlruns_loop = WORKSPACE_BASE / src_task / src_loop / "mlruns"
                     src_mlruns = src_mlruns_root if src_mlruns_root.exists() else src_mlruns_loop
-                    if src_mlruns.exists() and not dst_mlruns.exists():
-                        os.symlink(str(src_mlruns), str(dst_mlruns))
-                        _append_log(loop_dir, f"[INFO] Symlink mlruns: {src_mlruns} → {dst_mlruns}")
+                    if not src_mlruns.exists():
+                        _fail_recorder_isolation(
+                            loop_dir,
+                            status_file,
+                            "QE_BACKTEST_SOURCE_MLRUNS_MISSING",
+                            f"source mlruns not found for task={src_task} loop={src_loop}",
+                            target_mlruns=dst_mlruns,
+                            source_mlruns=src_mlruns,
+                        )
+                    _validate_recorder_isolation(loop_dir, status_file, dst_mlruns, src_mlruns)
+                    _fail_recorder_isolation(
+                        loop_dir,
+                        status_file,
+                        "QE_BACKTEST_LEGACY_SYMLINK_MODEL_SOURCE_DISABLED",
+                        "same-node model_source symlink mode is disabled; "
+                        "provide cross_node=true with mlruns_params.tar.gz",
+                        target_mlruns=dst_mlruns,
+                        source_mlruns=src_mlruns,
+                    )
+                else:
+                    _fail_recorder_isolation(
+                        loop_dir,
+                        status_file,
+                        "QE_BACKTEST_MODEL_SOURCE_INCOMPLETE",
+                        "model_source must include source_task_id and source_loop, or use cross_node=true payload",
+                        target_mlruns=dst_mlruns,
+                    )
+        elif (loop_dir / "mlruns").exists():
+            _validate_recorder_isolation(loop_dir, status_file, loop_dir / "mlruns")
+
 
         # 构造执行命令
         if wsl_command:
