@@ -106,5 +106,3 @@ def test_same_node_model_source_fails_before_subprocess(tmp_path, monkeypatch):
     assert manifest["recorder_isolation_status"] == "failed"
     assert manifest["reason"] == "QE_BACKTEST_LEGACY_SYMLINK_MODEL_SOURCE_DISABLED"
     assert not (loop_dir / "pid.txt").exists()
-
-\n
