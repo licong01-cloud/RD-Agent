@@ -95,6 +95,33 @@ def test_safe_extract_rejects_link_members(tmp_path):
             api._safe_extract_mlruns_tar(tar, tmp_path)
 
 
+def test_safe_extract_rejects_hardlink_members(tmp_path):
+    bio = io.BytesIO()
+    with tarfile.open(fileobj=bio, mode="w:gz") as tar:
+        info = tarfile.TarInfo("mlruns/link")
+        info.type = tarfile.LNKTYPE
+        info.linkname = "mlruns/0/run1/artifacts/params.pkl"
+        tar.addfile(info)
+    bio.seek(0)
+
+    with tarfile.open(fileobj=bio, mode="r:gz") as tar:
+        with pytest.raises(RuntimeError, match="link member is not allowed"):
+            api._safe_extract_mlruns_tar(tar, tmp_path)
+
+
+def test_safe_extract_rejects_special_members(tmp_path):
+    bio = io.BytesIO()
+    with tarfile.open(fileobj=bio, mode="w:gz") as tar:
+        info = tarfile.TarInfo("mlruns/fifo")
+        info.type = tarfile.FIFOTYPE
+        tar.addfile(info)
+    bio.seek(0)
+
+    with tarfile.open(fileobj=bio, mode="r:gz") as tar:
+        with pytest.raises(RuntimeError, match="special member is not allowed"):
+            api._safe_extract_mlruns_tar(tar, tmp_path)
+
+
 def test_same_node_model_source_fails_before_subprocess(tmp_path, monkeypatch):
     workspace = tmp_path / "qe_workspace"
     source = workspace / "source_task" / "Loop1" / "mlruns"
@@ -120,6 +147,32 @@ def test_same_node_model_source_fails_before_subprocess(tmp_path, monkeypatch):
     assert not (loop_dir / "pid.txt").exists()
 
 
+def test_same_node_target_under_source_fails_with_full_artifacts(tmp_path, monkeypatch):
+    workspace = tmp_path / "qe_workspace"
+    source = workspace / "source_task" / "Loop1" / "mlruns"
+    source.mkdir(parents=True)
+    monkeypatch.setattr(api, "WORKSPACE_BASE", workspace)
+
+    asyncio.run(
+        api._run_qlib_backtest(
+            "source_task/Loop1/mlruns/nested_target",
+            "Loop2",
+            config={},
+            experiment_files=None,
+            wsl_command="python should_not_run.py",
+            model_source={"source_task_id": "source_task", "source_loop": "Loop1"},
+        )
+    )
+
+    loop_dir = source / "nested_target" / "Loop2"
+    manifest = json.loads((loop_dir / api.RECORDER_ISOLATION_MANIFEST).read_text(encoding="utf-8"))
+    assert (loop_dir / "status.txt").read_text(encoding="utf-8") == "failed"
+    assert "QE_BACKTEST_TARGET_MLRUNS_UNDER_SOURCE" in (loop_dir / "error.log").read_text(encoding="utf-8")
+    assert manifest["recorder_isolation_status"] == "failed"
+    assert manifest["reason"] == "QE_BACKTEST_TARGET_MLRUNS_UNDER_SOURCE"
+    assert not (loop_dir / "pid.txt").exists()
+
+
 def _tar_payload_b64(*members: tuple[str, bytes]) -> str:
     bio = io.BytesIO()
     with tarfile.open(fileobj=bio, mode="w:gz") as tar:
@@ -142,6 +195,28 @@ def test_safe_extract_rejects_parent_traversal_before_normalizing(tmp_path):
             api._safe_extract_mlruns_tar(tar, tmp_path)
 
 
+def test_safe_extract_rejects_regular_file_at_mlruns_root(tmp_path):
+    with tarfile.open(fileobj=_tar_bytes_with_file("mlruns"), mode="r:gz") as tar:
+        with pytest.raises(RuntimeError, match="mlruns root member must be a directory"):
+            api._safe_extract_mlruns_tar(tar, tmp_path)
+
+
+def test_safe_extract_rejects_file_directory_collision(tmp_path):
+    payload = io.BytesIO()
+    with tarfile.open(fileobj=payload, mode="w:gz") as tar:
+        first = tarfile.TarInfo("mlruns/file")
+        first.size = 4
+        tar.addfile(first, io.BytesIO(b"file"))
+        second = tarfile.TarInfo("mlruns/file/child")
+        second.size = 5
+        tar.addfile(second, io.BytesIO(b"child"))
+    payload.seek(0)
+
+    with tarfile.open(fileobj=payload, mode="r:gz") as tar:
+        with pytest.raises(RuntimeError, match="file parent collides with file"):
+            api._safe_extract_mlruns_tar(tar, tmp_path)
+
+
 def test_cross_node_payload_success_writes_passed_manifest(tmp_path, monkeypatch):
     workspace = tmp_path / "qe_workspace"
     monkeypatch.setattr(api, "WORKSPACE_BASE", workspace)
@@ -153,7 +228,7 @@ def test_cross_node_payload_success_writes_passed_manifest(tmp_path, monkeypatch
             "Loop3",
             config={},
             experiment_files={"mlruns_params.tar.gz.b64": payload},
-            wsl_command="python -V",
+            wsl_command="python -c \"import pathlib; pathlib.Path('subprocess_started.txt').write_text('yes')\"",
             model_source={"cross_node": True},
         )
     )
@@ -165,6 +240,7 @@ def test_cross_node_payload_success_writes_passed_manifest(tmp_path, monkeypatch
     assert (loop_dir / "mlruns" / "0" / "run1" / "artifacts" / "params.pkl").is_file()
     assert not (loop_dir / "mlruns_params.tar.gz").exists()
     assert (loop_dir / "pid.txt").is_file()
+    assert (loop_dir / "subprocess_started.txt").read_text(encoding="utf-8") == "yes"
 
 
 def test_cross_node_unsafe_tar_fails_with_manifest_and_no_subprocess(tmp_path, monkeypatch):
@@ -189,4 +265,30 @@ def test_cross_node_unsafe_tar_fails_with_manifest_and_no_subprocess(tmp_path, m
     assert manifest["recorder_isolation_status"] == "failed"
     assert manifest["reason"] == "QE_BACKTEST_UNSAFE_MLRUNS_TAR"
     assert "QE_BACKTEST_UNSAFE_MLRUNS_TAR" in (loop_dir / "error.log").read_text(encoding="utf-8")
+    assert not (loop_dir / "conf.yaml").exists()
+    assert not (loop_dir / "pid.txt").exists()
+
+
+def test_cross_node_corrupt_tar_fails_with_manifest_and_no_subprocess(tmp_path, monkeypatch):
+    workspace = tmp_path / "qe_workspace"
+    monkeypatch.setattr(api, "WORKSPACE_BASE", workspace)
+    payload = base64.b64encode(b"not a tarball").decode("ascii")
+
+    asyncio.run(
+        api._run_qlib_backtest(
+            "target_task",
+            "Loop5",
+            config={},
+            experiment_files={"mlruns_params.tar.gz.b64": payload},
+            wsl_command="python should_not_run.py",
+            model_source={"cross_node": True},
+        )
+    )
+
+    loop_dir = workspace / "target_task" / "Loop5"
+    manifest = json.loads((loop_dir / api.RECORDER_ISOLATION_MANIFEST).read_text(encoding="utf-8"))
+    assert (loop_dir / "status.txt").read_text(encoding="utf-8") == "failed"
+    assert manifest["recorder_isolation_status"] == "failed"
+    assert manifest["reason"] == "QE_BACKTEST_UNSAFE_MLRUNS_TAR"
+    assert (loop_dir / "error.log").is_file()
     assert not (loop_dir / "pid.txt").exists()

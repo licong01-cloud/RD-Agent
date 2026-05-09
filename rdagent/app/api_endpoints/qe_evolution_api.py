@@ -13,6 +13,7 @@ QE (QuantEvolver) 演进 API 端点
 
 import logging
 import os
+import posixpath
 import shutil
 import stat
 import zipfile
@@ -145,7 +146,7 @@ def _fail_recorder_isolation(
     target_mlruns: Path,
     source_mlruns: Optional[Path] = None,
 ):
-    status_file.write_text("failed")
+    status_file.write_text("failed", encoding="utf-8")
     (loop_dir / "error.log").write_text(f"{code}: {message}", encoding="utf-8")
     _write_recorder_isolation_manifest(
         loop_dir,
@@ -156,6 +157,14 @@ def _fail_recorder_isolation(
     )
     _append_log(loop_dir, f"[ERROR] {code}: {message}")
     raise RuntimeError(f"{code}: {message}")
+
+
+def _guard_error_message(exc: BaseException, code: str) -> str:
+    message = str(exc)
+    prefix = f"{code}: "
+    if message.startswith(prefix):
+        return message[len(prefix):]
+    return message
 
 
 def _validate_recorder_isolation(
@@ -202,25 +211,75 @@ def _validate_recorder_isolation(
 
 def _safe_extract_mlruns_tar(tar, destination: Path):
     destination_real = destination.resolve(strict=False)
+    safe_members: list[tuple[Any, str]] = []
+
+    def _unsafe(message: str):
+        raise RuntimeError(f"QE_BACKTEST_UNSAFE_MLRUNS_TAR: {message}")
+
+    def _has_link_component(path: Path) -> bool:
+        try:
+            rel_path = path.relative_to(destination_real)
+        except ValueError:
+            return True
+        cursor = destination_real
+        if _path_has_link_or_reparse_point(cursor):
+            return True
+        for part in rel_path.parts:
+            cursor = cursor / part
+            if cursor.exists() or cursor.is_symlink():
+                if _path_has_link_or_reparse_point(cursor):
+                    return True
+        return False
+
     for member in tar.getmembers():
         raw_member_name = member.name.replace("\\", "/")
-        member_path_posix = PurePosixPath(raw_member_name)
-        if raw_member_name.startswith("/") or ".." in member_path_posix.parts:
-            raise RuntimeError(f"QE_BACKTEST_UNSAFE_MLRUNS_TAR: unsafe member path {member.name}")
+        raw_member_path = PurePosixPath(raw_member_name)
+        if not raw_member_name or raw_member_name.startswith("/") or ".." in raw_member_path.parts:
+            _unsafe(f"unsafe member path {member.name}")
         if member.issym() or member.islnk():
-            raise RuntimeError(f"QE_BACKTEST_UNSAFE_MLRUNS_TAR: link member is not allowed {member.name}")
-        if not (member.isdir() or member.isfile()):
-            raise RuntimeError(f"QE_BACKTEST_UNSAFE_MLRUNS_TAR: special member is not allowed {member.name}")
-        member_parts = member_path_posix.parts
-        if member_parts[:1] == (".",):
-            member_parts = member_parts[1:]
-        if member_parts[:1] != ("mlruns",):
-            raise RuntimeError(f"QE_BACKTEST_UNSAFE_MLRUNS_TAR: member outside mlruns {member.name}")
-        member_name = "/".join(member_parts)
-        member_path = (destination / member_name).resolve(strict=False)
+            _unsafe(f"link member is not allowed {member.name}")
+        if not (member.isdir() or member.isreg()):
+            _unsafe(f"special member is not allowed {member.name}")
+
+        member_name = posixpath.normpath(raw_member_name)
+        if member_name in ("", ".") or member_name.startswith("../") or member_name == "..":
+            _unsafe(f"unsafe member path {member.name}")
+        if member_name != "mlruns" and not member_name.startswith("mlruns/"):
+            _unsafe(f"member outside mlruns {member.name}")
+        if member_name == "mlruns" and not member.isdir():
+            _unsafe(f"mlruns root member must be a directory {member.name}")
+
+        member_path = (destination_real / member_name).resolve(strict=False)
         if not _is_relative_to(member_path, destination_real):
-            raise RuntimeError(f"QE_BACKTEST_UNSAFE_MLRUNS_TAR: member escapes destination {member.name}")
-    tar.extractall(path=destination)
+            _unsafe(f"member escapes destination {member.name}")
+        safe_members.append((member, member_name))
+
+    for member, member_name in safe_members:
+        target = destination_real / member_name
+        if _has_link_component(target):
+            _unsafe(f"member traverses symlink/reparse point {member.name}")
+        try:
+            if member.isdir():
+                if target.exists() and not target.is_dir():
+                    _unsafe(f"directory member collides with file {member.name}")
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+
+            if target.exists() and target.is_dir():
+                _unsafe(f"file member collides with directory {member.name}")
+            target_parent = target.parent
+            if target_parent.exists() and not target_parent.is_dir():
+                _unsafe(f"file parent collides with file {member.name}")
+            if _has_link_component(target_parent):
+                _unsafe(f"member parent traverses symlink/reparse point {member.name}")
+            target_parent.mkdir(parents=True, exist_ok=True)
+            src = tar.extractfile(member)
+            if src is None:
+                _unsafe(f"regular file payload is unavailable {member.name}")
+            with src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+        except OSError as exc:
+            _unsafe(f"could not extract member {member.name}: {exc}")
 
 async def _run_qlib_backtest(task_id: str, loop_id: str, config: Dict[str, Any], experiment_files: Optional[Dict[str, str]], wsl_command: Optional[str] = None, callback_url: Optional[str] = None, model_source: Optional[Dict[str, Any]] = None):
     """
@@ -280,19 +339,27 @@ async def _run_qlib_backtest(task_id: str, loop_id: str, config: Dict[str, Any],
                 # Cross-node mode unpacks a params payload into this loop.
                 tar_b64_file = loop_dir / "mlruns_params.tar.gz"
                 if tar_b64_file.exists():
+                    if _path_has_link_or_reparse_point(dst_mlruns):
+                        _fail_recorder_isolation(
+                            loop_dir,
+                            status_file,
+                            "QE_BACKTEST_TARGET_MLRUNS_IS_SYMLINK",
+                            f"target mlruns must be loop-local, not a symlink/reparse point: {dst_mlruns}",
+                            target_mlruns=dst_mlruns,
+                        )
                     import tarfile, io
                     tar_data = tar_b64_file.read_bytes()
-                    with tarfile.open(fileobj=io.BytesIO(tar_data), mode="r:gz") as tar:
-                        try:
+                    try:
+                        with tarfile.open(fileobj=io.BytesIO(tar_data), mode="r:gz") as tar:
                             _safe_extract_mlruns_tar(tar, loop_dir)
-                        except RuntimeError as exc:
-                            _fail_recorder_isolation(
-                                loop_dir,
-                                status_file,
-                                "QE_BACKTEST_UNSAFE_MLRUNS_TAR",
-                                str(exc),
-                                target_mlruns=dst_mlruns,
-                            )
+                    except (RuntimeError, tarfile.TarError, OSError) as exc:
+                        _fail_recorder_isolation(
+                            loop_dir,
+                            status_file,
+                            "QE_BACKTEST_UNSAFE_MLRUNS_TAR",
+                            _guard_error_message(exc, "QE_BACKTEST_UNSAFE_MLRUNS_TAR"),
+                            target_mlruns=dst_mlruns,
+                        )
                     tar_b64_file.unlink()
                     _validate_recorder_isolation(loop_dir, status_file, dst_mlruns)
                     _append_log(loop_dir, f"[INFO] Cross-node mlruns extracted to {dst_mlruns}")
@@ -416,14 +483,17 @@ async def _run_qlib_backtest(task_id: str, loop_id: str, config: Dict[str, Any],
 
     except Exception as e:
         logger.error(f"Backtest failed for {loop_id}: {e}")
-        # 仅在状态未被健康检查更新时标记为 failed
+        # Always leave an error artifact unless the loop already completed.
         try:
             current = status_file.read_text().strip() if status_file.exists() else ""
         except Exception:
             current = ""
-        if current not in ("completed", "failed"):
-            status_file.write_text("failed")
-            (loop_dir / "error.log").write_text(str(e))
+        if current != "completed":
+            if current != "failed":
+                status_file.write_text("failed", encoding="utf-8")
+            error_log = loop_dir / "error.log"
+            if not error_log.exists():
+                error_log.write_text(str(e), encoding="utf-8")
         _append_log(loop_dir, f"[ERROR] loop={loop_id} error={str(e)}")
 
 @router.get("/tasks/{task_id}/loops/{loop_id}/mlruns-params")
