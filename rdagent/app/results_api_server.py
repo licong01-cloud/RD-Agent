@@ -85,6 +85,10 @@ def create_app() -> FastAPI:
     from rdagent.app.api_endpoints.factor_cache_api import router as factor_cache_router
     app.include_router(factor_cache_router)
 
+    # QE workspace artifact store API (AIstock -> execution-node large artifact sync)
+    from rdagent.app.api_endpoints.qe_workspace_artifacts_api import router as qe_workspace_artifacts_router
+    app.include_router(qe_workspace_artifacts_router)
+
     # Results API：本期作为 AIstock 初始化/增量同步的主接口。
     # 权威来源：log/<task_id>/ 与 log/<task_id>/__session__/ （不依赖 registry.sqlite / loop / SQLite）。
 
