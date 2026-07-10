@@ -9,6 +9,13 @@ import pandas as pd
 import numpy as np
 
 
+_L2_CODE_ID_COL = "l2_code_id"
+_L2_CODE_ID_UNKNOWN = -1
+_L2_CODE_ID_MEANING = (
+    "申万L2行业稳定整数类别键；-1表示未知；仅用于离散分组或embedding，不得作为连续数值因子"
+)
+
+
 def _to_unix_path(p: Path) -> Path:
     s = str(p).replace("\\", "/")
     if os.name != "nt" and len(s) >= 3 and s[1:3] == ":/":
@@ -97,6 +104,68 @@ def _safe_div(numer: pd.Series, denom: pd.Series) -> pd.Series:
     numer_f = numer.astype("float64")
     denom_f = denom.astype("float64").mask(denom.astype("float64") == 0, np.nan)
     return (numer_f / denom_f).astype("float64")
+
+
+def _downcast_factor_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Downcast continuous factor columns while preserving categorical identifiers."""
+
+    for col in df.columns:
+        if col == _L2_CODE_ID_COL:
+            continue
+        if df[col].dtype != np.float32:
+            df[col] = df[col].astype(np.float32)
+    return df
+
+
+def _normalize_l2_code_id(series: pd.Series) -> tuple[pd.Series, dict[str, Any]]:
+    """Validate and normalize the stable L2 category id after the left join.
+
+    The sector table can cover a slightly different stock/date universe than the
+    daily-basic table that anchors the bundle. Join-created nulls therefore have
+    an explicit meaning: unknown sector (``-1``), not a floating-point feature.
+    """
+
+    numeric = pd.to_numeric(series, errors="raise")
+    null_to_unknown_rows = int(numeric.isna().sum())
+    finite_values = numeric.dropna().to_numpy(dtype=np.float64, copy=False)
+
+    if finite_values.size and not bool(np.isfinite(finite_values).all()):
+        raise ValueError(f"{_L2_CODE_ID_COL} contains non-finite values")
+    if finite_values.size and not bool(np.equal(finite_values, np.trunc(finite_values)).all()):
+        raise ValueError(f"{_L2_CODE_ID_COL} contains non-integer values")
+    if finite_values.size and float(finite_values.min()) < _L2_CODE_ID_UNKNOWN:
+        raise ValueError(f"{_L2_CODE_ID_COL} contains values below the unknown sentinel -1")
+
+    filled = numeric.fillna(_L2_CODE_ID_UNKNOWN)
+    min_value = int(filled.min()) if len(filled) else _L2_CODE_ID_UNKNOWN
+    max_value = int(filled.max()) if len(filled) else _L2_CODE_ID_UNKNOWN
+
+    if min_value >= np.iinfo(np.int16).min and max_value <= np.iinfo(np.int16).max:
+        dtype = np.int16
+    elif min_value >= np.iinfo(np.int32).min and max_value <= np.iinfo(np.int32).max:
+        dtype = np.int32
+    else:
+        raise ValueError(
+            f"{_L2_CODE_ID_COL} range [{min_value}, {max_value}] exceeds supported signed int32 range"
+        )
+
+    normalized = filled.astype(dtype)
+    known = normalized != _L2_CODE_ID_UNKNOWN
+    row_count = int(len(normalized))
+    known_rows = int(known.sum())
+    receipt: dict[str, Any] = {
+        "column": _L2_CODE_ID_COL,
+        "dtype": str(normalized.dtype),
+        "rows": row_count,
+        "known_rows": known_rows,
+        "unknown_minus1_rows": int((normalized == _L2_CODE_ID_UNKNOWN).sum()),
+        "null_to_minus1_rows": null_to_unknown_rows,
+        "known_coverage": known_rows / row_count if row_count else 0.0,
+        "known_sector_ids": int(normalized[known].nunique()),
+        "min": int(normalized.min()) if row_count else None,
+        "max": int(normalized.max()) if row_count else None,
+    }
+    return normalized, receipt
 
 
 def _rolling_sum_by_instrument(s: pd.Series, window: int) -> pd.Series:
@@ -314,6 +383,7 @@ def _build_schema(df: pd.DataFrame) -> list[dict[str, Any]]:
         "sw2_mf_buy_elg_vol": "申万L2行业超大单买入量",
         "sw2_mf_sell_elg_vol": "申万L2行业超大单卖出量",
         "sw2_mf_net_vol": "申万L2行业资金净流入量",
+        _L2_CODE_ID_COL: _L2_CODE_ID_MEANING,
         # precomputed (traceable via precompute_daily_basic_factors.py)
         "value_pe_inv": "倒数市盈率（估值因子）：1/db_pe_ttm（优先）或 1/db_pe；分母为0或缺失=>NaN",
         "value_pb_inv": "倒数市净率（估值因子）：1/db_pb；分母为0或缺失=>NaN",
@@ -334,8 +404,10 @@ def _build_schema(df: pd.DataFrame) -> list[dict[str, Any]]:
             source = "bak_basic_raw"
         elif col_str.startswith("cp_"):
             source = "cyq_perf_raw"
-        elif col_str.startswith("sw2_"):
+        elif col_str == _L2_CODE_ID_COL or col_str.startswith("sw2_"):
             source = "sector_data_raw"
+        elif col_str.startswith("md_"):
+            source = "margin_detail_raw"
         elif col_str.startswith("ae_"):
             source = "ae_factor"
         else:
@@ -394,6 +466,13 @@ def _fill_derived_meanings(schema: list[dict[str, Any]]) -> list[dict[str, Any]]
     for entry in schema:
         name = entry.get("name")
         if not isinstance(name, str) or not name:
+            continue
+        if name == _L2_CODE_ID_COL:
+            entry["source"] = "sector_data_raw"
+            entry["semantic_type"] = "categorical_id"
+            entry["unknown_value"] = _L2_CODE_ID_UNKNOWN
+            if not isinstance(entry.get("meaning"), str) or not entry["meaning"].strip():
+                entry["meaning"] = _L2_CODE_ID_MEANING
             continue
         if isinstance(entry.get("meaning"), str) and entry["meaning"].strip():
             continue
@@ -467,8 +546,10 @@ def _schema_cols_from_parquet_metadata(path: Path) -> list[dict[str, Any]] | Non
             source = "bak_basic_raw"
         elif name.startswith("cp_"):
             source = "cyq_perf_raw"
-        elif name.startswith("sw2_"):
+        elif name == _L2_CODE_ID_COL or name.startswith("sw2_"):
             source = "sector_data_raw"
+        elif name.startswith("md_"):
+            source = "margin_detail_raw"
         elif name.startswith("ae_"):
             source = "ae_factor"
         else:
@@ -767,6 +848,7 @@ def main() -> None:
     bak_basic_path = snapshot_root / "bak_basic.h5"
     cyq_perf_path = snapshot_root / "cyq_perf.h5"
     sector_data_path = snapshot_root / "sector_data.h5"
+    margin_detail_path = snapshot_root / "margin_detail.h5"
     daily_pv_path = snapshot_root / "daily_pv.h5"
 
     print("[INFO] snapshot_root:", snapshot_root)
@@ -800,6 +882,13 @@ def main() -> None:
     else:
         print(f"[WARN] sector_data.h5 not found: {sector_data_path}")
 
+    df_md_raw = None
+    if margin_detail_path.exists():
+        print("[INFO] Loading raw margin_detail.h5 ...")
+        df_md_raw = _read_table(margin_detail_path, "margin_detail_raw")
+    else:
+        print(f"[WARN] margin_detail.h5 not found: {margin_detail_path} (md_* fields will be omitted)")
+
     df_pv = None
     if daily_pv_path.exists():
         print("[INFO] Loading raw daily_pv.h5 ...")
@@ -819,6 +908,8 @@ def main() -> None:
         dfs.append(df_cp_raw)
     if df_sd_raw is not None:
         dfs.append(df_sd_raw)
+    if df_md_raw is not None:
+        dfs.append(df_md_raw)
 
     cand_tables: list[tuple[str, Path]] = [
         ("daily_basic_factors", aistock_factors_root / "daily_basic_factors" / "result.pkl"),
@@ -853,12 +944,11 @@ def main() -> None:
     if not df_mf_derived.empty:
         dfs.append(df_mf_derived)
 
-    # Convert all tables to float32 before merging to reduce memory footprint.
+    # Convert continuous columns to float32 before merging to reduce memory
+    # footprint. Stable categorical identifiers retain integer semantics.
     for idx in range(len(dfs)):
         if dfs[idx] is not None and not dfs[idx].empty:
-            for c in dfs[idx].columns:
-                if dfs[idx][c].dtype != np.float32:
-                    dfs[idx][c] = dfs[idx][c].astype(np.float32)
+            dfs[idx] = _downcast_factor_columns(dfs[idx])
 
     print("[INFO] Merging tables (sequential join to reduce memory) ...")
     df_merged = dfs[0].sort_index()
@@ -875,6 +965,22 @@ def main() -> None:
         print(f"  [INFO] Joining table {i}/{len(dfs)-1}: {len(df_next.columns)} cols, merged so far: {df_merged.shape} ...")
         df_merged = df_merged.join(df_next, how="left")
     df_merged = df_merged.sort_index()
+    if _L2_CODE_ID_COL in df_merged.columns:
+        df_merged[_L2_CODE_ID_COL], l2_receipt = _normalize_l2_code_id(df_merged[_L2_CODE_ID_COL])
+        print("[RECEIPT] l2_code_id:", json.dumps(l2_receipt, ensure_ascii=False, sort_keys=True))
+    else:
+        print(f"[WARN] {_L2_CODE_ID_COL} not found; sector-category factors are unavailable in this bundle")
+    if df_md_raw is not None:
+        md_cols = [col for col in df_md_raw.columns if str(col).startswith("md_")]
+        md_non_null_rows = int(df_merged[md_cols].notna().any(axis=1).sum()) if md_cols else 0
+        md_receipt = {
+            "source": "margin_detail.h5",
+            "source_rows": int(len(df_md_raw)),
+            "columns": md_cols,
+            "output_non_null_rows": md_non_null_rows,
+            "output_non_null_coverage": md_non_null_rows / len(df_merged) if len(df_merged) else 0.0,
+        }
+        print("[RECEIPT] margin_detail:", json.dumps(md_receipt, ensure_ascii=False, sort_keys=True))
     # Free intermediate list
     del dfs
 

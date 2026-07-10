@@ -33,6 +33,11 @@ HOLDING_PERIODS = {
     "20d": 21, # T+1买 T+21卖，持有20天
 }
 
+H20_RETURN_HORIZON = "20d"
+H20_RETURN_HORIZON_LABEL = "T21T1"
+H20_HAC_LAG = 19
+HAC_VARIANCE_EPSILON = 1e-15
+
 
 # ================================================================
 # Matrix-level vectorized computations (operate on pre-unstacked arrays)
@@ -59,6 +64,36 @@ def _pearson_ic_from_matrices(f_arr: np.ndarray, r_arr: np.ndarray, min_obs: int
     den = np.sqrt(np.maximum((n * sff - sf**2) * (n * srr - sr**2), 1e-30))
 
     return np.where(n >= min_obs, num / den, np.nan)
+
+
+def _newey_west_icir(ic_values: np.ndarray, max_lag: int = H20_HAC_LAG) -> float | None:
+    """Return mean IC divided by Newey-West long-run standard deviation.
+
+    This is an autocorrelation-robust ICIR, not a t-statistic: the denominator
+    is ``sqrt(long_run_variance)``, not the standard error of the sample mean.
+    For overlapping h20 labels the default Bartlett bandwidth is 19.  A full
+    bandwidth requires at least ``max_lag + 1`` finite daily IC observations;
+    shorter or constant/degenerate series return ``None``.
+    """
+    values = np.asarray(ic_values, dtype=float)
+    values = values[np.isfinite(values)]
+    if max_lag < 0 or values.size <= max_lag:
+        return None
+
+    centered = values - values.mean()
+    n_obs = values.size
+    long_run_variance = float(np.dot(centered, centered) / n_obs)
+    if not np.isfinite(long_run_variance) or long_run_variance <= HAC_VARIANCE_EPSILON:
+        return None
+
+    for lag in range(1, max_lag + 1):
+        autocovariance = float(np.dot(centered[lag:], centered[:-lag]) / n_obs)
+        bartlett_weight = 1.0 - lag / (max_lag + 1.0)
+        long_run_variance += 2.0 * bartlett_weight * autocovariance
+
+    if not np.isfinite(long_run_variance) or long_run_variance <= HAC_VARIANCE_EPSILON:
+        return None
+    return float(values.mean() / np.sqrt(long_run_variance))
 
 
 def _rank_matrix(arr: np.ndarray) -> np.ndarray:
@@ -391,6 +426,27 @@ def _compute_factor_metrics_impl(
             ric_std = float(ic_s_clean.std()) if len(ic_s_clean) > 0 else None
             ic_csz_mean = float(ic_csz_clean.mean()) if len(ic_csz_clean) > 0 else None
 
+            # Formal h20 companion metrics.  Keep the existing 1d record and
+            # fields unchanged because downstream persistence currently has a
+            # single row per (factor, eval_window).  h20 uses a T+1 entry and
+            # T+21 exit, and HAC lag 19 accounts for overlapping daily labels.
+            h20_r_w = fwd_arrs[H20_RETURN_HORIZON][mask]
+            h20_ic_p = _pearson_ic_from_matrices(
+                f_w_z,
+                _robust_zscore_matrix(h20_r_w),
+            )
+            h20_ic_s = _pearson_ic_from_matrices(
+                _rank_matrix(f_w),
+                _rank_matrix(h20_r_w),
+            )
+            h20_ic_p_clean = h20_ic_p[~np.isnan(h20_ic_p)]
+            h20_ic_s_clean = h20_ic_s[~np.isnan(h20_ic_s)]
+
+            h20_ic_mean = float(h20_ic_p_clean.mean()) if len(h20_ic_p_clean) > 0 else None
+            h20_ic_std = float(h20_ic_p_clean.std()) if len(h20_ic_p_clean) > 0 else None
+            h20_ric_mean = float(h20_ic_s_clean.mean()) if len(h20_ic_s_clean) > 0 else None
+            h20_ric_std = float(h20_ic_s_clean.std()) if len(h20_ic_s_clean) > 0 else None
+
             result = {
                 "factor_name": fname, "eval_window": window_name,
                 "calc_batch_id": calc_batch_id,
@@ -402,6 +458,28 @@ def _compute_factor_metrics_impl(
                 "icir": float(ic_mean / ic_std) if ic_mean and ic_std and ic_std > 0 else None,
                 "rank_icir": float(ric_mean / ric_std) if ric_mean and ric_std and ric_std > 0 else None,
                 "ic_positive_ratio": float((ic_p_clean > 0).mean()) if len(ic_p_clean) > 0 else None,
+                "h20_return_horizon": H20_RETURN_HORIZON_LABEL,
+                "h20_ic_mean": h20_ic_mean,
+                "h20_ic_std": h20_ic_std,
+                "h20_rank_ic_mean": h20_ric_mean,
+                "h20_rank_ic_std": h20_ric_std,
+                "h20_icir": (
+                    float(h20_ic_mean / h20_ic_std)
+                    if h20_ic_mean is not None and h20_ic_std is not None and h20_ic_std > 0
+                    else None
+                ),
+                "h20_rank_icir": (
+                    float(h20_ric_mean / h20_ric_std)
+                    if h20_ric_mean is not None and h20_ric_std is not None and h20_ric_std > 0
+                    else None
+                ),
+                "h20_icir_hac": _newey_west_icir(h20_ic_p_clean),
+                "h20_rank_icir_hac": _newey_west_icir(h20_ic_s_clean),
+                "h20_ic_positive_ratio": (
+                    float((h20_ic_p_clean > 0).mean()) if len(h20_ic_p_clean) > 0 else None
+                ),
+                "h20_n_obs": len(h20_ic_p_clean),
+                "h20_hac_lag": H20_HAC_LAG,
             }
 
             lo = _long_only_from_group_arr(grp_full, mask)

@@ -178,6 +178,20 @@ class SingleFactorMetricsItem(BaseModel):
     rank_icir: Optional[float] = None
     ic_positive_ratio: Optional[float] = None
     ic_csz_mean: Optional[float] = None
+    # Additive h20 companion metrics (T+1 entry, T+21 exit).  They remain in
+    # the same factor/eval-window record for persistence compatibility.
+    h20_return_horizon: str | None = None
+    h20_ic_mean: float | None = None
+    h20_ic_std: float | None = None
+    h20_rank_ic_mean: float | None = None
+    h20_rank_ic_std: float | None = None
+    h20_icir: float | None = None
+    h20_rank_icir: float | None = None
+    h20_icir_hac: float | None = None
+    h20_rank_icir_hac: float | None = None
+    h20_ic_positive_ratio: float | None = None
+    h20_n_obs: int | None = None
+    h20_hac_lag: int | None = None
     # Long-only portfolio (A股纯多头)
     top_annual_return: Optional[float] = None
     top_excess_annual_return: Optional[float] = None
