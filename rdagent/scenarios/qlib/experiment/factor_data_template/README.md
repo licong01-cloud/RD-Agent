@@ -115,9 +115,11 @@ df = pd.read_hdf("filename.h5", key="data")
 | `cp_weight_avg` | float32 | 加权平均成本 | 元 |
 | `cp_winner_rate` | float32 | 胜率（当前价格高于持仓成本的比例） | % |
 
-## sector_data.h5 — 申万二级行业数据（22个字段，前缀 `sw2_`）
+## sector_data.h5 — 申万二级行业数据（23个字段：22个 `sw2_` + `l2_code_id`）
 
 每只股票按其所属的申万二级行业分类，映射到该行业的行情和资金流数据。可用于构建行业相对因子（个股 vs 行业对比）、行业动量/反转、行业资金流强度等。
+
+> **`l2_code_id`**：int16 申万 L2 行业稳定整数编码；`unknown/未匹配=-1`；稳定映射来源 `market.sw_index_classify` L2 `index_code ASC`（禁 factorize）。**离散分组键，非连续特征**；与 `static_factors.parquet` 的 `l2_code_id` 逐行一致。板块轮动因子按名 `columns=["l2_code_id", ...]` 取用（用于跨板块排名 / 板块内聚合）。
 
 | 字段名 | 类型 | 说明 | 单位 |
 |--------|------|------|------|
