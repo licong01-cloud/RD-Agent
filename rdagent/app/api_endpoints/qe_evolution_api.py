@@ -28,6 +28,11 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
+from rdagent.app.api_endpoints.qe_workspace_catalog import (
+    build_workspace_catalog,
+    resolve_loop_dir,
+)
+
 logger = logging.getLogger(__name__)
 
 # 确保 .env 文件中的环境变量在模块加载时可用（热重载安全）
@@ -76,6 +81,7 @@ def _get_task_dir(task_id: str) -> Path:
 
 def _get_loop_dir(task_id: str, loop_id: str) -> Path:
     return _get_task_dir(task_id) / loop_id
+
 
 def _append_log(loop_dir: Path, message: str):
     os.makedirs(loop_dir, exist_ok=True)
@@ -657,13 +663,33 @@ async def download_loop_assets(task_id: str, loop_id: str):
         media_type="application/zip"
     )
 
+
+@router.get("/tasks/{task_id}/loops/{loop_id}/files")
+async def list_workspace_files(task_id: str, loop_id: str) -> dict[str, Any]:
+    """Return a complete, read-only loop-relative asset inventory.
+
+    The endpoint never hashes or copies files and never follows symbolic links.
+    Completed loops declare a complete namespace catalog; non-terminal loops
+    remain explicitly partial so callers cannot mistake an in-flight snapshot
+    for reproducible evidence.
+    """
+
+    loop_dir = resolve_loop_dir(WORKSPACE_BASE, task_id, loop_id)
+    if not loop_dir.exists() or not loop_dir.is_dir():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Loop workspace not found: {task_id}/{loop_id}",
+        )
+    return build_workspace_catalog(loop_dir, task_id=task_id, loop_id=loop_id)
+
+
 @router.get("/tasks/{task_id}/loops/{loop_id}/files/{file_path:path}")
 async def get_workspace_file(task_id: str, loop_id: str, file_path: str):
     """读取 workspace 中的指定文件（用于多Alpha跨节点收集 multi_alpha_results.json 等）。
 
     安全：限制在 loop_dir 内，防止路径穿越攻击。
     """
-    loop_dir = _get_loop_dir(task_id, loop_id)
+    loop_dir = resolve_loop_dir(WORKSPACE_BASE, task_id, loop_id)
     if not loop_dir.exists():
         raise HTTPException(status_code=404, detail=f"Loop workspace not found: {task_id}/{loop_id}")
 
