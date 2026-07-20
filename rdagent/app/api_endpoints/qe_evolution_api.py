@@ -11,26 +11,37 @@ QE (QuantEvolver) 演进 API 端点
 7. GET /api/v1/qe_workspace/config - 工作区配置信息
 """
 
+import asyncio
+import json
 import logging
 import os
 import shutil
 import zipfile
-import asyncio
-import json
-from pathlib import Path
-from typing import Dict, Any, Optional
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Any
 
 try:
     from dotenv import load_dotenv
 except ImportError:
     load_dotenv = None  # type: ignore
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
-
+from rdagent.app.api_endpoints.qe_submission_receipt import (
+    SubmissionReceiptConflictError,
+    SubmissionReceiptError,
+    SubmissionReceiptValidationError,
+    canonical_request_digest,
+    get_submission_receipt,
+    public_receipt_payload,
+    reserve_submission,
+    transition_submission_receipt,
+    validate_submission_intent_hash,
+)
 from rdagent.app.api_endpoints.qe_workspace_catalog import (
     build_workspace_catalog,
     resolve_loop_dir,
+    resolve_task_dir,
 )
 
 logger = logging.getLogger(__name__)
@@ -65,22 +76,27 @@ if not str(WORKSPACE_BASE) or str(WORKSPACE_BASE) == ".":
 
 class LoopRunRequest(BaseModel):
     loop_index: int
-    config: Dict[str, Any]
-    experiment_files: Optional[Dict[str, str]] = None
-    wsl_command: Optional[str] = None
-    callback_url: Optional[str] = None
-    model_source: Optional[Dict[str, Any]] = None
+    config: dict[str, Any]
+    experiment_files: dict[str, str] | None = None
+    wsl_command: str | None = None
+    callback_url: str | None = None
+    model_source: dict[str, Any] | None = None
+    submission_intent_hash: str
 
 class LoopRunResponse(BaseModel):
     loop_id: str
     status: str
     message: str
+    submission_intent_hash: str
+    request_digest: str
+    receipt_status: str
+    duplicate_replay: bool
 
 def _get_task_dir(task_id: str) -> Path:
-    return WORKSPACE_BASE / task_id
+    return resolve_task_dir(WORKSPACE_BASE, task_id)
 
 def _get_loop_dir(task_id: str, loop_id: str) -> Path:
-    return _get_task_dir(task_id) / loop_id
+    return resolve_loop_dir(WORKSPACE_BASE, task_id, loop_id)
 
 
 def _append_log(loop_dir: Path, message: str):
@@ -89,7 +105,119 @@ def _append_log(loop_dir: Path, message: str):
     with open(log_file, "a", encoding="utf-8") as f:
         f.write(message + "\n")
 
-async def _run_qlib_backtest(task_id: str, loop_id: str, config: Dict[str, Any], experiment_files: Optional[Dict[str, str]], wsl_command: Optional[str] = None, callback_url: Optional[str] = None, model_source: Optional[Dict[str, Any]] = None):
+
+def _resolve_loop_write_target(loop_dir: Path, relative_path: str) -> Path:
+    raw_path = str(relative_path or "")
+    normalized = raw_path.replace("\\", "/")
+    posix_path = PurePosixPath(normalized)
+    windows_path = PureWindowsPath(raw_path)
+    if (
+        not raw_path
+        or "\x00" in raw_path
+        or posix_path.is_absolute()
+        or windows_path.is_absolute()
+        or bool(windows_path.drive)
+        or any(part in {"", ".", ".."} for part in posix_path.parts)
+    ):
+        raise RuntimeError(
+            f"QE_WORKSPACE_PATH_ESCAPE: invalid loop-relative path: {relative_path!r}",
+        )
+    loop_root = loop_dir.resolve()
+    target = (loop_root / Path(*posix_path.parts)).resolve()
+    try:
+        target.relative_to(loop_root)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"QE_WORKSPACE_PATH_ESCAPE: path resolves outside Loop workspace: {relative_path!r}",
+        ) from exc
+    if target == loop_root:
+        raise RuntimeError(
+            f"QE_WORKSPACE_PATH_ESCAPE: file path resolves to Loop directory: {relative_path!r}",
+        )
+    return target
+
+
+def _safe_extract_tar_to_loop(tar: Any, loop_dir: Path) -> None:
+    planned: list[tuple[Any, Path]] = []
+    seen_targets: set[Path] = set()
+    for member in tar.getmembers():
+        target = _resolve_loop_write_target(loop_dir, member.name)
+        if target in seen_targets:
+            raise RuntimeError(
+                f"QE_WORKSPACE_TAR_UNSAFE: duplicate archive target: {member.name!r}",
+            )
+        seen_targets.add(target)
+        if not (member.isdir() or member.isfile()):
+            raise RuntimeError(
+                "QE_WORKSPACE_TAR_UNSAFE: links, devices, and special entries are "
+                f"not allowed: {member.name!r}",
+            )
+        planned.append((member, target))
+
+    for member, target in planned:
+        if member.isdir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        source = tar.extractfile(member)
+        if source is None:
+            raise RuntimeError(
+                f"QE_WORKSPACE_TAR_UNSAFE: regular file has no readable payload: {member.name!r}",
+            )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with source, target.open("wb") as destination:
+            shutil.copyfileobj(source, destination)
+
+
+def _receipt_http_error(exc: SubmissionReceiptError) -> HTTPException:
+    if isinstance(exc, SubmissionReceiptConflictError):
+        return HTTPException(
+            status_code=409,
+            detail={
+                "reason_code": "qe_workspace_submission_identity_conflict",
+                "message": str(exc),
+            },
+        )
+    if isinstance(exc, SubmissionReceiptValidationError):
+        return HTTPException(
+            status_code=400,
+            detail={
+                "reason_code": "qe_workspace_submission_intent_invalid",
+                "message": str(exc),
+            },
+        )
+    return HTTPException(
+        status_code=500,
+        detail={
+            "reason_code": "qe_workspace_submission_receipt_error",
+            "message": str(exc),
+        },
+    )
+
+
+def _status_with_receipt(status: str, receipt: dict[str, Any] | None) -> dict[str, Any]:
+    payload: dict[str, Any] = {"status": status}
+    if receipt is not None:
+        public = public_receipt_payload(receipt)
+        payload.update(
+            {
+                "receipt_status": public["status"],
+                "submission_intent_hash": public["submission_intent_hash"],
+                "request_digest": public["request_digest"],
+            },
+        )
+    return payload
+
+async def _run_qlib_backtest(
+    task_id: str,
+    loop_id: str,
+    config: dict[str, Any],
+    experiment_files: dict[str, str] | None,
+    wsl_command: str | None = None,
+    callback_url: str | None = None,
+    model_source: dict[str, Any] | None = None,
+    *,
+    submission_intent_hash: str,
+):
     """
     后台任务：执行 QLib 回测。
 
@@ -101,35 +229,46 @@ async def _run_qlib_backtest(task_id: str, loop_id: str, config: Dict[str, Any],
     """
     loop_dir = _get_loop_dir(task_id, loop_id)
     os.makedirs(loop_dir, exist_ok=True)
-
-    # 记录状态为 running
     status_file = loop_dir / "status.txt"
-    status_file.write_text("running")
-    _append_log(loop_dir, f"[START] loop={loop_id} status=running")
-
-    # 保存配置
-    config_file = loop_dir / "config.json"
-    with open(config_file, "w", encoding="utf-8") as f:
-        json.dump(config, f)
 
     try:
+        transition_submission_receipt(
+            loop_dir,
+            loop_id=loop_id,
+            submission_intent_hash=submission_intent_hash,
+            status="started",
+        )
+        status_file.write_text("running")
+        _append_log(loop_dir, f"[START] loop={loop_id} status=running")
+
+        # 保存配置
+        config_file = loop_dir / "config.json"
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump(config, f)
+
         logger.info(f"Starting QLib backtest for {loop_id} with config: {config}")
         _append_log(loop_dir, f"[INFO] Starting QLib backtest with config={json.dumps(config, ensure_ascii=False)}")
 
         # 写入实验文件
         if experiment_files:
             import base64
+            written_targets: set[Path] = set()
             for rel_path, content in experiment_files.items():
+                output_rel_path = rel_path.removesuffix(".b64")
+                validated_target = _resolve_loop_write_target(loop_dir, output_rel_path)
+                if validated_target in written_targets:
+                    raise RuntimeError(
+                        f"QE_WORKSPACE_PATH_CONFLICT: duplicate output target: {rel_path!r}",
+                    )
+                written_targets.add(validated_target)
                 if rel_path.endswith(".b64"):
                     # base64 编码的二进制文件（如 benchmark_sh000300.parquet.b64）
-                    actual_path = loop_dir / rel_path[:-4]  # 去掉 .b64 后缀
-                    actual_path.parent.mkdir(parents=True, exist_ok=True)
-                    actual_path.write_bytes(base64.b64decode(content))
+                    validated_target.parent.mkdir(parents=True, exist_ok=True)
+                    validated_target.write_bytes(base64.b64decode(content, validate=True))
                     _append_log(loop_dir, f"[INFO] Wrote binary file: {rel_path[:-4]} (decoded from b64)")
                 else:
-                    file_path = loop_dir / rel_path
-                    file_path.parent.mkdir(parents=True, exist_ok=True)
-                    file_path.write_text(content, encoding="utf-8")
+                    validated_target.parent.mkdir(parents=True, exist_ok=True)
+                    validated_target.write_text(content, encoding="utf-8")
                     _append_log(loop_dir, f"[INFO] Wrote experiment file: {rel_path}")
 
         # 将环境变量注入，确保 model.py 等模块可被 qrun 导入
@@ -146,10 +285,11 @@ async def _run_qlib_backtest(task_id: str, loop_id: str, config: Dict[str, Any],
                 # 跨节点：从 experiment_files 中解压 mlruns_params.tar.gz
                 tar_b64_file = loop_dir / "mlruns_params.tar.gz"
                 if tar_b64_file.exists():
-                    import tarfile, io
+                    import io
+                    import tarfile
                     tar_data = tar_b64_file.read_bytes()
                     with tarfile.open(fileobj=io.BytesIO(tar_data), mode="r:gz") as tar:
-                        tar.extractall(path=loop_dir)
+                        _safe_extract_tar_to_loop(tar, loop_dir)
                     tar_b64_file.unlink()
                     _append_log(loop_dir, f"[INFO] Cross-node mlruns extracted to {dst_mlruns}")
                 else:
@@ -165,8 +305,9 @@ async def _run_qlib_backtest(task_id: str, loop_id: str, config: Dict[str, Any],
                 src_task = model_source.get("source_task_id", "")
                 src_loop = model_source.get("source_loop", "")
                 if src_task and src_loop:
-                    src_mlruns_root = WORKSPACE_BASE / src_task / "mlruns"
-                    src_mlruns_loop = WORKSPACE_BASE / src_task / src_loop / "mlruns"
+                    source_loop_dir = resolve_loop_dir(WORKSPACE_BASE, src_task, src_loop)
+                    src_mlruns_root = source_loop_dir.parent / "mlruns"
+                    src_mlruns_loop = source_loop_dir / "mlruns"
                     src_mlruns = src_mlruns_root if src_mlruns_root.exists() else src_mlruns_loop
                     if src_mlruns.exists() and not dst_mlruns.exists():
                         os.symlink(str(src_mlruns), str(dst_mlruns))
@@ -211,6 +352,13 @@ async def _run_qlib_backtest(task_id: str, loop_id: str, config: Dict[str, Any],
 
         # 写入子进程的真实 PID（而非 FastAPI worker PID）
         (loop_dir / "pid.txt").write_text(str(_proc.pid))
+        transition_submission_receipt(
+            loop_dir,
+            loop_id=loop_id,
+            submission_intent_hash=submission_intent_hash,
+            status="running",
+            pid=_proc.pid,
+        )
         _append_log(loop_dir, f"[INFO] Subprocess started, pid={_proc.pid}")
 
         # 在线程池中等待子进程完成（不阻塞事件循环）
@@ -223,6 +371,12 @@ async def _run_qlib_backtest(task_id: str, loop_id: str, config: Dict[str, Any],
 
         # 记录状态为 completed
         status_file.write_text("completed")
+        transition_submission_receipt(
+            loop_dir,
+            loop_id=loop_id,
+            submission_intent_hash=submission_intent_hash,
+            status="completed",
+        )
         _append_log(loop_dir, f"[DONE] loop={loop_id} status=completed")
         logger.info(f"Completed QLib backtest for {loop_id}")
 
@@ -248,10 +402,26 @@ async def _run_qlib_backtest(task_id: str, loop_id: str, config: Dict[str, Any],
             current = status_file.read_text().strip() if status_file.exists() else ""
         except Exception:
             current = ""
-        if current not in ("completed", "failed"):
+        if current not in ("completed", "failed", "cancelled"):
             status_file.write_text("failed")
             (loop_dir / "error.log").write_text(str(e))
-        _append_log(loop_dir, f"[ERROR] loop={loop_id} error={str(e)}")
+            current = "failed"
+        try:
+            transition_submission_receipt(
+                loop_dir,
+                loop_id=loop_id,
+                submission_intent_hash=submission_intent_hash,
+                status=current if current in ("completed", "failed", "cancelled") else "failed",
+            )
+        except SubmissionReceiptError as receipt_error:
+            logger.error(
+                "Failed to persist terminal submission receipt for %s/%s: %s",
+                task_id,
+                loop_id,
+                receipt_error,
+            )
+            _append_log(loop_dir, f"[ERROR] submission receipt terminal update failed: {receipt_error}")
+        _append_log(loop_dir, f"[ERROR] loop={loop_id} error={e!s}")
 
 @router.get("/tasks/{task_id}/loops/{loop_id}/mlruns-params")
 async def download_mlruns_params(task_id: str, loop_id: str):
@@ -266,7 +436,9 @@ async def download_mlruns_params(task_id: str, loop_id: str):
     metrics / params / tags / artifacts）以及对应 experiment 目录的 meta.yaml，
     确保下游 R.get_exp(...) + recorder.load_object(...) 能走主路径。
     """
-    import tarfile, io, glob as _glob
+    import glob as _glob
+    import io
+    import tarfile
     loop_dir = _get_loop_dir(task_id, loop_id)
     mlruns_dir = loop_dir / "mlruns"
     if not mlruns_dir.exists():
@@ -319,7 +491,7 @@ async def stream_task_logs(task_id: str):
     task_dir = _get_task_dir(task_id)
 
     async def event_generator():
-        seen_offsets: Dict[str, int] = {}
+        seen_offsets: dict[str, int] = {}
         idle_count = 0
         _MAX_IDLE = 300  # 300秒无新日志则终止 SSE
         while True:
@@ -343,9 +515,9 @@ async def stream_task_logs(task_id: str):
 
                 file_key = str(log_file)
                 offset = seen_offsets.get(file_key, 0)
-                with open(log_file, "r", encoding="utf-8") as f:
+                with open(log_file, encoding="utf-8") as f:
                     f.seek(offset)
-                    new_lines = [line.rstrip("\n") for line in f.readlines()]
+                    new_lines = [line.rstrip("\n") for line in f]
                     seen_offsets[file_key] = f.tell()
 
                 if new_lines:
@@ -362,7 +534,7 @@ async def stream_task_logs(task_id: str):
                     if sf.exists():
                         any_loop_has_status = True
                         st = sf.read_text().strip()
-                        if st not in ("completed", "failed"):
+                        if st not in ("completed", "failed", "cancelled"):
                             all_terminal = False
                             break
                     else:
@@ -372,9 +544,13 @@ async def stream_task_logs(task_id: str):
                     final_status = "completed"
                     for ld in loop_dirs:
                         sf = ld / "status.txt"
-                        if sf.exists() and sf.read_text().strip() == "failed":
-                            final_status = "failed"
-                            break
+                        if sf.exists():
+                            loop_status = sf.read_text().strip()
+                            if loop_status == "failed":
+                                final_status = "failed"
+                                break
+                            if loop_status == "cancelled":
+                                final_status = "cancelled"
                     payload = {"status": final_status, "logs": [f"All loops finished with status: {final_status}"]}
                     yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
                     return
@@ -398,23 +574,101 @@ async def create_and_run_loop(task_id: str, request: LoopRunRequest, background_
     接收演进配置并触发 QLib 回测
     """
     loop_id = f"Loop{request.loop_index}"
-    
+    loop_dir = _get_loop_dir(task_id, loop_id)
+
     try:
-        # 启动后台回测任务
-        background_tasks.add_task(
-            _run_qlib_backtest, task_id, loop_id, request.config,
-            request.experiment_files, request.wsl_command,
-            request.callback_url, request.model_source,
+        intent_hash = validate_submission_intent_hash(request.submission_intent_hash)
+        request_digest = canonical_request_digest(
+            loop_index=request.loop_index,
+            config=request.config,
+            experiment_files=request.experiment_files,
+            wsl_command=request.wsl_command,
+            model_source=request.model_source,
         )
-        
+        receipt, created = reserve_submission(
+            loop_dir,
+            task_id=task_id,
+            loop_id=loop_id,
+            submission_intent_hash=intent_hash,
+            request_digest=request_digest,
+        )
+        if created:
+            try:
+                if loop_dir.exists():
+                    if not loop_dir.is_dir():
+                        raise RuntimeError(
+                            f"Loop workspace is not a directory: {task_id}/{loop_id}",
+                        )
+                    shutil.rmtree(loop_dir)
+            except Exception as exc:
+                transition_submission_receipt(
+                    loop_dir,
+                    loop_id=loop_id,
+                    submission_intent_hash=intent_hash,
+                    status="failed",
+                )
+                raise RuntimeError(
+                    f"failed to prepare clean retry workspace for {task_id}/{loop_id}: {exc}",
+                ) from exc
+            background_tasks.add_task(
+                _run_qlib_backtest,
+                task_id,
+                loop_id,
+                request.config,
+                request.experiment_files,
+                request.wsl_command,
+                request.callback_url,
+                request.model_source,
+                submission_intent_hash=intent_hash,
+            )
+
         return LoopRunResponse(
             loop_id=loop_id,
             status="accepted",
-            message=f"Loop {loop_id} accepted and running in background"
+            message=(
+                f"Loop {loop_id} accepted and reserved for background execution"
+                if created
+                else f"Loop {loop_id} already has the same durable submission receipt"
+            ),
+            submission_intent_hash=intent_hash,
+            request_digest=request_digest,
+            receipt_status=str(receipt["status"]),
+            duplicate_replay=not created,
         )
+    except SubmissionReceiptError as exc:
+        logger.error("Failed to reserve loop %s for task %s: %s", loop_id, task_id, exc)
+        raise _receipt_http_error(exc) from exc
     except Exception as e:
         logger.error(f"Failed to trigger loop {loop_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/tasks/{task_id}/loops/{loop_id}/submission")
+async def get_loop_submission(
+    task_id: str,
+    loop_id: str,
+    submission_intent_hash: str | None = None,
+):
+    """Return the durable create receipt even before a Loop status file exists."""
+
+    loop_dir = _get_loop_dir(task_id, loop_id)
+    try:
+        receipt = get_submission_receipt(
+            loop_dir,
+            loop_id=loop_id,
+            submission_intent_hash=submission_intent_hash,
+        )
+    except SubmissionReceiptError as exc:
+        raise _receipt_http_error(exc) from exc
+    if receipt is None:
+        return {
+            "schema_version": "qe_submission_receipt_v1",
+            "task_id": task_id,
+            "loop_id": loop_id,
+            "status": "not_reserved",
+        }
+    return public_receipt_payload(receipt)
+
 
 @router.get("/tasks/{task_id}/loops/{loop_id}/status")
 async def get_loop_status(task_id: str, loop_id: str):
@@ -433,14 +687,33 @@ async def get_loop_status(task_id: str, loop_id: str):
     task_dir = _get_task_dir(task_id)
     status_file = loop_dir / "status.txt"
 
+    try:
+        receipt = get_submission_receipt(loop_dir, loop_id=loop_id)
+    except SubmissionReceiptError as exc:
+        raise _receipt_http_error(exc) from exc
+
     if not status_file.exists():
-        return {"status": "not_found"}
+        if receipt is None:
+            return {"status": "not_found"}
+        receipt_status = str(receipt.get("status") or "")
+        effective_status = "reserved_not_started" if receipt_status == "reserved" else receipt_status
+        return _status_with_receipt(effective_status, receipt)
 
     status = status_file.read_text().strip()
 
     # 终态直接返回
-    if status in ("completed", "failed"):
-        return {"status": status}
+    if status in ("completed", "failed", "cancelled"):
+        if receipt is not None and receipt.get("status") != status:
+            try:
+                receipt = transition_submission_receipt(
+                    loop_dir,
+                    loop_id=loop_id,
+                    submission_intent_hash=str(receipt["submission_intent_hash"]),
+                    status=status,
+                )
+            except SubmissionReceiptError as exc:
+                raise _receipt_http_error(exc) from exc
+        return _status_with_receipt(status, receipt)
 
     if status == "running":
         pid_file = loop_dir / "pid.txt"
@@ -448,7 +721,7 @@ async def get_loop_status(task_id: str, loop_id: str):
             try:
                 pid = int(pid_file.read_text().strip())
                 os.kill(pid, 0)  # 不发信号，仅检查进程是否存在
-                return {"status": "running"}
+                return _status_with_receipt("running", receipt)
             except (ProcessLookupError, OSError):
                 # PID 不存活，检查结果文件确定最终状态（loop 目录优先，兼容 task 目录）
                 result_file = loop_dir / "qlib_results_enhanced.json"
@@ -460,13 +733,23 @@ async def get_loop_status(task_id: str, loop_id: str):
                     status = "failed"
                 status_file.write_text(status)
                 _append_log(loop_dir, f"[DETECT] pid={pid} no longer alive, result_file_exists={result_file.exists()}, marking as {status}")
-                return {"status": status}
+                try:
+                    if receipt is not None:
+                        receipt = transition_submission_receipt(
+                            loop_dir,
+                            loop_id=loop_id,
+                            submission_intent_hash=str(receipt["submission_intent_hash"]),
+                            status=status,
+                        )
+                except SubmissionReceiptError as exc:
+                    raise _receipt_http_error(exc) from exc
+                return _status_with_receipt(status, receipt)
         else:
             # 无 pid.txt，无法判断进程状态，保持当前状态
-            return {"status": status}
+            return _status_with_receipt(status, receipt)
 
     # 其他未知状态（如 interrupted），直接返回
-    return {"status": status}
+    return _status_with_receipt(status, receipt)
 
 @router.post("/tasks/{task_id}/loops/{loop_id}/kill")
 async def kill_loop(task_id: str, loop_id: str):
@@ -482,7 +765,31 @@ async def kill_loop(task_id: str, loop_id: str):
     pid_file = loop_dir / "pid.txt"
     status_file = loop_dir / "status.txt"
 
+    try:
+        receipt = get_submission_receipt(loop_dir, loop_id=loop_id)
+    except SubmissionReceiptError as exc:
+        raise _receipt_http_error(exc) from exc
+
     if not pid_file.exists():
+        if receipt is not None and receipt.get("status") in {"reserved", "started"}:
+            try:
+                receipt = transition_submission_receipt(
+                    loop_dir,
+                    loop_id=loop_id,
+                    submission_intent_hash=str(receipt["submission_intent_hash"]),
+                    status="cancelled",
+                )
+            except SubmissionReceiptError as exc:
+                raise _receipt_http_error(exc) from exc
+            loop_dir.mkdir(parents=True, exist_ok=True)
+            status_file.write_text("cancelled")
+            _append_log(loop_dir, "[KILL] Cancelled reserved submission before subprocess start")
+            return {
+                "killed": False,
+                "pid": None,
+                "status": "cancelled",
+                "receipt_status": receipt["status"],
+            }
         raise HTTPException(status_code=404, detail=f"No pid.txt found for {task_id}/{loop_id}")
 
     try:
@@ -539,13 +846,29 @@ async def kill_loop(task_id: str, loop_id: str):
         logger.error(f"Kill loop {task_id}/{loop_id} pid={pid} error: {e}")
 
     # Mark status as cancelled
-    if status_file.exists():
-        current = status_file.read_text().strip()
-        if current == "running":
-            status_file.write_text("cancelled")
-            _append_log(loop_dir, f"[KILL] Marked status as cancelled")
+    marked_cancelled = False
+    current = status_file.read_text().strip() if status_file.exists() else ""
+    if killed and current not in {"completed", "failed", "cancelled"}:
+        status_file.write_text("cancelled")
+        current = "cancelled"
+        marked_cancelled = True
+        _append_log(loop_dir, "[KILL] Marked status as cancelled")
 
-    result = {"killed": killed, "pid": pid, "status": "cancelled"}
+    if marked_cancelled and receipt is not None:
+        try:
+            receipt = transition_submission_receipt(
+                loop_dir,
+                loop_id=loop_id,
+                submission_intent_hash=str(receipt["submission_intent_hash"]),
+                status="cancelled",
+            )
+        except SubmissionReceiptError as exc:
+            raise _receipt_http_error(exc) from exc
+
+    result_status = current or (str(receipt.get("status")) if receipt is not None else "unknown")
+    result = {"killed": killed, "pid": pid, "status": result_status}
+    if receipt is not None:
+        result["receipt_status"] = receipt["status"]
     if error_detail:
         result["error"] = error_detail
     return result
@@ -572,7 +895,7 @@ async def get_loop_metrics(task_id: str, loop_id: str):
     if enhanced_file is None:
         raise HTTPException(status_code=404, detail="Metrics not ready: qlib_results_enhanced.json not found")
 
-    with open(enhanced_file, "r", encoding="utf-8") as f:
+    with open(enhanced_file, encoding="utf-8") as f:
         data = json.load(f)
 
     return data.get("summary", data)
@@ -596,7 +919,7 @@ async def get_loop_enhanced_metrics(task_id: str, loop_id: str):
     if enhanced_file is None:
         raise HTTPException(status_code=404, detail=f"qlib_results_enhanced.json not found in {loop_dir} or {task_dir}")
 
-    with open(enhanced_file, "r", encoding="utf-8") as f:
+    with open(enhanced_file, encoding="utf-8") as f:
         full_data = json.load(f)
 
     _SECTION_KEYS = [
@@ -618,7 +941,7 @@ async def get_loop_enhanced_metrics(task_id: str, loop_id: str):
         ic["dates"] = ic.pop("ic_dates")
 
     if not result:
-        raise HTTPException(status_code=500, detail=f"qlib_results_enhanced.json exists but contains no diagnostic sections")
+        raise HTTPException(status_code=500, detail="qlib_results_enhanced.json exists but contains no diagnostic sections")
 
     return result
 
@@ -629,15 +952,15 @@ async def download_loop_assets(task_id: str, loop_id: str):
     模型资产打包(ZIP)下载
     """
     loop_dir = _get_loop_dir(task_id, loop_id)
-    
+
     if not loop_dir.exists():
         raise HTTPException(status_code=404, detail="Loop workspace not found")
-        
+
     zip_path = loop_dir / f"{loop_id}_assets.zip"
-    
+
     # Create zip file containing models/ and features_order.txt
     try:
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
             models_dir = loop_dir / "models"
             if models_dir.exists():
                 for root, _, files in os.walk(models_dir):
@@ -645,22 +968,22 @@ async def download_loop_assets(task_id: str, loop_id: str):
                         file_path = os.path.join(root, file)
                         arcname = os.path.relpath(file_path, loop_dir)
                         zipf.write(file_path, arcname)
-                        
+
             features_file = loop_dir / "features_order.txt"
             if features_file.exists():
                 zipf.write(features_file, "features_order.txt")
-                
+
     except Exception as e:
         logger.error(f"Failed to create assets zip for {loop_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to create zip package")
-        
+
     if not zip_path.exists():
         raise HTTPException(status_code=404, detail="No assets found to download")
-        
+
     return FileResponse(
         path=zip_path,
         filename=f"{loop_id}_assets.zip",
-        media_type="application/zip"
+        media_type="application/zip",
     )
 
 

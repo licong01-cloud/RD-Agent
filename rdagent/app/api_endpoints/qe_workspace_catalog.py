@@ -5,7 +5,7 @@ from __future__ import annotations
 import mimetypes
 import os
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from fastapi import HTTPException
@@ -14,19 +14,80 @@ SCHEMA_VERSION = "hmm_qe_asset_catalog_v1"
 TERMINAL_COMPLETE_STATUSES = frozenset({"completed", "success", "succeeded"})
 
 
-def resolve_loop_dir(workspace_base: Path, task_id: str, loop_id: str) -> Path:
-    """Resolve a loop directory without allowing task/loop path traversal."""
+def resolve_task_dir(workspace_base: Path, task_id: str) -> Path:
+    """Resolve one task directory without aliases or root escape."""
 
-    workspace_root = workspace_base.resolve()
-    loop_dir = (workspace_root / task_id / loop_id).resolve()
+    workspace_root = _normalize_windows_extended_path(workspace_base.resolve())
+    safe_task_id = _validate_workspace_component("task_id", task_id)
+    task_dir = _normalize_windows_extended_path(
+        (workspace_root / safe_task_id).resolve(),
+    )
     try:
-        loop_dir.relative_to(workspace_root)
+        task_dir.relative_to(workspace_root)
     except ValueError as exc:
         raise HTTPException(
             status_code=403,
             detail="workspace path escapes configured root",
         ) from exc
+    if task_dir == workspace_root:
+        raise HTTPException(
+            status_code=403,
+            detail="task workspace resolves to configured root",
+        )
+    return task_dir
+
+
+def resolve_loop_dir(workspace_base: Path, task_id: str, loop_id: str) -> Path:
+    """Resolve a loop directory without allowing task/loop path traversal."""
+
+    task_dir = resolve_task_dir(workspace_base, task_id)
+    safe_loop_id = _validate_workspace_component("loop_id", loop_id)
+    loop_dir = _normalize_windows_extended_path(
+        (task_dir / safe_loop_id).resolve(),
+    )
+    try:
+        loop_dir.relative_to(task_dir)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="loop path escapes task workspace",
+        ) from exc
+    if loop_dir == task_dir:
+        raise HTTPException(
+            status_code=403,
+            detail="loop workspace resolves to task directory",
+        )
     return loop_dir
+
+
+def _validate_workspace_component(field_name: str, value: str) -> str:
+    raw = str(value or "")
+    normalized = raw.replace("\\", "/")
+    posix_path = PurePosixPath(normalized)
+    windows_path = PureWindowsPath(raw)
+    if (
+        not raw
+        or "\x00" in raw
+        or posix_path.is_absolute()
+        or windows_path.is_absolute()
+        or bool(windows_path.drive)
+        or len(posix_path.parts) != 1
+        or any(part in {"", ".", ".."} for part in posix_path.parts)
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=f"invalid QE workspace {field_name}",
+        )
+    return raw
+
+
+def _normalize_windows_extended_path(path: Path) -> Path:
+    raw = str(path)
+    if raw.startswith("\\\\?\\UNC\\"):
+        return Path("\\\\" + raw[len("\\\\?\\UNC\\") :])
+    if raw.startswith("\\\\?\\"):
+        return Path(raw[len("\\\\?\\") :])
+    return path
 
 
 def _modified_at_iso(timestamp: float) -> str:
