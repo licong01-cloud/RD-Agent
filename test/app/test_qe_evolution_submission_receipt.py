@@ -16,7 +16,12 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from rdagent.app.api_endpoints.qe_kill_receipt import (
+    KillReceiptConflictError,
+    execute_typed_kill_intent,
+)
 from rdagent.app.api_endpoints.qe_submission_receipt import (
+    SubmissionReceiptError,
     SubmissionReceiptTransitionError,
     canonical_request_digest,
     get_submission_receipt,
@@ -34,6 +39,13 @@ HTTP_CONFLICT = 409
 HTTP_INTERNAL_SERVER_ERROR = 500
 TEST_PROCESS_ID = 12345
 EXPECTED_RETRY_RECEIPT_COUNT = 2
+TYPED_KILL_COMMAND_ID = "macmd_2b84ea4e40d2d69ca8cc3c71d938ad30"
+TYPED_KILL_INTENT_HASH = hashlib.sha256(b"typed-kill-intent").hexdigest()
+TYPED_PROCESS_IDENTITY = {
+    "pid": 43210,
+    "pgid": 43210,
+    "start_time_ticks": 987654321,
+}
 
 _API_PATH = (
     Path(__file__).resolve().parents[2]
@@ -101,6 +113,35 @@ def _reserve_in_child(
         request_digest=request_digest,
     )
     result_queue.put(("ok", created, receipt["status"]))
+
+
+def _reserve_running_submission_with_identity(
+    tmp_path: Path,
+) -> tuple[Path, str]:
+    loop_dir = tmp_path / "qe_task" / "Loop1"
+    intent_hash = hashlib.sha256(b"typed-kill-submission").hexdigest()
+    request_digest = hashlib.sha256(b"typed-kill-request").hexdigest()
+    reserve_submission(
+        loop_dir,
+        task_id="qe_task",
+        loop_id="Loop1",
+        submission_intent_hash=intent_hash,
+        request_digest=request_digest,
+    )
+    transition_submission_receipt(
+        loop_dir,
+        loop_id="Loop1",
+        submission_intent_hash=intent_hash,
+        status="started",
+    )
+    transition_submission_receipt(
+        loop_dir,
+        loop_id="Loop1",
+        submission_intent_hash=intent_hash,
+        status="running",
+        process_identity=TYPED_PROCESS_IDENTITY,
+    )
+    return loop_dir, intent_hash
 
 
 def test_concurrent_same_hash_post_registers_execution_once(tmp_path: Path) -> None:
@@ -269,6 +310,253 @@ def test_reserved_submission_can_be_cancelled_before_process_start(tmp_path: Pat
     assert (tmp_path / "qe_task" / "Loop1" / "status.txt").read_text() == "cancelled"
 
 
+def test_typed_kill_pre_start_cancellation_persists_receipt_and_blocks_popen(
+    tmp_path: Path,
+) -> None:
+    loop_dir = tmp_path / "qe_task" / "Loop1"
+    intent_hash = hashlib.sha256(b"typed-pre-start-submission").hexdigest()
+    reserve_submission(
+        loop_dir,
+        task_id="qe_task",
+        loop_id="Loop1",
+        submission_intent_hash=intent_hash,
+        request_digest=hashlib.sha256(b"typed-pre-start-request").hexdigest(),
+    )
+
+    receipt = execute_typed_kill_intent(
+        loop_dir,
+        task_id="qe_task",
+        loop_id="Loop1",
+        command_id=TYPED_KILL_COMMAND_ID,
+        kill_intent_generation=1,
+        kill_intent_hash=TYPED_KILL_INTENT_HASH,
+        expected_submission_intent_hash=intent_hash,
+        expected_process_identity=None,
+        expected_phase="pre_process_start",
+    )
+
+    submission = get_submission_receipt(loop_dir, loop_id="Loop1")
+    assert receipt["status"] == "cancelled"
+    assert receipt["terminal_reason"] == "cancelled_before_process_start"
+    assert receipt["signal_sent"] is False
+    assert submission is not None
+    assert submission["status"] == "cancelled"
+    assert (loop_dir / "status.txt").read_text(encoding="utf-8") == "cancelled"
+
+
+def test_typed_kill_uses_exact_process_incarnation_and_is_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop_dir, submission_intent_hash = _reserve_running_submission_with_identity(tmp_path)
+    captured_signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        "rdagent.app.api_endpoints.qe_kill_receipt.capture_process_identity",
+        lambda _pid: dict(TYPED_PROCESS_IDENTITY),
+    )
+    monkeypatch.setattr(
+        "rdagent.app.api_endpoints.qe_kill_receipt._signal_process_group",
+        lambda pgid, sig: captured_signals.append((pgid, int(sig))),
+    )
+
+    first = execute_typed_kill_intent(
+        loop_dir,
+        task_id="qe_task",
+        loop_id="Loop1",
+        command_id=TYPED_KILL_COMMAND_ID,
+        kill_intent_generation=1,
+        kill_intent_hash=TYPED_KILL_INTENT_HASH,
+        expected_submission_intent_hash=submission_intent_hash,
+        expected_process_identity=TYPED_PROCESS_IDENTITY,
+        expected_phase=None,
+    )
+    replay = execute_typed_kill_intent(
+        loop_dir,
+        task_id="qe_task",
+        loop_id="Loop1",
+        command_id=TYPED_KILL_COMMAND_ID,
+        kill_intent_generation=1,
+        kill_intent_hash=TYPED_KILL_INTENT_HASH,
+        expected_submission_intent_hash=submission_intent_hash,
+        expected_process_identity=TYPED_PROCESS_IDENTITY,
+        expected_phase=None,
+    )
+
+    assert first["status"] == "reconciling"
+    assert first["signal_sent"] is True
+    assert first == replay
+    assert captured_signals == [(TYPED_PROCESS_IDENTITY["pgid"], 15)]
+
+
+def test_typed_kill_process_incarnation_mismatch_never_signals(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop_dir, submission_intent_hash = _reserve_running_submission_with_identity(tmp_path)
+    captured_signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        "rdagent.app.api_endpoints.qe_kill_receipt._signal_process_group",
+        lambda pgid, sig: captured_signals.append((pgid, int(sig))),
+    )
+    mismatched_identity = {**TYPED_PROCESS_IDENTITY, "start_time_ticks": 987654322}
+
+    receipt = execute_typed_kill_intent(
+        loop_dir,
+        task_id="qe_task",
+        loop_id="Loop1",
+        command_id="macmd_6e18b58e89ba4f72bc4b6d1ed91a1b58",
+        kill_intent_generation=1,
+        kill_intent_hash=hashlib.sha256(b"typed-kill-mismatch").hexdigest(),
+        expected_submission_intent_hash=submission_intent_hash,
+        expected_process_identity=mismatched_identity,
+        expected_phase=None,
+    )
+
+    assert receipt["status"] == "failed"
+    assert receipt["terminal_reason"] == "kill_execution_incarnation_mismatch"
+    assert captured_signals == []
+
+
+def test_typed_kill_completed_result_wins_after_signal_reservation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop_dir, submission_intent_hash = _reserve_running_submission_with_identity(tmp_path)
+    captured_signals: list[tuple[int, int]] = []
+    observations = 0
+
+    def capture(_pid: int) -> dict[str, int]:
+        nonlocal observations
+        observations += 1
+        if observations == 1:
+            return dict(TYPED_PROCESS_IDENTITY)
+        message = "process exited after exact signal"
+        raise SubmissionReceiptError(message)
+
+    def signal_then_publish_result(pgid: int, sig: Any) -> None:
+        captured_signals.append((pgid, int(sig)))
+        loop_dir.mkdir(parents=True, exist_ok=True)
+        (loop_dir / "qlib_results_enhanced.json").write_text('{"sharpe": 1.0}', encoding="utf-8")
+
+    monkeypatch.setattr(
+        "rdagent.app.api_endpoints.qe_kill_receipt.capture_process_identity",
+        capture,
+    )
+    monkeypatch.setattr(
+        "rdagent.app.api_endpoints.qe_kill_receipt._signal_process_group",
+        signal_then_publish_result,
+    )
+
+    receipt = execute_typed_kill_intent(
+        loop_dir,
+        task_id="qe_task",
+        loop_id="Loop1",
+        command_id=TYPED_KILL_COMMAND_ID,
+        kill_intent_generation=1,
+        kill_intent_hash=TYPED_KILL_INTENT_HASH,
+        expected_submission_intent_hash=submission_intent_hash,
+        expected_process_identity=TYPED_PROCESS_IDENTITY,
+        expected_phase=None,
+    )
+
+    submission = get_submission_receipt(loop_dir, loop_id="Loop1")
+    assert captured_signals == [(TYPED_PROCESS_IDENTITY["pgid"], 15)]
+    assert receipt["status"] == "completed", receipt
+    assert receipt["terminal_reason"] == "completed_result_wins_cancellation_race"
+    assert receipt["signal_sent"] is True
+    assert submission is not None
+    assert submission["status"] == "completed"
+    assert (loop_dir / "status.txt").read_text(encoding="utf-8") == "completed"
+
+
+def test_typed_kill_allows_next_generation_only_after_no_signal_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop_dir, submission_intent_hash = _reserve_running_submission_with_identity(tmp_path)
+    first_hash = hashlib.sha256(b"typed-kill-generation-one").hexdigest()
+    second_hash = hashlib.sha256(b"typed-kill-generation-two").hexdigest()
+    mismatched_identity = {**TYPED_PROCESS_IDENTITY, "start_time_ticks": 987654322}
+    first = execute_typed_kill_intent(
+        loop_dir,
+        task_id="qe_task",
+        loop_id="Loop1",
+        command_id=TYPED_KILL_COMMAND_ID,
+        kill_intent_generation=1,
+        kill_intent_hash=first_hash,
+        expected_submission_intent_hash=submission_intent_hash,
+        expected_process_identity=mismatched_identity,
+        expected_phase=None,
+    )
+    captured_signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        "rdagent.app.api_endpoints.qe_kill_receipt.capture_process_identity",
+        lambda _pid: dict(TYPED_PROCESS_IDENTITY),
+    )
+    monkeypatch.setattr(
+        "rdagent.app.api_endpoints.qe_kill_receipt._signal_process_group",
+        lambda pgid, sig: captured_signals.append((pgid, int(sig))),
+    )
+
+    second = execute_typed_kill_intent(
+        loop_dir,
+        task_id="qe_task",
+        loop_id="Loop1",
+        command_id=TYPED_KILL_COMMAND_ID,
+        kill_intent_generation=2,
+        kill_intent_hash=second_hash,
+        expected_submission_intent_hash=submission_intent_hash,
+        expected_process_identity=TYPED_PROCESS_IDENTITY,
+        expected_phase=None,
+    )
+
+    assert first["status"] == "failed"
+    assert first["signal_sent"] is False
+    assert first["terminal_reason"] == "kill_execution_incarnation_mismatch"
+    assert second["status"] == "reconciling"
+    assert second["kill_intent_generation"] == first["kill_intent_generation"] + 1
+    assert captured_signals == [(TYPED_PROCESS_IDENTITY["pgid"], 15)]
+
+
+def test_typed_kill_rejects_conflicting_active_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop_dir, submission_intent_hash = _reserve_running_submission_with_identity(tmp_path)
+    monkeypatch.setattr(
+        "rdagent.app.api_endpoints.qe_kill_receipt.capture_process_identity",
+        lambda _pid: dict(TYPED_PROCESS_IDENTITY),
+    )
+    monkeypatch.setattr(
+        "rdagent.app.api_endpoints.qe_kill_receipt._signal_process_group",
+        lambda _pgid, _sig: None,
+    )
+    execute_typed_kill_intent(
+        loop_dir,
+        task_id="qe_task",
+        loop_id="Loop1",
+        command_id=TYPED_KILL_COMMAND_ID,
+        kill_intent_generation=1,
+        kill_intent_hash=TYPED_KILL_INTENT_HASH,
+        expected_submission_intent_hash=submission_intent_hash,
+        expected_process_identity=TYPED_PROCESS_IDENTITY,
+        expected_phase=None,
+    )
+
+    with pytest.raises(KillReceiptConflictError):
+        execute_typed_kill_intent(
+            loop_dir,
+            task_id="qe_task",
+            loop_id="Loop1",
+            command_id="macmd_6e18b58e89ba4f72bc4b6d1ed91a1b58",
+            kill_intent_generation=1,
+            kill_intent_hash=hashlib.sha256(b"conflicting-active-kill").hexdigest(),
+            expected_submission_intent_hash=submission_intent_hash,
+            expected_process_identity=TYPED_PROCESS_IDENTITY,
+            expected_phase=None,
+        )
+
+
 def test_cancelled_reserved_background_call_does_not_start_process(tmp_path: Path) -> None:
     module = _load_api(tmp_path, module_name="qe_receipt_cancel_race_api")
     _created, background = _create(module, _request(module))
@@ -315,6 +603,15 @@ def test_openapi_requires_submission_intent_and_exposes_receipt_endpoint(tmp_pat
         "/api/v1/qe_workspace/tasks/{task_id}/loops/{loop_id}/submission"
         in schema["paths"]
     )
+    assert "/api/v1/qe_workspace/tasks/{task_id}/loops/{loop_id}/kill" in schema["paths"]
+    assert "/api/v1/qe_workspace/tasks/{task_id}/loops/{loop_id}/kill-intents" in schema["paths"]
+    typed_kill_schema = schema["components"]["schemas"]["TypedKillIntentRequest"]
+    assert {
+        "command_id",
+        "kill_intent_generation",
+        "kill_intent_hash",
+        "expected_submission_intent_hash",
+    }.issubset(typed_kill_schema["required"])
 
 
 def test_invalid_submission_intent_is_explicit_and_does_not_create_receipt(tmp_path: Path) -> None:
