@@ -16,9 +16,11 @@ import json
 import logging
 import os
 import shutil
+import signal
+import subprocess
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any
+from typing import Any, NoReturn
 
 try:
     from dotenv import load_dotenv
@@ -27,16 +29,36 @@ except ImportError:
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
+from rdagent.app.api_endpoints.qe_dataset_identity import read_dataset_identity
+from rdagent.app.api_endpoints.qe_environment_identity import (
+    ExecutionEnvironmentIdentityError,
+    get_execution_environment_identity,
+)
+from rdagent.app.api_endpoints.qe_kill_receipt import (
+    KillReceiptConflictError,
+    KillReceiptError,
+    KillReceiptValidationError,
+    execute_typed_kill_intent,
+    public_kill_receipt_payload,
+)
 from rdagent.app.api_endpoints.qe_submission_receipt import (
     SubmissionReceiptConflictError,
     SubmissionReceiptError,
     SubmissionReceiptValidationError,
     canonical_request_digest,
+    capture_process_identity,
     get_submission_receipt,
+    get_submission_receipt_locked,
+    loop_lifecycle_lock,
+    observe_result_artifact,
+    promote_submission_receipt_to_completed_from_verified_result_locked,
     public_receipt_payload,
     reserve_submission,
     transition_submission_receipt,
+    transition_submission_receipt_locked,
     validate_submission_intent_hash,
+    write_loop_status_locked,
+    write_process_identity_locked,
 )
 from rdagent.app.api_endpoints.qe_workspace_catalog import (
     build_workspace_catalog,
@@ -45,6 +67,152 @@ from rdagent.app.api_endpoints.qe_workspace_catalog import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _raise_runtime_error(message: str) -> NoReturn:
+    raise RuntimeError(message)
+
+
+def _raise_submission_receipt_error(message: str) -> NoReturn:
+    raise SubmissionReceiptError(message)
+
+
+def _raise_execution_environment_mismatch(
+    *,
+    expected: dict[str, Any],
+    actual: dict[str, Any],
+) -> NoReturn:
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "reason_code": "qe_execution_environment_identity_mismatch",
+            "message": (
+                "submitted durable execution identity belongs to a different "
+                "QE deployment environment"
+            ),
+            "expected": expected,
+            "actual": actual,
+        },
+    )
+
+
+def _bind_spawned_process_identity(
+    *,
+    loop_dir: Path,
+    loop_id: str,
+    submission_intent_hash: str,
+    process: subprocess.Popen[Any],
+) -> dict[str, int]:
+    """Persist exact process identity or kill the otherwise untracked process."""
+
+    bound = False
+    try:
+        identity = capture_process_identity(process.pid)
+        write_process_identity_locked(loop_dir, identity=identity)
+        transition_submission_receipt_locked(
+            loop_dir,
+            loop_id=loop_id,
+            submission_intent_hash=submission_intent_hash,
+            status="running",
+            process_identity=identity,
+        )
+        write_loop_status_locked(loop_dir, status="running", expected_current={None})
+        bound = True
+        return identity
+    finally:
+        if not bound:
+            _terminate_untracked_process(process)
+
+
+def _spawn_qe_process(
+    *,
+    command: str,
+    stdout_fd: int,
+    env: dict[str, str],
+    cwd: Path,
+) -> subprocess.Popen[Any]:
+    # QE intentionally executes its frozen command through the Linux shell;
+    # argv is fixed and shell=True is never used.
+    return subprocess.Popen(  # noqa: S603 - audited QE command execution boundary.
+        ["/bin/sh", "-c", command],
+        stdout=stdout_fd,
+        stderr=subprocess.STDOUT,
+        env=env,
+        cwd=str(cwd),
+        start_new_session=True,
+        close_fds=True,
+    )
+
+
+def _terminate_untracked_process(process: subprocess.Popen[Any]) -> None:
+    try:
+        killpg = getattr(os, "killpg", None)
+        if killpg is None:
+            os.kill(process.pid, signal.SIGKILL)
+        else:
+            killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except (ProcessLookupError, OSError):
+        return
+
+
+def _prepare_created_loop_workspace(
+    *,
+    loop_dir: Path,
+    task_id: str,
+    loop_id: str,
+    submission_intent_hash: str,
+) -> tuple[dict[str, Any], bool]:
+    try:
+        with loop_lifecycle_lock(loop_dir, loop_id):
+            latest = get_submission_receipt_locked(
+                loop_dir,
+                loop_id=loop_id,
+                submission_intent_hash=submission_intent_hash,
+            )
+            if latest is None:
+                _raise_runtime_error(
+                    "QE loop reservation disappeared before workspace preparation",
+                )
+            if latest.get("status") == "cancelled":
+                return latest, False
+            if latest.get("status") != "reserved":
+                _raise_runtime_error(
+                    "QE workspace preparation requires a reserved receipt; "
+                    f"actual={latest.get('status')!r}",
+                )
+            if loop_dir.exists():
+                if not loop_dir.is_dir():
+                    _raise_runtime_error(
+                        f"Loop workspace is not a directory: {task_id}/{loop_id}",
+                    )
+                shutil.rmtree(loop_dir)
+            return latest, True
+    except (OSError, RuntimeError, SubmissionReceiptError) as exc:
+        with loop_lifecycle_lock(loop_dir, loop_id):
+            latest = get_submission_receipt_locked(
+                loop_dir,
+                loop_id=loop_id,
+                submission_intent_hash=submission_intent_hash,
+            )
+            if latest is not None and latest.get("status") not in {
+                "completed",
+                "failed",
+                "cancelled",
+            }:
+                transition_submission_receipt_locked(
+                    loop_dir,
+                    loop_id=loop_id,
+                    submission_intent_hash=submission_intent_hash,
+                    status="failed",
+                )
+                write_loop_status_locked(
+                    loop_dir,
+                    status="failed",
+                    expected_current={None},
+                )
+        _raise_runtime_error(
+            f"failed to prepare clean retry workspace for {task_id}/{loop_id}: {exc}",
+        )
 
 # 确保 .env 文件中的环境变量在模块加载时可用（热重载安全）
 # override=False：不覆盖已存在的 shell 环境变量
@@ -82,6 +250,9 @@ class LoopRunRequest(BaseModel):
     callback_url: str | None = None
     model_source: dict[str, Any] | None = None
     submission_intent_hash: str
+    execution_identity_hash: str | None = None
+    execution_environment_snapshot_id: str | None = None
+    execution_environment_manifest_sha256: str | None = None
 
 class LoopRunResponse(BaseModel):
     loop_id: str
@@ -91,6 +262,18 @@ class LoopRunResponse(BaseModel):
     request_digest: str
     receipt_status: str
     duplicate_replay: bool
+    execution_identity_hash: str | None = None
+    execution_environment_snapshot_id: str | None = None
+    execution_environment_manifest_sha256: str | None = None
+
+
+class TypedKillIntentRequest(BaseModel):
+    command_id: str
+    kill_intent_generation: int
+    kill_intent_hash: str
+    expected_submission_intent_hash: str
+    expected_process_identity: dict[str, int] | None = None
+    expected_phase: str | None = None
 
 def _get_task_dir(task_id: str) -> Path:
     return resolve_task_dir(WORKSPACE_BASE, task_id)
@@ -194,6 +377,32 @@ def _receipt_http_error(exc: SubmissionReceiptError) -> HTTPException:
     )
 
 
+def _kill_receipt_http_error(exc: KillReceiptError) -> HTTPException:
+    if isinstance(exc, KillReceiptConflictError):
+        return HTTPException(
+            status_code=409,
+            detail={
+                "reason_code": "qe_workspace_typed_kill_identity_conflict",
+                "message": str(exc),
+            },
+        )
+    if isinstance(exc, KillReceiptValidationError):
+        return HTTPException(
+            status_code=400,
+            detail={
+                "reason_code": "qe_workspace_typed_kill_invalid",
+                "message": str(exc),
+            },
+        )
+    return HTTPException(
+        status_code=500,
+        detail={
+            "reason_code": "qe_workspace_typed_kill_receipt_error",
+            "message": str(exc),
+        },
+    )
+
+
 def _status_with_receipt(status: str, receipt: dict[str, Any] | None) -> dict[str, Any]:
     payload: dict[str, Any] = {"status": status}
     if receipt is not None:
@@ -232,14 +441,24 @@ async def _run_qlib_backtest(
     status_file = loop_dir / "status.txt"
 
     try:
-        transition_submission_receipt(
-            loop_dir,
-            loop_id=loop_id,
-            submission_intent_hash=submission_intent_hash,
-            status="started",
-        )
-        status_file.write_text("running")
-        _append_log(loop_dir, f"[START] loop={loop_id} status=running")
+        with loop_lifecycle_lock(loop_dir, loop_id):
+            receipt = get_submission_receipt_locked(
+                loop_dir,
+                loop_id=loop_id,
+                submission_intent_hash=submission_intent_hash,
+            )
+            if receipt is None:
+                _raise_runtime_error(
+                    "QE background execution has no matching durable submission receipt",
+                )
+            if receipt.get("status") == "cancelled":
+                _append_log(loop_dir, "[START] submission already cancelled before setup")
+                return
+            if receipt.get("status") != "reserved":
+                _raise_runtime_error(
+                    "QE background execution requires a reserved submission receipt; "
+                    f"actual={receipt.get('status')!r}",
+                )
 
         # 保存配置
         config_file = loop_dir / "config.json"
@@ -294,7 +513,6 @@ async def _run_qlib_backtest(
                     _append_log(loop_dir, f"[INFO] Cross-node mlruns extracted to {dst_mlruns}")
                 else:
                     msg = "Cross-node mode requires mlruns_params.tar.gz, but it was not provided"
-                    status_file.write_text("failed")
                     _append_log(loop_dir, f"[ERROR] {msg}")
                     raise RuntimeError(msg)
             else:
@@ -330,36 +548,67 @@ async def _run_qlib_backtest(
             final_cmd = " && ".join(cmd_parts)
             _append_log(loop_dir, f"[INFO] Executing command: {final_cmd}")
 
-        # 将子进程输出重定向到日志文件（非 PIPE），确保子进程与父进程解耦
-        log_file_path = loop_dir / "run.log"
-        log_fd = os.open(str(log_file_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND)
-
-        # 使用 subprocess.Popen 而非 asyncio.create_subprocess_shell:
-        # 显式 close_fds=True 防止 uvicorn server socket (fd) 泄漏到子进程，
-        # 否则子进程持有端口导致 API 重启时 "Address already in use"
-        import subprocess as _subprocess
-        _proc = _subprocess.Popen(
-            final_cmd,
-            shell=True,
-            stdout=log_fd,
-            stderr=_subprocess.STDOUT,
-            env=env,
-            cwd=str(loop_dir),
-            start_new_session=True,
-            close_fds=True,
-        )
-        os.close(log_fd)  # 父进程关闭 fd 副本，子进程保留自己的副本
-
-        # 写入子进程的真实 PID（而非 FastAPI worker PID）
-        (loop_dir / "pid.txt").write_text(str(_proc.pid))
-        transition_submission_receipt(
+        # Bind cancellation-before-start, subprocess creation, and full process
+        # incarnation persistence to one shared cross-process lifecycle lock.
+        # A typed pre-start cancellation either wins before Popen or sees a fully
+        # recorded PID/PGID/start-tick identity; it can never race in between.
+        with loop_lifecycle_lock(loop_dir, loop_id):
+            receipt = get_submission_receipt_locked(
+                loop_dir,
+                loop_id=loop_id,
+                submission_intent_hash=submission_intent_hash,
+            )
+            if receipt is None:
+                _raise_runtime_error(
+                    "QE background execution lost its durable submission receipt before Popen",
+                )
+            if receipt.get("status") == "cancelled":
+                _append_log(loop_dir, "[START] submission cancelled before subprocess creation")
+                return
+            if receipt.get("status") != "reserved":
+                _raise_runtime_error(
+                    "QE Popen requires a reserved submission receipt; "
+                    f"actual={receipt.get('status')!r}",
+                )
+            existing_status = (
+                status_file.read_text(encoding="utf-8").strip()
+                if status_file.exists()
+                else None
+            )
+            if existing_status is not None:
+                _raise_runtime_error(
+                    "QE Popen requires no existing status sidecar for this reserved attempt; "
+                    f"actual={existing_status!r}",
+                )
+            transition_submission_receipt_locked(
+                loop_dir,
+                loop_id=loop_id,
+                submission_intent_hash=submission_intent_hash,
+                status="started",
+            )
+            log_file_path = loop_dir / "run.log"
+            log_fd = os.open(str(log_file_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+            try:
+                _proc = _spawn_qe_process(
+                    command=final_cmd,
+                    stdout_fd=log_fd,
+                    env=env,
+                    cwd=loop_dir,
+                )
+            finally:
+                os.close(log_fd)
+            process_identity = _bind_spawned_process_identity(
+                loop_dir=loop_dir,
+                loop_id=loop_id,
+                submission_intent_hash=submission_intent_hash,
+                process=_proc,
+            )
+        _append_log(
             loop_dir,
-            loop_id=loop_id,
-            submission_intent_hash=submission_intent_hash,
-            status="running",
-            pid=_proc.pid,
+            "[INFO] Subprocess started, "
+            f"pid={process_identity['pid']} pgid={process_identity['pgid']} "
+            f"start_time_ticks={process_identity['start_time_ticks']}",
         )
-        _append_log(loop_dir, f"[INFO] Subprocess started, pid={_proc.pid}")
 
         # 在线程池中等待子进程完成（不阻塞事件循环）
         # 如果 uvicorn reload 导致父进程重启，此 await 会被取消，但子进程继续运行
@@ -367,16 +616,29 @@ async def _run_qlib_backtest(
         returncode = await loop.run_in_executor(None, _proc.wait)
 
         if returncode != 0:
-            raise RuntimeError(f"QLib backtest failed with return code {returncode}")
+            _raise_runtime_error(f"QLib backtest failed with return code {returncode}")
 
-        # 记录状态为 completed
-        status_file.write_text("completed")
-        transition_submission_receipt(
-            loop_dir,
-            loop_id=loop_id,
-            submission_intent_hash=submission_intent_hash,
-            status="completed",
-        )
+        # Persist the terminal sidecar and receipt under the same lifecycle lock.
+        with loop_lifecycle_lock(loop_dir, loop_id):
+            receipt = get_submission_receipt_locked(
+                loop_dir,
+                loop_id=loop_id,
+                submission_intent_hash=submission_intent_hash,
+            )
+            if receipt is None:
+                _raise_runtime_error("QE completion lost its durable submission receipt")
+            if receipt.get("status") != "running":
+                _raise_runtime_error(
+                    "QE completion cannot overwrite a concurrent terminal/cancellation state; "
+                    f"actual={receipt.get('status')!r}",
+                )
+            transition_submission_receipt_locked(
+                loop_dir,
+                loop_id=loop_id,
+                submission_intent_hash=submission_intent_hash,
+                status="completed",
+            )
+            write_loop_status_locked(loop_dir, status="completed", expected_current={"running"})
         _append_log(loop_dir, f"[DONE] loop={loop_id} status=completed")
         logger.info(f"Completed QLib backtest for {loop_id}")
 
@@ -397,22 +659,57 @@ async def _run_qlib_backtest(
 
     except Exception as e:
         logger.error(f"Backtest failed for {loop_id}: {e}")
-        # 仅在状态未被健康检查更新时标记为 failed
         try:
-            current = status_file.read_text().strip() if status_file.exists() else ""
-        except Exception:
-            current = ""
-        if current not in ("completed", "failed", "cancelled"):
-            status_file.write_text("failed")
-            (loop_dir / "error.log").write_text(str(e))
-            current = "failed"
-        try:
-            transition_submission_receipt(
-                loop_dir,
-                loop_id=loop_id,
-                submission_intent_hash=submission_intent_hash,
-                status=current if current in ("completed", "failed", "cancelled") else "failed",
-            )
+            with loop_lifecycle_lock(loop_dir, loop_id):
+                receipt = get_submission_receipt_locked(
+                    loop_dir,
+                    loop_id=loop_id,
+                    submission_intent_hash=submission_intent_hash,
+                )
+                current = status_file.read_text(encoding="utf-8").strip() if status_file.exists() else ""
+                if receipt is None:
+                    _raise_runtime_error("QE failure has no durable submission receipt")
+                receipt_status = str(receipt.get("status") or "")
+                result_observation = observe_result_artifact(loop_dir)
+                if bool(result_observation.get("valid")):
+                    # A result artifact is authoritative even when a late
+                    # exception (for example callback/log cleanup) reaches this
+                    # failure path.  The shared locked repair primitive prevents
+                    # a completed result from being downgraded to failed/cancelled.
+                    receipt = promote_submission_receipt_to_completed_from_verified_result_locked(
+                        loop_dir,
+                        loop_id=loop_id,
+                        submission_intent_hash=submission_intent_hash,
+                    )
+                    if current != "completed":
+                        write_loop_status_locked(
+                            loop_dir,
+                            status="completed",
+                            expected_current={current or None},
+                        )
+                elif receipt_status not in {"completed", "failed", "cancelled"}:
+                    terminal_status = (
+                        current if current in {"completed", "failed", "cancelled"} else "failed"
+                    )
+                    transition_submission_receipt_locked(
+                        loop_dir,
+                        loop_id=loop_id,
+                        submission_intent_hash=submission_intent_hash,
+                        status=terminal_status,
+                    )
+                    if current not in {"completed", "failed", "cancelled"}:
+                        write_loop_status_locked(
+                            loop_dir,
+                            status=terminal_status,
+                            expected_current={None, "running"},
+                        )
+                elif current not in {"completed", "failed", "cancelled"}:
+                    write_loop_status_locked(
+                        loop_dir,
+                        status=receipt_status,
+                        expected_current={None, "running"},
+                    )
+                (loop_dir / "error.log").write_text(str(e), encoding="utf-8")
         except SubmissionReceiptError as receipt_error:
             logger.error(
                 "Failed to persist terminal submission receipt for %s/%s: %s",
@@ -421,6 +718,13 @@ async def _run_qlib_backtest(
                 receipt_error,
             )
             _append_log(loop_dir, f"[ERROR] submission receipt terminal update failed: {receipt_error}")
+        except (OSError, RuntimeError, TypeError, ValueError) as receipt_error:
+            logger.exception(
+                "Failed to persist terminal QE loop state for %s/%s",
+                task_id,
+                loop_id,
+            )
+            _append_log(loop_dir, f"[ERROR] terminal lifecycle update failed: {receipt_error}")
         _append_log(loop_dir, f"[ERROR] loop={loop_id} error={e!s}")
 
 @router.get("/tasks/{task_id}/loops/{loop_id}/mlruns-params")
@@ -568,6 +872,45 @@ async def stream_task_logs(task_id: str):
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
+@router.get("/execution-environment")
+async def get_execution_environment() -> dict[str, Any]:
+    """Return the cached, content-addressed QE deployment manifest.
+
+    This endpoint is intentionally independent of a loop request.  It does not
+    run `nvidia-smi`, inspect GPU/VRAM, or poll process state; the owning service
+    constructs the manifest once per deployment and returns the same snapshot on
+    every call.
+    """
+
+    try:
+        return get_execution_environment_identity()
+    except ExecutionEnvironmentIdentityError as exc:
+        logger.exception("QE execution environment identity is unavailable")
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "reason_code": "qe_execution_environment_identity_unavailable",
+                "message": str(exc),
+            },
+        ) from exc
+
+
+@router.get("/dataset-identity")
+async def get_dataset_identity(
+    node_id: str,
+    data_root_uri: str | None = None,
+) -> dict[str, Any]:
+    """Return a verified QE dataset deployment manifest or visible evidence.
+
+    This route only reads a pre-published manifest under an explicitly
+    configured node-local root.  It never scans arbitrary directories and an
+    incomplete result is evidence for follow-up data acquisition, not an
+    approval or research-direction rejection.
+    """
+
+    return read_dataset_identity(data_root_uri=data_root_uri, node_id=node_id)
+
+
 @router.post("/tasks/{task_id}/loops", response_model=LoopRunResponse)
 async def create_and_run_loop(task_id: str, request: LoopRunRequest, background_tasks: BackgroundTasks):
     """
@@ -578,12 +921,45 @@ async def create_and_run_loop(task_id: str, request: LoopRunRequest, background_
 
     try:
         intent_hash = validate_submission_intent_hash(request.submission_intent_hash)
+        if any(
+            value is not None
+            for value in (
+                request.execution_identity_hash,
+                request.execution_environment_snapshot_id,
+                request.execution_environment_manifest_sha256,
+            )
+        ):
+            current_environment = get_execution_environment_identity()
+            expected_binding = {
+                "execution_environment_snapshot_id": current_environment[
+                    "execution_environment_snapshot_id"
+                ],
+                "execution_environment_manifest_sha256": current_environment[
+                    "execution_environment_manifest_sha256"
+                ],
+            }
+            actual_binding = {
+                "execution_environment_snapshot_id": (
+                    request.execution_environment_snapshot_id
+                ),
+                "execution_environment_manifest_sha256": (
+                    request.execution_environment_manifest_sha256
+                ),
+            }
+            if actual_binding != expected_binding:
+                _raise_execution_environment_mismatch(
+                    expected=expected_binding,
+                    actual=actual_binding,
+                )
         request_digest = canonical_request_digest(
             loop_index=request.loop_index,
             config=request.config,
             experiment_files=request.experiment_files,
             wsl_command=request.wsl_command,
             model_source=request.model_source,
+            execution_identity_hash=request.execution_identity_hash,
+            execution_environment_snapshot_id=request.execution_environment_snapshot_id,
+            execution_environment_manifest_sha256=request.execution_environment_manifest_sha256,
         )
         receipt, created = reserve_submission(
             loop_dir,
@@ -591,36 +967,29 @@ async def create_and_run_loop(task_id: str, request: LoopRunRequest, background_
             loop_id=loop_id,
             submission_intent_hash=intent_hash,
             request_digest=request_digest,
+            execution_identity_hash=request.execution_identity_hash,
+            execution_environment_snapshot_id=request.execution_environment_snapshot_id,
+            execution_environment_manifest_sha256=request.execution_environment_manifest_sha256,
         )
         if created:
-            try:
-                if loop_dir.exists():
-                    if not loop_dir.is_dir():
-                        raise RuntimeError(
-                            f"Loop workspace is not a directory: {task_id}/{loop_id}",
-                        )
-                    shutil.rmtree(loop_dir)
-            except Exception as exc:
-                transition_submission_receipt(
-                    loop_dir,
-                    loop_id=loop_id,
-                    submission_intent_hash=intent_hash,
-                    status="failed",
-                )
-                raise RuntimeError(
-                    f"failed to prepare clean retry workspace for {task_id}/{loop_id}: {exc}",
-                ) from exc
-            background_tasks.add_task(
-                _run_qlib_backtest,
-                task_id,
-                loop_id,
-                request.config,
-                request.experiment_files,
-                request.wsl_command,
-                request.callback_url,
-                request.model_source,
+            receipt, created = _prepare_created_loop_workspace(
+                loop_dir=loop_dir,
+                task_id=task_id,
+                loop_id=loop_id,
                 submission_intent_hash=intent_hash,
             )
+            if created:
+                background_tasks.add_task(
+                    _run_qlib_backtest,
+                    task_id,
+                    loop_id,
+                    request.config,
+                    request.experiment_files,
+                    request.wsl_command,
+                    request.callback_url,
+                    request.model_source,
+                    submission_intent_hash=intent_hash,
+                )
 
         return LoopRunResponse(
             loop_id=loop_id,
@@ -634,10 +1003,23 @@ async def create_and_run_loop(task_id: str, request: LoopRunRequest, background_
             request_digest=request_digest,
             receipt_status=str(receipt["status"]),
             duplicate_replay=not created,
+            execution_identity_hash=receipt.get("execution_identity_hash"),
+            execution_environment_snapshot_id=receipt.get("execution_environment_snapshot_id"),
+            execution_environment_manifest_sha256=receipt.get("execution_environment_manifest_sha256"),
         )
     except SubmissionReceiptError as exc:
         logger.error("Failed to reserve loop %s for task %s: %s", loop_id, task_id, exc)
         raise _receipt_http_error(exc) from exc
+    except ExecutionEnvironmentIdentityError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "reason_code": "qe_execution_environment_identity_unavailable",
+                "message": str(exc),
+            },
+        ) from exc
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to trigger loop {loop_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -703,6 +1085,31 @@ async def get_loop_status(task_id: str, loop_id: str):
 
     # 终态直接返回
     if status in ("completed", "failed", "cancelled"):
+        if status != "completed" and receipt is not None and bool(observe_result_artifact(loop_dir).get("valid")):
+            try:
+                with loop_lifecycle_lock(loop_dir, loop_id):
+                    latest = get_submission_receipt_locked(
+                        loop_dir,
+                        loop_id=loop_id,
+                        submission_intent_hash=str(receipt["submission_intent_hash"]),
+                    )
+                    if latest is None:
+                        _raise_submission_receipt_error(
+                            "QE terminal status has no matching durable submission receipt",
+                        )
+                    receipt = promote_submission_receipt_to_completed_from_verified_result_locked(
+                        loop_dir,
+                        loop_id=loop_id,
+                        submission_intent_hash=str(latest["submission_intent_hash"]),
+                    )
+                    write_loop_status_locked(
+                        loop_dir,
+                        status="completed",
+                        expected_current={status},
+                    )
+                    status = "completed"
+            except SubmissionReceiptError as exc:
+                raise _receipt_http_error(exc) from exc
         if receipt is not None and receipt.get("status") != status:
             try:
                 receipt = transition_submission_receipt(
@@ -731,16 +1138,36 @@ async def get_loop_status(task_id: str, loop_id: str):
                     status = "completed"
                 else:
                     status = "failed"
-                status_file.write_text(status)
                 _append_log(loop_dir, f"[DETECT] pid={pid} no longer alive, result_file_exists={result_file.exists()}, marking as {status}")
                 try:
-                    if receipt is not None:
-                        receipt = transition_submission_receipt(
-                            loop_dir,
-                            loop_id=loop_id,
-                            submission_intent_hash=str(receipt["submission_intent_hash"]),
-                            status=status,
-                        )
+                    with loop_lifecycle_lock(loop_dir, loop_id):
+                        latest = get_submission_receipt_locked(loop_dir, loop_id=loop_id)
+                        current = status_file.read_text(encoding="utf-8").strip() if status_file.exists() else None
+                        if latest is not None and latest.get("status") not in {
+                            "completed",
+                            "failed",
+                            "cancelled",
+                        }:
+                            receipt = transition_submission_receipt_locked(
+                                loop_dir,
+                                loop_id=loop_id,
+                                submission_intent_hash=str(latest["submission_intent_hash"]),
+                                status=status,
+                            )
+                        else:
+                            receipt = latest
+                            if latest is not None and latest.get("status") in {
+                                "completed",
+                                "failed",
+                                "cancelled",
+                            }:
+                                status = str(latest["status"])
+                        if current not in {"completed", "failed", "cancelled"}:
+                            write_loop_status_locked(
+                                loop_dir,
+                                status=status,
+                                expected_current={None, "running"},
+                            )
                 except SubmissionReceiptError as exc:
                     raise _receipt_http_error(exc) from exc
                 return _status_with_receipt(status, receipt)
@@ -750,6 +1177,37 @@ async def get_loop_status(task_id: str, loop_id: str):
 
     # 其他未知状态（如 interrupted），直接返回
     return _status_with_receipt(status, receipt)
+
+@router.post("/tasks/{task_id}/loops/{loop_id}/kill-intents")
+async def submit_typed_kill_intent(
+    task_id: str,
+    loop_id: str,
+    request: TypedKillIntentRequest,
+) -> dict[str, Any]:
+    """Apply one PID-reuse-safe, durable cancellation intent for a QE loop.
+
+    This endpoint deliberately returns a typed receipt for every observed state.
+    A successful HTTP response means the command was durably observed; the
+    receipt's status, terminal_reason, and observations remain authoritative.
+    """
+
+    loop_dir = _get_loop_dir(task_id, loop_id)
+    try:
+        receipt = execute_typed_kill_intent(
+            loop_dir,
+            task_id=task_id,
+            loop_id=loop_id,
+            command_id=request.command_id,
+            kill_intent_generation=request.kill_intent_generation,
+            kill_intent_hash=request.kill_intent_hash,
+            expected_submission_intent_hash=request.expected_submission_intent_hash,
+            expected_process_identity=request.expected_process_identity,
+            expected_phase=request.expected_phase,
+        )
+    except KillReceiptError as exc:
+        raise _kill_receipt_http_error(exc) from exc
+    return public_kill_receipt_payload(receipt)
+
 
 @router.post("/tasks/{task_id}/loops/{loop_id}/kill")
 async def kill_loop(task_id: str, loop_id: str):
@@ -766,31 +1224,32 @@ async def kill_loop(task_id: str, loop_id: str):
     status_file = loop_dir / "status.txt"
 
     try:
-        receipt = get_submission_receipt(loop_dir, loop_id=loop_id)
+        with loop_lifecycle_lock(loop_dir, loop_id):
+            receipt = get_submission_receipt_locked(loop_dir, loop_id=loop_id)
+            if not pid_file.exists():
+                if receipt is not None and receipt.get("status") in {"reserved", "started"}:
+                    receipt = transition_submission_receipt_locked(
+                        loop_dir,
+                        loop_id=loop_id,
+                        submission_intent_hash=str(receipt["submission_intent_hash"]),
+                        status="cancelled",
+                    )
+                    current = status_file.read_text(encoding="utf-8").strip() if status_file.exists() else None
+                    write_loop_status_locked(
+                        loop_dir,
+                        status="cancelled",
+                        expected_current={current},
+                    )
+                    _append_log(loop_dir, "[KILL] Cancelled reserved submission before subprocess start")
+                    return {
+                        "killed": False,
+                        "pid": None,
+                        "status": "cancelled",
+                        "receipt_status": receipt["status"],
+                    }
+                raise HTTPException(status_code=404, detail=f"No pid.txt found for {task_id}/{loop_id}")
     except SubmissionReceiptError as exc:
         raise _receipt_http_error(exc) from exc
-
-    if not pid_file.exists():
-        if receipt is not None and receipt.get("status") in {"reserved", "started"}:
-            try:
-                receipt = transition_submission_receipt(
-                    loop_dir,
-                    loop_id=loop_id,
-                    submission_intent_hash=str(receipt["submission_intent_hash"]),
-                    status="cancelled",
-                )
-            except SubmissionReceiptError as exc:
-                raise _receipt_http_error(exc) from exc
-            loop_dir.mkdir(parents=True, exist_ok=True)
-            status_file.write_text("cancelled")
-            _append_log(loop_dir, "[KILL] Cancelled reserved submission before subprocess start")
-            return {
-                "killed": False,
-                "pid": None,
-                "status": "cancelled",
-                "receipt_status": receipt["status"],
-            }
-        raise HTTPException(status_code=404, detail=f"No pid.txt found for {task_id}/{loop_id}")
 
     try:
         pid = int(pid_file.read_text().strip())
@@ -845,25 +1304,33 @@ async def kill_loop(task_id: str, loop_id: str):
         _append_log(loop_dir, f"[KILL] Unexpected error killing pid={pid}: {e}")
         logger.error(f"Kill loop {task_id}/{loop_id} pid={pid} error: {e}")
 
-    # Mark status as cancelled
-    marked_cancelled = False
-    current = status_file.read_text().strip() if status_file.exists() else ""
-    if killed and current not in {"completed", "failed", "cancelled"}:
-        status_file.write_text("cancelled")
-        current = "cancelled"
-        marked_cancelled = True
-        _append_log(loop_dir, "[KILL] Marked status as cancelled")
-
-    if marked_cancelled and receipt is not None:
-        try:
-            receipt = transition_submission_receipt(
-                loop_dir,
-                loop_id=loop_id,
-                submission_intent_hash=str(receipt["submission_intent_hash"]),
-                status="cancelled",
-            )
-        except SubmissionReceiptError as exc:
-            raise _receipt_http_error(exc) from exc
+    # Preserve legacy response semantics while making its state writers share the
+    # same cross-process lock/CAS as typed cancellation and background startup.
+    try:
+        with loop_lifecycle_lock(loop_dir, loop_id):
+            receipt = get_submission_receipt_locked(loop_dir, loop_id=loop_id)
+            current = status_file.read_text(encoding="utf-8").strip() if status_file.exists() else ""
+            if killed and current not in {"completed", "failed", "cancelled"}:
+                if receipt is not None and receipt.get("status") not in {
+                    "completed",
+                    "failed",
+                    "cancelled",
+                }:
+                    receipt = transition_submission_receipt_locked(
+                        loop_dir,
+                        loop_id=loop_id,
+                        submission_intent_hash=str(receipt["submission_intent_hash"]),
+                        status="cancelled",
+                    )
+                write_loop_status_locked(
+                    loop_dir,
+                    status="cancelled",
+                    expected_current={None, "running", "started"},
+                )
+                current = "cancelled"
+                _append_log(loop_dir, "[KILL] Marked status as cancelled")
+    except SubmissionReceiptError as exc:
+        raise _receipt_http_error(exc) from exc
 
     result_status = current or (str(receipt.get("status")) if receipt is not None else "unknown")
     result = {"killed": killed, "pid": pid, "status": result_status}
