@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -306,50 +307,99 @@ def build_long_trend_artifact_catalog(job_dir: Path) -> dict[str, Any]:
 
 
 def cancel_long_trend_attempt(job_dir: Path, *, intent: QELongTrendCancelIntent) -> dict[str, Any]:
-    job = _read_json_required(job_dir / "job.json", reason_code="QELT_NODE_JOB_NOT_FOUND", status_code=404)
-    if job["status"] in TERMINAL_STATUSES:
-        return {"schema_version": "qe_long_trend_cancel_receipt_v1", "status": "already_terminal", "evaluation_id": job["evaluation_id"]}
-    if job.get("request_sha") != intent.expected_request_sha or job.get("current_attempt_id") != intent.expected_attempt_id:
-        raise QELongTrendNodeError(
-            "cancel intent does not match current evaluation attempt",
+    with _exclusive_file_lock(job_dir / ".cancel.lock"):
+        job = _read_json_required(job_dir / "job.json", reason_code="QELT_NODE_JOB_NOT_FOUND", status_code=404)
+        if job["status"] in TERMINAL_STATUSES:
+            return {
+                "schema_version": "qe_long_trend_cancel_receipt_v1",
+                "status": "already_terminal",
+                "evaluation_id": job["evaluation_id"],
+            }
+        if job.get("request_sha") != intent.expected_request_sha or job.get("current_attempt_id") != intent.expected_attempt_id:
+            raise QELongTrendNodeError(
+                "cancel intent does not match current evaluation attempt",
+                reason_code="QELT_NODE_PROCESS_IDENTITY_CONFLICT",
+            )
+        attempt_dir = _current_attempt_dir(job_dir, job)
+        actual = _read_json_required(
+            attempt_dir / "process_identity.json" if attempt_dir else Path("missing"),
             reason_code="QELT_NODE_PROCESS_IDENTITY_CONFLICT",
         )
-    attempt_dir = _current_attempt_dir(job_dir, job)
-    actual = _read_json_required(
-        attempt_dir / "process_identity.json" if attempt_dir else Path("missing"),
-        reason_code="QELT_NODE_PROCESS_IDENTITY_CONFLICT",
-    )
-    if actual != intent.expected_process_identity or not _process_identity_alive(actual):
-        raise QELongTrendNodeError(
-            "cancel process identity is stale or no longer alive",
-            reason_code="QELT_NODE_PROCESS_IDENTITY_CONFLICT",
-        )
-    pid = int(actual["pid"])
-    try:
-        process_group_id = os.getpgid(pid)
-    except (OSError, ProcessLookupError) as exc:
-        raise QELongTrendNodeError(
-            "cancel process group is no longer available",
-            reason_code="QELT_NODE_PROCESS_IDENTITY_CONFLICT",
-        ) from exc
-    if process_group_id != pid:
-        raise QELongTrendNodeError(
-            "long-trend worker is not the expected process-group leader",
-            reason_code="QELT_NODE_PROCESS_IDENTITY_CONFLICT",
-            context={"pid": pid, "process_group_id": process_group_id},
-        )
-    os.killpg(process_group_id, signal.SIGTERM)
-    cancel = {
-        "schema_version": "qe_long_trend_cancel_receipt_v1",
-        "status": "signal_sent",
-        "evaluation_id": job["evaluation_id"],
-        "attempt_id": intent.expected_attempt_id,
-        "process_identity": actual,
-        "process_group_id": process_group_id,
-        "created_at": _utc_now(),
-    }
-    _atomic_json(attempt_dir / "cancel_intent.json", cancel)
-    return cancel
+        if actual != intent.expected_process_identity:
+            raise QELongTrendNodeError(
+                "cancel process identity does not match the current attempt",
+                reason_code="QELT_NODE_PROCESS_IDENTITY_CONFLICT",
+            )
+        cancel_path = attempt_dir / "cancel_intent.json"
+        if cancel_path.is_file():
+            existing = _read_json(cancel_path)
+            if (
+                existing.get("status") == "signal_sent"
+                and existing.get("attempt_id") == intent.expected_attempt_id
+                and existing.get("process_identity") == actual
+            ):
+                return existing
+        if not _process_identity_alive(actual):
+            raise QELongTrendNodeError(
+                "cancel process identity is stale or no longer alive",
+                reason_code="QELT_NODE_PROCESS_IDENTITY_CONFLICT",
+            )
+        pid = int(actual["pid"])
+        try:
+            process_group_id = os.getpgid(pid)
+        except (OSError, ProcessLookupError) as exc:
+            raise QELongTrendNodeError(
+                "cancel process group is no longer available",
+                reason_code="QELT_NODE_PROCESS_IDENTITY_CONFLICT",
+            ) from exc
+        if process_group_id != pid:
+            raise QELongTrendNodeError(
+                "long-trend worker is not the expected process-group leader",
+                reason_code="QELT_NODE_PROCESS_IDENTITY_CONFLICT",
+                context={"pid": pid, "process_group_id": process_group_id},
+            )
+        requested = {
+            "schema_version": "qe_long_trend_cancel_receipt_v1",
+            "status": "requested",
+            "evaluation_id": job["evaluation_id"],
+            "attempt_id": intent.expected_attempt_id,
+            "process_identity": actual,
+            "process_group_id": process_group_id,
+            "requested_at": _utc_now(),
+        }
+        # The supervisor classifies an attempt only from durable evidence.  The
+        # intent therefore has to exist before SIGTERM can make the worker exit.
+        _atomic_json(cancel_path, requested)
+        try:
+            os.killpg(process_group_id, signal.SIGTERM)
+        except (OSError, ProcessLookupError) as exc:
+            failed = {
+                **requested,
+                "status": "delivery_failed",
+                "delivery_failed_at": _utc_now(),
+                "delivery_error": {
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            }
+            _atomic_json(cancel_path, failed)
+            raise QELongTrendNodeError(
+                "cancel signal delivery failed for the exact worker process group",
+                reason_code="QELT_NODE_PROCESS_IDENTITY_CONFLICT",
+                context={
+                    "pid": pid,
+                    "process_group_id": process_group_id,
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            ) from exc
+        delivered = {
+            **requested,
+            "status": "signal_sent",
+            "signal_sent_at": _utc_now(),
+        }
+        _atomic_json(cancel_path, delivered)
+        return delivered
 
 
 def spawn_long_trend_dispatcher(workspace_base: Path) -> bool:
@@ -404,24 +454,24 @@ def spawn_long_trend_dispatcher(workspace_base: Path) -> bool:
         return True
 
 
-def spawn_long_trend_registration_replayer(workspace_base: Path) -> None:
-    if not Path(workspace_base).is_dir():
-        return
-    subprocess.Popen(  # noqa: S603 - fixed module invocation, no shell.
-        [
-            sys.executable,
-            "-m",
-            "rdagent.app.api_endpoints.qe_long_trend_registration_replayer",
-            "--workspace-root",
-            str(Path(workspace_base).resolve()),
-        ],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        env=dict(os.environ),
-        cwd=str(Path(__file__).resolve().parents[3]),
-        start_new_session=True,
-        close_fds=True,
+def spawn_long_trend_registration_replayer(workspace_base: Path) -> asyncio.Task[None] | None:
+    """Start the API-lifecycle-owned registration replay loop.
+
+    The previous detached process intentionally survived API shutdown, but it
+    also survived every later code deployment and could execute stale replay
+    code forever.  The replay loop is stateless between scans, so binding it to
+    the API lifespan preserves durable pending indexes while guaranteeing that
+    a restart activates the newly deployed implementation.
+    """
+
+    workspace = Path(workspace_base).resolve()
+    if not workspace.is_dir():
+        return None
+    from rdagent.app.api_endpoints.qe_long_trend_registration_replayer import run_replay_loop
+
+    return asyncio.create_task(
+        run_replay_loop(workspace),
+        name="qe-long-trend-registration-replayer",
     )
 
 

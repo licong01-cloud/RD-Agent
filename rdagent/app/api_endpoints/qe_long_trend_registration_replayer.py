@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -20,8 +20,6 @@ PENDING_DIR = ".qe_long_trend_registration_pending"
 
 
 def main(argv: list[str] | None = None) -> int:
-    import fcntl
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--workspace-root", required=True)
     parser.add_argument("--poll-interval-seconds", type=float, default=15.0)
@@ -29,30 +27,69 @@ def main(argv: list[str] | None = None) -> int:
     if not 1.0 <= float(args.poll_interval_seconds) <= 300.0:
         parser.error("--poll-interval-seconds must be between 1 and 300")
     workspace = Path(args.workspace_root).resolve(strict=True)
-    lock_path = workspace / ".qe_long_trend_registration_replay.lock"
-    with lock_path.open("a+b") as lock_handle:
-        try:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return 0
-        _run_replay_loop(workspace, poll_interval_seconds=float(args.poll_interval_seconds))
+    _run_replay_loop(workspace, poll_interval_seconds=float(args.poll_interval_seconds))
     return 0
 
 
 def _run_replay_loop(workspace: Path, *, poll_interval_seconds: float) -> None:
     while True:
-        try:
-            _replay_once(workspace)
-        except Exception as exc:
-            _append_error(
-                workspace,
-                {
-                    "stage": "scan_pending_registrations",
-                    "error_type": type(exc).__name__,
-                    "message": str(exc),
-                },
-            )
+        _replay_cycle(workspace)
         time.sleep(poll_interval_seconds)
+
+
+async def run_replay_loop(workspace: Path, *, poll_interval_seconds: float = 15.0) -> None:
+    """Continuously replay pending registrations for the owning API lifespan."""
+
+    if not 1.0 <= float(poll_interval_seconds) <= 300.0:
+        raise ValueError("poll_interval_seconds must be between 1 and 300")
+    root = Path(workspace).resolve(strict=True)
+    while True:
+        await asyncio.to_thread(_replay_cycle, root)
+        await asyncio.sleep(float(poll_interval_seconds))
+
+
+def _replay_cycle(workspace: Path) -> bool:
+    """Run one cross-process-singleton replay scan.
+
+    The lock is held only for the scan, so no interpreter can retain ownership
+    across an API deployment.  Multiple API workers may schedule the loop, but
+    only one process performs a given scan.
+    """
+
+    import fcntl
+
+    lock_path = workspace / ".qe_long_trend_registration_replay.lock"
+    with lock_path.open("a+b") as lock_handle:
+        try:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        try:
+            _run_recovery_scan(workspace)
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+    return True
+
+
+def _run_recovery_scan(workspace: Path) -> None:
+    try:
+        _replay_once(workspace)
+    except Exception as exc:
+        _append_error(
+            workspace,
+            {
+                "stage": "scan_pending_registrations",
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+            },
+        )
+    # Resource events use the same API-lifecycle recovery heartbeat.  The
+    # worker still performs an immediate delivery and one final replay, while
+    # this scan guarantees eventual delivery after AIstock becomes reachable
+    # without keeping a detached old-code dispatcher alive forever.
+    from rdagent.app.api_endpoints.qe_long_trend_worker import _replay_outboxes
+
+    _replay_outboxes(workspace)
 
 
 def _replay_once(workspace: Path) -> None:
@@ -101,6 +138,19 @@ def _replay_one(workspace: Path, index_path: Path) -> None:
         raise RuntimeError("QELT_REGISTRATION_PENDING_INDEX_INVALID: descriptor hash mismatch")
     if _sha256_file(adapter) != str(payload.get("adapter_sha256") or ""):
         raise RuntimeError("QELT_REGISTRATION_PENDING_INDEX_INVALID: adapter hash mismatch")
+    success_receipt = loop_root / "qe_long_trend_registration.json"
+    if success_receipt.is_file() and not success_receipt.is_symlink():
+        success = _read_json(success_receipt)
+        evaluation_id = str(success.get("evaluation_id") or "")
+        request_sha = str(success.get("request_sha") or "")
+        if (
+            success.get("schema_version") == "qe_long_trend_registration_v1"
+            and evaluation_id.startswith("qelt_")
+            and len(evaluation_id) == 69
+            and len(request_sha) == 64
+        ):
+            index_path.unlink(missing_ok=True)
+            return
     pending_receipt = loop_root / "postprocess_registration_pending.json"
     if (
         pending_receipt.is_symlink()
@@ -137,18 +187,11 @@ def _append_error(workspace: Path, payload: Mapping[str, Any]) -> None:
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8") + b"\n"
-    fd, name = tempfile.mkstemp(prefix="qelt_replay_error_", dir=workspace)
-    tmp = Path(name)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            if target.is_file():
-                handle.write(target.read_bytes())
-            handle.write(line)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, target)
-    finally:
-        tmp.unlink(missing_ok=True)
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "ab") as handle:
+        handle.write(line)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def _safe_component(value: Any, field_name: str) -> str:

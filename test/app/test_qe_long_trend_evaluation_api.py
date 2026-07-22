@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
@@ -8,6 +9,7 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 from rdagent.app.api_endpoints import qe_long_trend_evaluation as qelt
+from rdagent.app.api_endpoints import qe_long_trend_registration_replayer as registration_replayer
 from rdagent.app.api_endpoints.qe_dataset_identity import read_dataset_identity
 from rdagent.app.api_endpoints.qe_workspace_catalog import build_workspace_catalog
 
@@ -309,10 +311,20 @@ def test_typed_cancel_only_signals_the_exact_current_attempt(
         encoding="utf-8",
     )
     (attempt_dir / "process_identity.json").write_text(json.dumps(process_identity), encoding="utf-8")
-    monkeypatch.setattr(qelt, "_process_identity_alive", lambda identity: identity == process_identity)
+    process_alive = [True]
+    monkeypatch.setattr(
+        qelt,
+        "_process_identity_alive",
+        lambda identity: process_alive[0] and identity == process_identity,
+    )
     signals = []
     monkeypatch.setattr(qelt.os, "getpgid", lambda pid: pid, raising=False)
-    monkeypatch.setattr(qelt.os, "killpg", lambda pgid, signal: signals.append((pgid, signal)), raising=False)
+    def record_signal(pgid, sent_signal):  # type: ignore[no-untyped-def]
+        persisted = json.loads((attempt_dir / "cancel_intent.json").read_text(encoding="utf-8"))
+        assert persisted["status"] == "requested"
+        signals.append((pgid, sent_signal))
+
+    monkeypatch.setattr(qelt.os, "killpg", record_signal, raising=False)
 
     receipt = qelt.cancel_long_trend_attempt(
         job_dir,
@@ -324,6 +336,20 @@ def test_typed_cancel_only_signals_the_exact_current_attempt(
     )
     assert receipt["status"] == "signal_sent"
     assert receipt["process_group_id"] == 1234
+    assert signals == [(1234, qelt.signal.SIGTERM)]
+    persisted = json.loads((attempt_dir / "cancel_intent.json").read_text(encoding="utf-8"))
+    assert persisted["status"] == "signal_sent"
+    assert persisted["signal_sent_at"]
+    process_alive[0] = False
+    duplicate = qelt.cancel_long_trend_attempt(
+        job_dir,
+        intent=qelt.QELongTrendCancelIntent(
+            expected_attempt_id="attempt-1",
+            expected_process_identity=process_identity,
+            expected_request_sha="b" * 64,
+        ),
+    )
+    assert duplicate == receipt
     assert signals == [(1234, qelt.signal.SIGTERM)]
 
     with pytest.raises(qelt.QELongTrendNodeError):
@@ -377,6 +403,48 @@ def test_typed_cancel_rejects_worker_that_is_not_process_group_leader(
         )
 
 
+def test_typed_cancel_persists_delivery_failure_without_claiming_signal_sent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_dir = tmp_path / "job"
+    attempt_dir = job_dir / "attempts" / "attempt-1"
+    attempt_dir.mkdir(parents=True)
+    process_identity = {"pid": 1234, "start_ticks": 99, "command_sha256": "a" * 64}
+    (job_dir / "job.json").write_text(
+        json.dumps(
+            {
+                "evaluation_id": "qelt_" + "a" * 64,
+                "request_sha": "b" * 64,
+                "status": "running",
+                "current_attempt_id": "attempt-1",
+            },
+        ),
+        encoding="utf-8",
+    )
+    (attempt_dir / "process_identity.json").write_text(json.dumps(process_identity), encoding="utf-8")
+    monkeypatch.setattr(qelt, "_process_identity_alive", lambda identity: identity == process_identity)
+    monkeypatch.setattr(qelt.os, "getpgid", lambda pid: pid, raising=False)
+
+    def fail_signal(_pgid, _signal):  # type: ignore[no-untyped-def]
+        raise PermissionError("signal denied")
+
+    monkeypatch.setattr(qelt.os, "killpg", fail_signal, raising=False)
+    with pytest.raises(qelt.QELongTrendNodeError, match="signal delivery failed"):
+        qelt.cancel_long_trend_attempt(
+            job_dir,
+            intent=qelt.QELongTrendCancelIntent(
+                expected_attempt_id="attempt-1",
+                expected_process_identity=process_identity,
+                expected_request_sha="b" * 64,
+            ),
+        )
+
+    persisted = json.loads((attempt_dir / "cancel_intent.json").read_text(encoding="utf-8"))
+    assert persisted["status"] == "delivery_failed"
+    assert persisted["delivery_error"]["error_type"] == "PermissionError"
+
+
 def test_dispatcher_spawn_is_singleton_by_durable_process_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -400,3 +468,31 @@ def test_dispatcher_spawn_is_singleton_by_durable_process_identity(
     assert len(popen_calls) == 1
     persisted = json.loads((tmp_path / qelt.DISPATCHER_IDENTITY_FILE).read_text(encoding="utf-8"))
     assert persisted == identity
+
+
+def test_registration_replayer_is_owned_by_api_lifecycle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        started = asyncio.Event()
+        keep_running = asyncio.Event()
+
+        async def fake_loop(workspace: Path) -> None:
+            assert workspace == tmp_path.resolve()
+            started.set()
+            await keep_running.wait()
+
+        monkeypatch.setattr(registration_replayer, "run_replay_loop", fake_loop)
+        task = qelt.spawn_long_trend_registration_replayer(tmp_path)
+        assert task is not None
+        await started.wait()
+        assert task.done() is False
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        assert task.cancelled() is True
+
+    asyncio.run(scenario())

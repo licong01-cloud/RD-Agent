@@ -43,17 +43,21 @@ def main(argv: list[str] | None = None) -> int:
         lock_path = root / ".qe_long_trend_eval_slot.lock"
         with lock_path.open("a+b") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            while True:
-                queued = _queued_jobs(root)
-                if not queued:
-                    _replay_outboxes(root)
-                    return 0
-                try:
-                    _run_or_monitor_job(queued[0])
-                except Exception as exc:
-                    _record_dispatcher_failure(root, queued[0], exc)
+            return _run_dispatcher_loop(root)
     finally:
         _release_dispatcher_identity(root, identity)
+
+
+def _run_dispatcher_loop(root: Path) -> int:
+    while True:
+        queued = _queued_jobs(root)
+        if not queued:
+            _replay_outboxes(root)
+            return 0
+        try:
+            _run_or_monitor_job(queued[0])
+        except Exception as exc:
+            _record_dispatcher_failure(root, queued[0], exc)
 
 
 def _claim_dispatcher_identity(root: Path, identity: Mapping[str, Any]) -> bool:
@@ -182,7 +186,9 @@ def _finalize_attempt(job_dir: Path, attempt_dir: Path, *, returncode: int | Non
     worker_terminal = attempt_dir / "artifacts" / "worker_terminal_receipt.json"
     if not worker_terminal.is_file():
         job = _read_json(job_dir / "job.json")
-        cancelled = (attempt_dir / "cancel_intent.json").is_file()
+        cancel_path = attempt_dir / "cancel_intent.json"
+        cancel = _read_json(cancel_path) if cancel_path.is_file() else {}
+        cancelled = cancel.get("status") in {"requested", "signal_sent"}
         status = "cancelled" if cancelled else "failed"
         reason_code = "QELT_CANCELLED" if cancelled else "QELT_NODE_PROCESS_IDENTITY_CONFLICT"
         families = {
@@ -411,10 +417,10 @@ def _queue_resource_event(
     _deliver_outbox(job_dir, outbox)
 
 
-def _deliver_outbox(job_dir: Path, path: Path) -> None:
+def _deliver_outbox(job_dir: Path, path: Path) -> bool:
     row = _read_json(path)
     if row.get("delivered") is True:
-        return
+        return True
     secret = _read_json(job_dir / "secret.json")
     body = json.dumps(row["payload"], ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     request = urllib.request.Request(
@@ -433,7 +439,7 @@ def _deliver_outbox(job_dir: Path, path: Path) -> None:
                     "http_status": int(response.status),
                 }
                 _atomic_json(path, row)
-                return
+                return False
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         row["delivery_attempt_count"] = int(row.get("delivery_attempt_count") or 0) + 1
         row["last_delivery_attempt_at"] = _utc_now()
@@ -443,25 +449,30 @@ def _deliver_outbox(job_dir: Path, path: Path) -> None:
             "message": str(exc),
         }
         _atomic_json(path, row)
-        return
+        return False
     row["delivered"] = True
     row["delivered_at"] = _utc_now()
     row["delivery_attempt_count"] = int(row.get("delivery_attempt_count") or 0) + 1
     row["last_delivery_attempt_at"] = row["delivered_at"]
     row["last_delivery_error"] = None
     _atomic_json(path, row)
+    return True
 
 
-def _replay_outboxes(root: Path) -> None:
+def _replay_outboxes(root: Path) -> int:
+    pending = 0
     for path in root.glob("*/Loop*/long_trend_evaluations/qelt_*/outbox/*.json"):
         try:
-            _deliver_outbox(path.parents[1], path)
+            if not _deliver_outbox(path.parents[1], path):
+                pending += 1
         except Exception as exc:
+            pending += 1
             _append_dispatcher_error(
                 root,
                 {"stage": "replay_outbox", "outbox_path": str(path), "error_type": type(exc).__name__, "message": str(exc)},
             )
             continue
+    return pending
 
 
 def _record_dispatcher_failure(root: Path, job_dir: Path, exc: Exception) -> None:
