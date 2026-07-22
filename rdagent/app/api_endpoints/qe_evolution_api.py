@@ -65,6 +65,7 @@ from rdagent.app.api_endpoints.qe_workspace_catalog import (
     resolve_loop_dir,
     resolve_task_dir,
 )
+from rdagent.app.api_endpoints.qe_long_trend_evaluation import build_long_trend_router
 
 logger = logging.getLogger(__name__)
 
@@ -238,9 +239,13 @@ router = APIRouter(prefix="/api/v1/qe_workspace", tags=["qe_evolution"])
 # ── QE 专属配置 ──
 # QE 与 RDAgent 主程序完全隔离，路径配置通过 RDAgent .env 环境变量管理。
 # 未来部署到独立服务器时，通过启动命令或 .env 设置环境变量即可。
-WORKSPACE_BASE = Path(os.environ.get("QE_WORKSPACE_WSL", ""))
-if not str(WORKSPACE_BASE) or str(WORKSPACE_BASE) == ".":
+_WORKSPACE_BASE_RAW = str(os.environ.get("QE_WORKSPACE_WSL") or "").strip()
+WORKSPACE_BASE = Path(_WORKSPACE_BASE_RAW) if _WORKSPACE_BASE_RAW else Path()
+WORKSPACE_CONFIGURED = bool(_WORKSPACE_BASE_RAW)
+if not WORKSPACE_CONFIGURED:
     logger.warning("QE_WORKSPACE_WSL 环境变量未设置，QE API 的 workspace 功能将不可用")
+
+router.include_router(build_long_trend_router(WORKSPACE_BASE if WORKSPACE_CONFIGURED else None))
 
 class LoopRunRequest(BaseModel):
     loop_index: int
@@ -253,6 +258,7 @@ class LoopRunRequest(BaseModel):
     execution_identity_hash: str | None = None
     execution_environment_snapshot_id: str | None = None
     execution_environment_manifest_sha256: str | None = None
+    postprocess_descriptor: dict[str, Any] | None = None
 
 class LoopRunResponse(BaseModel):
     loop_id: str
@@ -960,6 +966,7 @@ async def create_and_run_loop(task_id: str, request: LoopRunRequest, background_
             execution_identity_hash=request.execution_identity_hash,
             execution_environment_snapshot_id=request.execution_environment_snapshot_id,
             execution_environment_manifest_sha256=request.execution_environment_manifest_sha256,
+            postprocess_descriptor=request.postprocess_descriptor,
         )
         receipt, created = reserve_submission(
             loop_dir,

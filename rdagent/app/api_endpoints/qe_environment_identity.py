@@ -89,6 +89,14 @@ def _build_manifest() -> dict[str, Any]:
         "installed_packages": package_rows,
         "executor_dependencies": dependency_files,
         "executor_file_set_sha256": _sha256_json(dependency_files),
+        "capabilities": {
+            "qe_long_trend_evaluation_v1": {
+                "job_schema": "qe_long_trend_job_v1",
+                "worker_terminal_schema": "qe_long_trend_worker_terminal_v1",
+                "cpu_slot_policy": "single_fifo",
+                "gpu_telemetry": False,
+            },
+        },
     }
 
 
@@ -96,9 +104,14 @@ def _dependency_file_manifest() -> list[dict[str, str]]:
     root = Path(__file__).resolve().parent
     names = (
         "qe_environment_identity.py",
+        "qe_dataset_identity.py",
         "qe_evolution_api.py",
         "qe_submission_receipt.py",
         "qe_kill_receipt.py",
+        "qe_long_trend_evaluation.py",
+        "qe_long_trend_registration_replayer.py",
+        "qe_long_trend_worker.py",
+        "qe_workspace_catalog.py",
     )
     rows: list[dict[str, str]] = []
     for name in names:
