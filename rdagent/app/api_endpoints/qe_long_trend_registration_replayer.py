@@ -1,4 +1,4 @@
-"""One-shot recovery for normal-Loop F-014 registrations pending before control-row creation."""
+"""Durable recovery daemon for normal-Loop F-014 registrations pending before control-row creation."""
 
 from __future__ import annotations
 
@@ -9,9 +9,11 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Mapping
+from typing import Any
 
 PENDING_INDEX_SCHEMA = "qe_long_trend_registration_pending_index_v1"
 PENDING_DIR = ".qe_long_trend_registration_pending"
@@ -22,7 +24,10 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--workspace-root", required=True)
+    parser.add_argument("--poll-interval-seconds", type=float, default=15.0)
     args = parser.parse_args(argv)
+    if not 1.0 <= float(args.poll_interval_seconds) <= 300.0:
+        parser.error("--poll-interval-seconds must be between 1 and 300")
     workspace = Path(args.workspace_root).resolve(strict=True)
     lock_path = workspace / ".qe_long_trend_registration_replay.lock"
     with lock_path.open("a+b") as lock_handle:
@@ -30,8 +35,24 @@ def main(argv: list[str] | None = None) -> int:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return 0
-        _replay_once(workspace)
+        _run_replay_loop(workspace, poll_interval_seconds=float(args.poll_interval_seconds))
     return 0
+
+
+def _run_replay_loop(workspace: Path, *, poll_interval_seconds: float) -> None:
+    while True:
+        try:
+            _replay_once(workspace)
+        except Exception as exc:
+            _append_error(
+                workspace,
+                {
+                    "stage": "scan_pending_registrations",
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            )
+        time.sleep(poll_interval_seconds)
 
 
 def _replay_once(workspace: Path) -> None:
@@ -101,7 +122,7 @@ def _replay_one(workspace: Path, index_path: Path) -> None:
         )
     if completed.returncode != 0:
         raise RuntimeError(
-            f"QELT_REGISTRATION_REPLAY_FAILED: task_id={task_id} loop_id={loop_id} returncode={completed.returncode}"
+            f"QELT_REGISTRATION_REPLAY_FAILED: task_id={task_id} loop_id={loop_id} returncode={completed.returncode}",
         )
     if index_path.exists() and not (loop_root / "postprocess_registration_pending.json").is_file():
         raise RuntimeError("QELT_REGISTRATION_REPLAY_FAILED: adapter left an inconsistent pending index")

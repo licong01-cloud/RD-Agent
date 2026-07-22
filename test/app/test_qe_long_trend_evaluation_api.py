@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
-
 from rdagent.app.api_endpoints import qe_long_trend_evaluation as qelt
 from rdagent.app.api_endpoints.qe_dataset_identity import read_dataset_identity
 from rdagent.app.api_endpoints.qe_workspace_catalog import build_workspace_catalog
@@ -15,7 +14,7 @@ from rdagent.app.api_endpoints.qe_workspace_catalog import build_workspace_catal
 
 def _sha_json(value: object) -> str:
     return hashlib.sha256(
-        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(),
     ).hexdigest()
 
 
@@ -139,7 +138,7 @@ def test_job_reservation_is_secret_free_idempotent_and_conflict_detecting(
                     request=request,
                 ),
                 range(4),
-            )
+            ),
         )
     assert all(item["duplicate_replay"] is True for item in concurrent)
     job_dir = loop_dir / "long_trend_evaluations" / request.evaluation_id
@@ -209,7 +208,7 @@ def test_artifact_catalog_never_exposes_job_secret(tmp_path: Path) -> None:
                 "evaluation_id": "qelt_" + "a" * 64,
                 "status": "queued",
                 "current_attempt_id": None,
-            }
+            },
         ),
         encoding="utf-8",
     )
@@ -232,7 +231,7 @@ def test_artifact_download_is_limited_to_current_catalog_members(tmp_path: Path)
                 "evaluation_id": "qelt_" + "a" * 64,
                 "status": "succeeded",
                 "current_attempt_id": "attempt-1",
-            }
+            },
         ),
         encoding="utf-8",
     )
@@ -272,7 +271,7 @@ def test_long_trend_snapshot_identity_survives_missing_legacy_manifest(
                 "start": "2018-08-01",
                 "end": "2026-06-30",
                 "lineage_parent_ids": [],
-            }
+            },
         ),
         encoding="utf-8",
     )
@@ -305,14 +304,15 @@ def test_typed_cancel_only_signals_the_exact_current_attempt(
                 "request_sha": "b" * 64,
                 "status": "running",
                 "current_attempt_id": "attempt-1",
-            }
+            },
         ),
         encoding="utf-8",
     )
     (attempt_dir / "process_identity.json").write_text(json.dumps(process_identity), encoding="utf-8")
     monkeypatch.setattr(qelt, "_process_identity_alive", lambda identity: identity == process_identity)
     signals = []
-    monkeypatch.setattr(qelt.os, "kill", lambda pid, signal: signals.append((pid, signal)))
+    monkeypatch.setattr(qelt.os, "getpgid", lambda pid: pid, raising=False)
+    monkeypatch.setattr(qelt.os, "killpg", lambda pgid, signal: signals.append((pgid, signal)), raising=False)
 
     receipt = qelt.cancel_long_trend_attempt(
         job_dir,
@@ -323,6 +323,7 @@ def test_typed_cancel_only_signals_the_exact_current_attempt(
         ),
     )
     assert receipt["status"] == "signal_sent"
+    assert receipt["process_group_id"] == 1234
     assert signals == [(1234, qelt.signal.SIGTERM)]
 
     with pytest.raises(qelt.QELongTrendNodeError):
@@ -334,3 +335,68 @@ def test_typed_cancel_only_signals_the_exact_current_attempt(
                 expected_request_sha="b" * 64,
             ),
         )
+
+
+def test_typed_cancel_rejects_worker_that_is_not_process_group_leader(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_dir = tmp_path / "job"
+    attempt_dir = job_dir / "attempts" / "attempt-1"
+    attempt_dir.mkdir(parents=True)
+    process_identity = {"pid": 1234, "start_ticks": 99, "command_sha256": "a" * 64}
+    (job_dir / "job.json").write_text(
+        json.dumps(
+            {
+                "evaluation_id": "qelt_" + "a" * 64,
+                "request_sha": "b" * 64,
+                "status": "running",
+                "current_attempt_id": "attempt-1",
+            },
+        ),
+        encoding="utf-8",
+    )
+    (attempt_dir / "process_identity.json").write_text(json.dumps(process_identity), encoding="utf-8")
+    monkeypatch.setattr(qelt, "_process_identity_alive", lambda identity: identity == process_identity)
+    monkeypatch.setattr(qelt.os, "getpgid", lambda _pid: 999, raising=False)
+    monkeypatch.setattr(
+        qelt.os,
+        "killpg",
+        lambda *_args: pytest.fail("must fail closed before signaling"),
+        raising=False,
+    )
+
+    with pytest.raises(qelt.QELongTrendNodeError, match="process-group leader"):
+        qelt.cancel_long_trend_attempt(
+            job_dir,
+            intent=qelt.QELongTrendCancelIntent(
+                expected_attempt_id="attempt-1",
+                expected_process_identity=process_identity,
+                expected_request_sha="b" * 64,
+            ),
+        )
+
+
+def test_dispatcher_spawn_is_singleton_by_durable_process_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    popen_calls: list[dict[str, object]] = []
+    identity = {"pid": 4321, "start_ticks": 101, "command_sha256": "c" * 64}
+
+    class Process:
+        pid = 4321
+
+    def fake_popen(command, **kwargs):  # type: ignore[no-untyped-def]
+        popen_calls.append({"command": command, **kwargs})
+        return Process()
+
+    monkeypatch.setattr(qelt.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(qelt, "_capture_process_identity", lambda pid: identity if pid == 4321 else None)
+    monkeypatch.setattr(qelt, "_process_identity_alive", lambda value: value == identity)
+
+    assert qelt.spawn_long_trend_dispatcher(tmp_path) is True
+    assert qelt.spawn_long_trend_dispatcher(tmp_path) is False
+    assert len(popen_calls) == 1
+    persisted = json.loads((tmp_path / qelt.DISPATCHER_IDENTITY_FILE).read_text(encoding="utf-8"))
+    assert persisted == identity

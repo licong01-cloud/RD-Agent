@@ -6,7 +6,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from rdagent.app.api_endpoints import qe_long_trend_registration_replayer as replayer
 from rdagent.app.api_endpoints import qe_long_trend_worker as worker
 from rdagent.app.api_endpoints.qe_long_trend_worker import _queued_jobs
@@ -21,7 +20,7 @@ def _write_job(root: Path, task: str, loop: str, evaluation: str, created_at: st
                 "evaluation_id": evaluation,
                 "status": "queued",
                 "created_at": created_at,
-            }
+            },
         ),
         encoding="utf-8",
     )
@@ -59,7 +58,7 @@ def test_pending_registration_replay_uses_fixed_hashed_loop_adapter(
                 "descriptor_sha256": hashlib.sha256(descriptor.read_bytes()).hexdigest(),
                 "adapter_sha256": hashlib.sha256(adapter.read_bytes()).hexdigest(),
                 "pending_receipt_sha256": hashlib.sha256(pending.read_bytes()).hexdigest(),
-            }
+            },
         ),
         encoding="utf-8",
     )
@@ -94,12 +93,34 @@ def test_pending_registration_replay_rejects_path_escape(tmp_path: Path) -> None
                 "descriptor_sha256": "a" * 64,
                 "adapter_sha256": "c" * 64,
                 "pending_receipt_sha256": "b" * 64,
-            }
+            },
         ),
         encoding="utf-8",
     )
     with pytest.raises(RuntimeError, match="loop path is unsafe"):
         replayer._replay_one(tmp_path, index_path)
+
+
+def test_registration_replayer_continues_polling_after_empty_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scans: list[Path] = []
+    sleeps: list[float] = []
+
+    monkeypatch.setattr(replayer, "_replay_once", lambda workspace: scans.append(workspace))
+
+    def stop_after_two_scans(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) == 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(replayer.time, "sleep", stop_after_two_scans)
+    with pytest.raises(KeyboardInterrupt):
+        replayer._run_replay_loop(tmp_path, poll_interval_seconds=7.5)
+
+    assert scans == [tmp_path, tmp_path]
+    assert sleeps == [7.5, 7.5]
 
 
 def test_restart_monitor_uses_standard_failure_finalizer_when_terminal_is_missing(
@@ -117,7 +138,7 @@ def test_restart_monitor_uses_standard_failure_finalizer_when_terminal_is_missin
                 "request_sha": "b" * 64,
                 "status": "running",
                 "current_attempt_id": "attempt-1",
-            }
+            },
         ),
         encoding="utf-8",
     )

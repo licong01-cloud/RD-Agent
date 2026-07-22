@@ -16,8 +16,11 @@ from pathlib import Path
 from typing import Any
 
 from rdagent.app.api_endpoints.qe_long_trend_evaluation import (
+    DISPATCHER_IDENTITY_FILE,
+    DISPATCHER_SPAWN_LOCK,
     TERMINAL_STATUSES,
     _atomic_json,
+    _exclusive_file_lock,
     _read_json,
     _sha256_file,
     _utc_now,
@@ -33,18 +36,42 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(args.workspace_root).resolve()
     if not root.is_dir():
         return 2
-    lock_path = root / ".qe_long_trend_eval_slot.lock"
-    with lock_path.open("a+b") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        while True:
-            queued = _queued_jobs(root)
-            if not queued:
-                _replay_outboxes(root)
-                return 0
-            try:
-                _run_or_monitor_job(queued[0])
-            except Exception as exc:
-                _record_dispatcher_failure(root, queued[0], exc)
+    identity = _capture_process_identity(os.getpid())
+    if not _claim_dispatcher_identity(root, identity):
+        return 0
+    try:
+        lock_path = root / ".qe_long_trend_eval_slot.lock"
+        with lock_path.open("a+b") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            while True:
+                queued = _queued_jobs(root)
+                if not queued:
+                    _replay_outboxes(root)
+                    return 0
+                try:
+                    _run_or_monitor_job(queued[0])
+                except Exception as exc:
+                    _record_dispatcher_failure(root, queued[0], exc)
+    finally:
+        _release_dispatcher_identity(root, identity)
+
+
+def _claim_dispatcher_identity(root: Path, identity: Mapping[str, Any]) -> bool:
+    identity_path = root / DISPATCHER_IDENTITY_FILE
+    with _exclusive_file_lock(root / DISPATCHER_SPAWN_LOCK):
+        if identity_path.is_file():
+            existing = _read_json(identity_path)
+            if existing != dict(identity) and _process_alive(existing):
+                return False
+        _atomic_json(identity_path, dict(identity))
+        return True
+
+
+def _release_dispatcher_identity(root: Path, identity: Mapping[str, Any]) -> None:
+    identity_path = root / DISPATCHER_IDENTITY_FILE
+    with _exclusive_file_lock(root / DISPATCHER_SPAWN_LOCK):
+        if identity_path.is_file() and _read_json(identity_path) == dict(identity):
+            identity_path.unlink()
 
 
 def _queued_jobs(root: Path) -> list[Path]:
@@ -305,7 +332,7 @@ def _bind_dataset_workspace(workspace: Path, root: Path) -> Path:
             source.relative_to(root.resolve())
         except ValueError as exc:
             raise RuntimeError(
-                f"QELT_EXECUTION_ENVIRONMENT_MISMATCH: dataset file escapes registered root: {source}"
+                f"QELT_EXECUTION_ENVIRONMENT_MISMATCH: dataset file escapes registered root: {source}",
             ) from exc
         if not source.is_file():
             raise RuntimeError(f"QELT_EXECUTION_ENVIRONMENT_MISMATCH: dataset file is not regular: {source}")
@@ -333,6 +360,8 @@ def _process_alive(identity: Mapping[str, Any]) -> bool:
     try:
         pid = int(identity["pid"])
         os.kill(pid, 0)
+        if Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()[2] == "Z":
+            return False
         return _capture_process_identity(pid) == dict(identity)
     except (KeyError, ValueError, OSError, ProcessLookupError):
         return False

@@ -10,8 +10,8 @@ import signal
 import subprocess
 import sys
 import tempfile
-from contextlib import contextmanager
 from collections.abc import Mapping
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -28,6 +28,8 @@ ARTIFACT_CATALOG_SCHEMA = "qe_long_trend_node_artifact_catalog_v1"
 BUNDLE_SCHEMA = "qe_long_trend_bundle_v1"
 TERMINAL_STATUSES = frozenset({"succeeded", "partial", "failed", "cancelled"})
 ACTIVE_STATUSES = frozenset({"queued", "starting", "running"})
+DISPATCHER_IDENTITY_FILE = ".qe_long_trend_dispatcher_identity.json"
+DISPATCHER_SPAWN_LOCK = ".qe_long_trend_dispatcher_spawn.lock"
 _EVALUATION_RE = re.compile(r"^qelt_[0-9a-f]{64}$")
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 _ALLOWED_BUNDLE_PATHS = frozenset(
@@ -322,34 +324,84 @@ def cancel_long_trend_attempt(job_dir: Path, *, intent: QELongTrendCancelIntent)
             "cancel process identity is stale or no longer alive",
             reason_code="QELT_NODE_PROCESS_IDENTITY_CONFLICT",
         )
-    os.kill(int(actual["pid"]), signal.SIGTERM)
+    pid = int(actual["pid"])
+    try:
+        process_group_id = os.getpgid(pid)
+    except (OSError, ProcessLookupError) as exc:
+        raise QELongTrendNodeError(
+            "cancel process group is no longer available",
+            reason_code="QELT_NODE_PROCESS_IDENTITY_CONFLICT",
+        ) from exc
+    if process_group_id != pid:
+        raise QELongTrendNodeError(
+            "long-trend worker is not the expected process-group leader",
+            reason_code="QELT_NODE_PROCESS_IDENTITY_CONFLICT",
+            context={"pid": pid, "process_group_id": process_group_id},
+        )
+    os.killpg(process_group_id, signal.SIGTERM)
     cancel = {
         "schema_version": "qe_long_trend_cancel_receipt_v1",
         "status": "signal_sent",
         "evaluation_id": job["evaluation_id"],
         "attempt_id": intent.expected_attempt_id,
         "process_identity": actual,
+        "process_group_id": process_group_id,
         "created_at": _utc_now(),
     }
     _atomic_json(attempt_dir / "cancel_intent.json", cancel)
     return cancel
 
 
-def spawn_long_trend_dispatcher(workspace_base: Path) -> None:
-    if not Path(workspace_base).is_dir():
-        return
-    env = dict(os.environ)
-    env["QE_WORKSPACE_WSL"] = str(Path(workspace_base).resolve())
-    subprocess.Popen(  # noqa: S603 - fixed module invocation, no shell.
-        [sys.executable, "-m", "rdagent.app.api_endpoints.qe_long_trend_worker", "--workspace-root", str(Path(workspace_base).resolve())],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        env=env,
-        cwd=str(Path(__file__).resolve().parents[3]),
-        start_new_session=True,
-        close_fds=True,
-    )
+def spawn_long_trend_dispatcher(workspace_base: Path) -> bool:
+    workspace = Path(workspace_base).resolve()
+    if not workspace.is_dir():
+        return False
+    identity_path = workspace / DISPATCHER_IDENTITY_FILE
+    with _exclusive_file_lock(workspace / DISPATCHER_SPAWN_LOCK):
+        if identity_path.is_file():
+            identity = _read_json(identity_path)
+            if _process_identity_alive(identity):
+                return False
+            identity_path.unlink()
+        env = dict(os.environ)
+        env["QE_WORKSPACE_WSL"] = str(workspace)
+        process = subprocess.Popen(  # noqa: S603 - fixed module invocation, no shell.
+            [sys.executable, "-m", "rdagent.app.api_endpoints.qe_long_trend_worker", "--workspace-root", str(workspace)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            cwd=str(Path(__file__).resolve().parents[3]),
+            start_new_session=True,
+            close_fds=True,
+        )
+        try:
+            identity = _capture_process_identity(process.pid)
+        except Exception as exc:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError as kill_exc:
+                raise QELongTrendNodeError(
+                    "dispatcher exited before its durable process identity could be captured",
+                    reason_code="QELT_NODE_PROCESS_IDENTITY_CONFLICT",
+                    context={
+                        "pid": process.pid,
+                        "capture_error_type": type(exc).__name__,
+                        "capture_error": str(exc),
+                        "cleanup_error_type": type(kill_exc).__name__,
+                    },
+                ) from exc
+            raise QELongTrendNodeError(
+                "dispatcher process identity capture failed",
+                reason_code="QELT_NODE_PROCESS_IDENTITY_CONFLICT",
+                context={
+                    "pid": process.pid,
+                    "capture_error_type": type(exc).__name__,
+                    "capture_error": str(exc),
+                },
+            ) from exc
+        _atomic_json(identity_path, identity)
+        return True
 
 
 def spawn_long_trend_registration_replayer(workspace_base: Path) -> None:
@@ -489,9 +541,23 @@ def _process_identity_alive(identity: Mapping[str, Any]) -> bool:
         os.kill(pid, 0)
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()
         command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\x00", b" ")
-        return int(stat[21]) == int(identity["start_ticks"]) and hashlib.sha256(command).hexdigest() == identity["command_sha256"]
+        return (
+            stat[2] != "Z"
+            and int(stat[21]) == int(identity["start_ticks"])
+            and hashlib.sha256(command).hexdigest() == identity["command_sha256"]
+        )
     except (KeyError, ValueError, OSError, ProcessLookupError):
         return False
+
+
+def _capture_process_identity(pid: int) -> dict[str, Any]:
+    stat = Path(f"/proc/{int(pid)}/stat").read_text(encoding="utf-8").split()
+    command = Path(f"/proc/{int(pid)}/cmdline").read_bytes().replace(b"\x00", b" ")
+    return {
+        "pid": int(pid),
+        "start_ticks": int(stat[21]),
+        "command_sha256": hashlib.sha256(command).hexdigest(),
+    }
 
 
 def _read_json_required(path: Path, *, reason_code: str, status_code: int = 409) -> dict[str, Any]:
