@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from collections.abc import Mapping
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,7 @@ def read_dataset_identity(  # noqa: PLR0911 - each explicit evidence branch is p
             ],
         )
     manifest_path = root / DATASET_MANIFEST_FILENAME
+    long_trend_snapshot, long_trend_reason = _read_long_trend_snapshot_identity(root)
     if not manifest_path.is_file():
         return _incomplete(
             reason_code="qe_dataset_manifest_missing",
@@ -58,6 +60,8 @@ def read_dataset_identity(  # noqa: PLR0911 - each explicit evidence branch is p
                 "include Qlib bin, calendar, instruments, and QE ST PIT content hashes in the deployment manifest",
             ],
             resolved_data_root_uri=str(root),
+            long_trend_snapshot=long_trend_snapshot,
+            long_trend_snapshot_reason=long_trend_reason,
         )
     try:
         raw = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -118,7 +122,69 @@ def read_dataset_identity(  # noqa: PLR0911 - each explicit evidence branch is p
         "missing": [],
         "acquisition_suggestions": [],
         "dataset": dataset,
+        "long_trend_snapshot": long_trend_snapshot,
+        "long_trend_snapshot_reason": long_trend_reason,
     }
+
+
+def _read_long_trend_snapshot_identity(root: Path) -> tuple[dict[str, Any] | None, str | None]:
+    names = ("meta.json", "daily_pv.h5", "sector_data.h5")
+    missing = [name for name in names if not (root / name).is_file()]
+    if missing:
+        return None, f"long_trend_snapshot_files_missing:{','.join(missing)}"
+    try:
+        meta = json.loads((root / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return None, f"long_trend_snapshot_meta_unreadable:{type(exc).__name__}:{exc}"
+    if not isinstance(meta, Mapping):
+        return None, "long_trend_snapshot_meta_invalid"
+    snapshot_id = str(meta.get("snapshot_id") or "").strip().lower()
+    start_date = str(meta.get("start") or "").strip()
+    end_date = str(meta.get("end") or "").strip()
+    lineage = meta.get("lineage_parent_ids", [])
+    if not snapshot_id or not start_date or not end_date or not isinstance(lineage, list):
+        return None, "long_trend_snapshot_meta_incomplete"
+    files: dict[str, dict[str, Any]] = {}
+    try:
+        for name in names:
+            path = (root / name).resolve()
+            stat = path.stat()
+            files[name] = {
+                "size": int(stat.st_size),
+                "sha256": _cached_file_sha256(str(path), int(stat.st_size), int(stat.st_mtime_ns)),
+            }
+        manifest_sha = _sha256_json(
+            {
+                "snapshot_id": snapshot_id,
+                "start_date": start_date,
+                "end_date": end_date,
+                "meta": dict(meta),
+                "files": files,
+            },
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        return None, f"long_trend_snapshot_identity_failed:{type(exc).__name__}:{exc}"
+    return (
+        {
+            "snapshot_id": snapshot_id,
+            "manifest_sha256": manifest_sha,
+            "start_date": start_date,
+            "end_date": end_date,
+            "lineage_parent_ids": [str(value).strip() for value in lineage],
+            "files": files,
+        },
+        None,
+    )
+
+
+@lru_cache(maxsize=16)
+def _cached_file_sha256(path_text: str, size: int, mtime_ns: int) -> str:
+    del size, mtime_ns
+    digest = hashlib.sha256()
+    with Path(path_text).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _resolve_allowed_data_root(value: str | None) -> tuple[Path | None, str | None]:
@@ -145,12 +211,14 @@ def _resolve_allowed_data_root(value: str | None) -> tuple[Path | None, str | No
 
 def _configured_roots() -> tuple[Path, ...]:
     values: list[str] = []
-    default = str(os.environ.get("QE_QLIB_DATA_PATH") or "").strip()
-    if default:
-        values.append(default)
-    configured = str(os.environ.get("QE_DATASET_IDENTITY_ROOTS") or "").strip()
-    if configured:
-        values.extend(item.strip() for item in configured.split(os.pathsep) if item.strip())
+    for key in ("QE_QLIB_DATA_PATH", "RDAGENT_FACTOR_DATA_WSL"):
+        default = str(os.environ.get(key) or "").strip()
+        if default:
+            values.append(default)
+    for key in ("QE_DATASET_IDENTITY_ROOTS", "QE_REGISTERED_DATASET_ROOTS"):
+        configured = str(os.environ.get(key) or "").strip()
+        if configured:
+            values.extend(item.strip() for item in configured.split(os.pathsep) if item.strip())
     roots: list[Path] = []
     for raw in values:
         try:
@@ -169,6 +237,8 @@ def _incomplete(
     suggestions: list[str],
     detail: str | None = None,
     resolved_data_root_uri: str | None = None,
+    long_trend_snapshot: Mapping[str, Any] | None = None,
+    long_trend_snapshot_reason: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "schema_version": DATASET_EVIDENCE_SCHEMA_VERSION,
@@ -177,6 +247,8 @@ def _incomplete(
         "missing": list(missing),
         "acquisition_suggestions": list(suggestions),
         "dataset": None,
+        "long_trend_snapshot": dict(long_trend_snapshot) if long_trend_snapshot is not None else None,
+        "long_trend_snapshot_reason": long_trend_snapshot_reason,
     }
     if detail:
         payload["detail"] = detail

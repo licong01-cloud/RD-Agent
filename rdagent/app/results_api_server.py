@@ -77,6 +77,30 @@ def create_app() -> FastAPI:
     from rdagent.app.api_endpoints.qe_evolution_api import router as qe_evolution_router
     app.include_router(qe_evolution_router)
 
+    async def _recover_qe_long_trend_spool() -> None:
+        from rdagent.app.api_endpoints.qe_evolution_api import WORKSPACE_BASE, WORKSPACE_CONFIGURED
+        from rdagent.app.api_endpoints.qe_long_trend_evaluation import (
+            spawn_long_trend_dispatcher,
+            spawn_long_trend_registration_replayer,
+        )
+
+        if WORKSPACE_CONFIGURED and WORKSPACE_BASE.is_dir():
+            spawn_long_trend_dispatcher(WORKSPACE_BASE)
+            app.state.qe_long_trend_registration_replayer = spawn_long_trend_registration_replayer(WORKSPACE_BASE)
+
+    async def _stop_qe_long_trend_registration_replayer() -> None:
+        task = getattr(app.state, "qe_long_trend_registration_replayer", None)
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    app.add_event_handler("startup", _recover_qe_long_trend_spool)
+    app.add_event_handler("shutdown", _stop_qe_long_trend_registration_replayer)
+
     # System Metrics API (节点心跳/资源指标/版本信息)
     from rdagent.app.api_endpoints.system_metrics_api import router as system_metrics_router
     app.include_router(system_metrics_router)

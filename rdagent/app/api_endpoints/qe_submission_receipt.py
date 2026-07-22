@@ -70,6 +70,7 @@ def canonical_request_digest(
     execution_identity_hash: str | None = None,
     execution_environment_snapshot_id: str | None = None,
     execution_environment_manifest_sha256: str | None = None,
+    postprocess_descriptor: Mapping[str, Any] | None = None,
 ) -> str:
     """Hash execution-affecting request fields while excluding callback transport."""
 
@@ -88,6 +89,7 @@ def canonical_request_digest(
             execution_environment_snapshot_id=execution_environment_snapshot_id,
             execution_environment_manifest_sha256=execution_environment_manifest_sha256,
         ),
+        "postprocess_descriptor": dict(postprocess_descriptor or {}),
     }
     encoded = json.dumps(
         payload,

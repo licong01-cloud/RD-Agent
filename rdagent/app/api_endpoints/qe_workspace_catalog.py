@@ -141,6 +141,14 @@ def _list_loop_entries(loop_dir: Path) -> tuple[list[dict[str, Any]], list[str]]
                 if relative_prefix
                 else child.name
             )
+            parts = PurePosixPath(relative_path).parts
+            if (
+                len(parts) >= 3
+                and parts[0] == "long_trend_evaluations"
+                and child.name == "secret.json"
+            ):
+                warnings.append("restricted_qelt_secret_not_catalogued")
+                continue
             try:
                 stat_result = child.stat(follow_symlinks=False)
                 if child.is_symlink():
