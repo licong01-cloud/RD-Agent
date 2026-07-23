@@ -20,8 +20,12 @@ def _sha_json(value: object) -> str:
     ).hexdigest()
 
 
-def _bundle(environment_sha: str) -> dict[str, object]:
+def _bundle(environment_sha: str, *, zero_byte_paths: frozenset[str] = frozenset()) -> dict[str, object]:
     files = {path: f"# {path}\n" for path in qelt._ALLOWED_BUNDLE_PATHS if path != "bundle_manifest.json"}
+    for path in zero_byte_paths:
+        if path not in files:
+            raise ValueError(f"zero-byte fixture path is not an allowed source file: {path}")
+        files[path] = ""
     rows = [
         {
             "relative_path": path,
@@ -97,6 +101,45 @@ def _request(environment_sha: str) -> qelt.QELongTrendJobRequest:
         resource_session_token="resource-secret",
         resource_callback_url="http://127.0.0.1:8001/api/v1/qe-resource",
     )
+
+
+def test_bundle_verifier_accepts_zero_byte_source_and_rejects_invalid_size_contracts(tmp_path: Path) -> None:
+    empty_path = "backend/__init__.py"
+    valid_bundle = _bundle("2" * 64, zero_byte_paths=frozenset({empty_path}))
+
+    qelt._write_verified_bundle(tmp_path / "valid", valid_bundle, str(valid_bundle["bundle_sha256"]))
+
+    assert (tmp_path / "valid" / empty_path).read_bytes() == b""
+
+    for invalid_size in (None, -1, "0", True, 1):
+        invalid_bundle = _bundle("2" * 64, zero_byte_paths=frozenset({empty_path}))
+        manifest = invalid_bundle["manifest"]
+        assert isinstance(manifest, dict)
+        row = next(item for item in manifest["files"] if item["relative_path"] == empty_path)
+        if invalid_size is None:
+            row.pop("size_bytes")
+        else:
+            row["size_bytes"] = invalid_size
+        manifest_core = {key: value for key, value in manifest.items() if key != "bundle_sha256"}
+        bundle_sha = _sha_json(manifest_core)
+        manifest["bundle_sha256"] = bundle_sha
+        invalid_bundle["bundle_sha256"] = bundle_sha
+        files = invalid_bundle["files"]
+        assert isinstance(files, dict)
+        files["bundle_manifest.json"] = json.dumps(
+            manifest,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+        with pytest.raises(qelt.QELongTrendNodeError) as exc_info:
+            qelt._write_verified_bundle(
+                tmp_path / f"invalid-{type(invalid_size).__name__}-{invalid_size}",
+                invalid_bundle,
+                bundle_sha,
+            )
+        assert exc_info.value.reason_code == "QELT_BUNDLE_INVALID"
 
 
 def test_job_reservation_is_secret_free_idempotent_and_conflict_detecting(

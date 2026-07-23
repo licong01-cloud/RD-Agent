@@ -499,7 +499,18 @@ def _write_verified_bundle(runtime_dir: Path, bundle: Mapping[str, Any], expecte
         payload = source.encode("utf-8")
         if relative != "bundle_manifest.json":
             row = rows.get(relative)
-            if not row or row.get("sha256") != hashlib.sha256(payload).hexdigest() or int(row.get("size_bytes") or -1) != len(payload):
+            declared_size = row.get("size_bytes") if row else None
+            valid_declared_size = (
+                isinstance(declared_size, int)
+                and not isinstance(declared_size, bool)
+                and declared_size >= 0
+            )
+            if (
+                not row
+                or not valid_declared_size
+                or row.get("sha256") != hashlib.sha256(payload).hexdigest()
+                or declared_size != len(payload)
+            ):
                 raise QELongTrendNodeError(f"bundle file hash mismatch: {relative}", reason_code="QELT_BUNDLE_INVALID")
         target = (runtime_dir / relative).resolve()
         target.relative_to(runtime_dir.resolve())
