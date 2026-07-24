@@ -1,0 +1,10 @@
+{
+  "schema_version": "aistock_fixed_horizon_template_variant_v1",
+  "scenario": "all",
+  "version": "v4-10d",
+  "base_version": "v4",
+  "label_horizon": 10,
+  "label_from": "Ref($close, -2)",
+  "label_to": "Ref($close, -11)",
+  "expected_replacement_count": 8
+}
