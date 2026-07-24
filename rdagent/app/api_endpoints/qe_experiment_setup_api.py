@@ -42,8 +42,8 @@ def _get_qe_workspace_root() -> Path:
     if env_val:
         return Path(env_val)
     # 默认: RD-Agent-main/qe_workspace
-    repo_root = Path(__file__).resolve().parents[3]
-    return repo_root / "qe_workspace"
+    from rdagent.app.runtime_state import state_path
+    return state_path("qe_workspace")
 
 
 def _get_factor_data_root() -> Path:

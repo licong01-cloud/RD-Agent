@@ -21,17 +21,18 @@ from typing import Any
 
 from .config_service import PROJECT_ROOT
 from .models import DatasetRecord, TaskRecord
+from rdagent.app.runtime_state import state_path
 
-DATA_DIR = PROJECT_ROOT / "scheduler_data"
+DATA_DIR = state_path("scheduler", "data")
 TASK_FILE = DATA_DIR / "tasks.jsonl"
 DATASET_FILE = DATA_DIR / "datasets.jsonl"
 # 使用git_ignore_folder避免污染项目根目录
-LOG_DIR = PROJECT_ROOT / "git_ignore_folder" / "logs" / "scheduler_tasks"
+LOG_DIR = state_path("scheduler", "logs")
 RESULT_FILE = DATA_DIR / "results.jsonl"
 LOCAL_TZ = timezone(timedelta(hours=8))
 
 # rdagent CLI 输出的日志根目录
-RDAGENT_LOG_ROOT = PROJECT_ROOT / "log"
+RDAGENT_LOG_ROOT = state_path("log")
 
 # 日志目录名的时间戳格式
 _LOG_DIR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-\d+$")

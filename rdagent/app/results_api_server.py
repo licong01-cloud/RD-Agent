@@ -39,6 +39,8 @@ def _load_json(path: Path) -> Any | None:
 
 
 def create_app() -> FastAPI:
+    from rdagent.app.runtime_state import require_state_root, state_path
+    require_state_root()
     app = FastAPI(title="RD-Agent Results API")
     app.add_middleware(
         CORSMiddleware,
@@ -121,14 +123,14 @@ def create_app() -> FastAPI:
         return Path(__file__).resolve().parents[2]
 
     def _log_root() -> Path:
-        return _repo_root() / "log"
+        return state_path("log")
 
     def _workspace_root() -> Path:
-        return _repo_root() / "git_ignore_folder" / "RD-Agent_workspace"
+        return state_path("workspace")
 
     def _aistock_catalog_root() -> Path:
         # 兼容：RD-Agent 侧将 AIstock catalog 输出到 repo_root/RDagentDB/aistock
-        return _repo_root() / "RDagentDB" / "aistock"
+        return state_path("registry", "aistock")
 
     def _to_native_path(p_str: str | Path) -> Path:
         """将WSL路径与Windows路径互转为当前系统可读路径。"""
@@ -3050,7 +3052,7 @@ def create_app() -> FastAPI:
                     continue
 
             # ===== 删除 scheduler 命令行输出日志 =====
-            scheduler_log = _repo_root() / "git_ignore_folder" / "logs" / "scheduler_tasks" / f"{task_id}.log"
+            scheduler_log = state_path("scheduler", "logs", f"{task_id}.log")
             if scheduler_log.exists():
                 scheduler_log.unlink()
                 deleted_items.append({

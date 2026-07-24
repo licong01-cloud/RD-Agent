@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from rdagent.log import rdagent_logger as logger
+from rdagent.app.runtime_state import state_path
 
 
 def _utc_now_iso() -> str:
@@ -72,7 +73,7 @@ def _default_registry_path() -> Path:
         except Exception:
             pass
 
-    return repo_root / "RDagentDB" / "registry.sqlite"
+    return state_path("registry", "registry.sqlite")
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
