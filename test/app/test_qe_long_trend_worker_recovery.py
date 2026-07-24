@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import urllib.error
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import NoReturn
 
 import pytest
 from rdagent.app.api_endpoints import qe_long_trend_registration_replayer as replayer
@@ -25,6 +29,61 @@ def _write_job(root: Path, task: str, loop: str, evaluation: str, created_at: st
         encoding="utf-8",
     )
     return job_dir
+
+
+def _write_outbox_job(root: Path, *, suffix: str = "a") -> tuple[Path, Path, dict[str, object]]:
+    evaluation_id = "qelt_" + suffix * 64
+    job_dir = root / "task-1" / "Loop1" / "long_trend_evaluations" / evaluation_id
+    outbox = job_dir / "outbox" / "000001.json"
+    outbox.parent.mkdir(parents=True)
+    (job_dir / "secret.json").write_text(
+        json.dumps(
+            {
+                "resource_callback_url": "http://127.0.0.1:8001/resource",
+                "resource_session_token": "secret",
+            },
+        ),
+        encoding="utf-8",
+    )
+    payload: dict[str, object] = {
+        "session_id": f"qers-{suffix}",
+        "source_run_key": f"qelt:{evaluation_id}",
+        "task_id": "task-1",
+        "loop_id": "Loop1",
+        "loop_index": 1,
+        "node_id": "node-1",
+        "sequence_no": 1,
+        "phase": "long_trend_eval",
+        "phase_status": "running",
+        "metadata": {"evaluation_id": evaluation_id, "job_id": "job-1", "attempt_id": "attempt-1"},
+    }
+    worker._persist_outbox_event(outbox, payload)
+    return job_dir, outbox, payload
+
+
+class _Response:
+    def __init__(self, status: int, payload: object) -> None:
+        self.status = status
+        self._body = json.dumps(payload).encode("utf-8")
+
+    def __enter__(self) -> _Response:
+        return self
+
+    def __exit__(self, *_args: object) -> bool:
+        return False
+
+    def read(self, _limit: int = -1) -> bytes:
+        return self._body
+
+
+def _http_error(status: int, payload: object) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(
+        "http://127.0.0.1:8001/resource",
+        status,
+        "callback rejected",
+        hdrs=None,
+        fp=io.BytesIO(json.dumps(payload).encode("utf-8")),
+    )
 
 
 def test_cpu_slot_queue_is_fifo_by_created_at_then_identity(tmp_path: Path) -> None:
@@ -249,3 +308,210 @@ def test_api_lifecycle_recovery_scan_replays_pending_outbox_without_new_job(
 
     assert registration_scans == [tmp_path.resolve()]
     assert replay_calls == [tmp_path.resolve()]
+
+
+def test_same_sequence_different_event_hash_never_overwrites_durable_outbox(tmp_path: Path) -> None:
+    _job_dir, outbox, payload = _write_outbox_job(tmp_path)
+    original = outbox.read_bytes()
+
+    assert worker._persist_outbox_event(outbox, payload)["event_sha256"] == worker._canonical_event_sha256(payload)
+    conflicting = {**payload, "phase": "failed"}
+    with pytest.raises(RuntimeError, match="QELT_RESOURCE_OUTBOX_EVENT_CONFLICT"):
+        worker._persist_outbox_event(outbox, conflicting)
+
+    assert outbox.read_bytes() == original
+
+
+def test_http_409_is_structured_deferred_and_later_delivers_same_outbox(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _job_dir, outbox, payload = _write_outbox_job(tmp_path)
+    now = datetime(2026, 7, 24, tzinfo=timezone.utc)
+    clock = {"now": now}
+    monkeypatch.setattr(worker, "_now_utc", lambda: clock["now"])
+
+    conflict = _http_error(
+        409,
+        {
+            "detail": {
+                "reason_code": "QE_RESOURCE_EVENT_PHASE_INVALID",
+                "message": "transition completed -> long_trend_eval is not allowed",
+            },
+        },
+    )
+
+    def raise_conflict(*_args: object, **_kwargs: object) -> NoReturn:
+        raise conflict
+
+    monkeypatch.setattr(worker.urllib.request, "urlopen", raise_conflict)
+    assert worker._deliver_outbox(outbox.parents[1], outbox) is False
+    persisted = json.loads(outbox.read_text(encoding="utf-8"))
+    assert persisted["delivery_state"] == "reconciliation_required"
+    assert persisted["delivered"] is False
+    assert persisted["delivery_attempt_count"] == 1
+    assert persisted["last_delivery_error"]["error_type"] == "http_conflict"
+    assert persisted["last_delivery_error"]["http_status"] == worker.HTTP_CONFLICT_STATUS
+    assert persisted["last_delivery_error"]["reason_code"] == "QE_RESOURCE_EVENT_PHASE_INVALID"
+    assert persisted["payload_identity"]["sequence_no"] == 1
+    assert persisted["event_sha256"] == worker._canonical_event_sha256(payload)
+    next_attempt_at = datetime.fromisoformat(persisted["next_attempt_at"])
+
+    monkeypatch.setattr(
+        worker.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: pytest.fail("deferred 409 outbox must not be sent every replay cycle"),
+    )
+    assert worker._replay_outboxes(tmp_path) == 1
+    assert json.loads(outbox.read_text(encoding="utf-8"))["delivery_attempt_count"] == 1
+
+    clock["now"] = next_attempt_at + timedelta(seconds=1)
+    monkeypatch.setattr(
+        worker.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _Response(200, {"data": {"status": "idempotent"}}),
+    )
+    assert worker._replay_outboxes(tmp_path) == 0
+    delivered = json.loads(outbox.read_text(encoding="utf-8"))
+    assert delivered["delivery_state"] == "delivered"
+    assert delivered["delivered"] is True
+    assert delivered["event_sha256"] == persisted["event_sha256"]
+
+    attempts = delivered["delivery_attempt_count"]
+    monkeypatch.setattr(
+        worker.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: pytest.fail("delivered outbox must not be sent again"),
+    )
+    assert worker._deliver_outbox(outbox.parents[1], outbox) is True
+    assert json.loads(outbox.read_text(encoding="utf-8"))["delivery_attempt_count"] == attempts
+
+
+def test_api_restart_preserves_conflict_backoff_without_resending(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _job_dir, outbox, _payload_value = _write_outbox_job(tmp_path, suffix="e")
+    now = datetime(2026, 7, 24, tzinfo=timezone.utc)
+    monkeypatch.setattr(worker, "_now_utc", lambda: now)
+    conflict = _http_error(
+        409,
+        {"detail": {"reason_code": "QE_RESOURCE_EVENT_PHASE_INVALID", "message": "reconcile first"}},
+    )
+
+    def raise_conflict(*_args: object, **_kwargs: object) -> NoReturn:
+        raise conflict
+
+    monkeypatch.setattr(worker.urllib.request, "urlopen", raise_conflict)
+    assert worker._deliver_outbox(outbox.parents[1], outbox) is False
+    persisted = outbox.read_bytes()
+
+    monkeypatch.setattr(replayer, "_replay_once", lambda _root: None)
+    monkeypatch.setattr(
+        worker.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: pytest.fail("restart recovery must honor persisted next_attempt_at"),
+    )
+    replayer._run_recovery_scan(tmp_path.resolve())
+
+    assert outbox.read_bytes() == persisted
+    row = json.loads(outbox.read_text(encoding="utf-8"))
+    assert row["delivery_state"] == "reconciliation_required"
+    assert row["delivery_attempt_count"] == 1
+
+
+def test_invalid_persisted_next_attempt_fails_closed_without_sending(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _job_dir, outbox, _payload_value = _write_outbox_job(tmp_path, suffix="f")
+    row = json.loads(outbox.read_text(encoding="utf-8"))
+    row["delivery_state"] = "reconciliation_required"
+    row["next_attempt_at"] = "not-a-timestamp"
+    outbox.write_text(json.dumps(row), encoding="utf-8")
+    monkeypatch.setattr(
+        worker.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: pytest.fail("invalid durable retry state must fail before network I/O"),
+    )
+
+    with pytest.raises(RuntimeError, match="QELT_RESOURCE_OUTBOX_NEXT_ATTEMPT_INVALID"):
+        worker._deliver_outbox(outbox.parents[1], outbox)
+
+
+def test_replay_delivers_same_evaluation_outboxes_in_sequence_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_dir, first_outbox, first_payload = _write_outbox_job(tmp_path, suffix="9")
+    second_payload = {
+        **first_payload,
+        "sequence_no": 2,
+        "phase": "completed",
+        "phase_status": "succeeded",
+    }
+    second_outbox = first_outbox.with_name("000002.json")
+    worker._persist_outbox_event(second_outbox, second_payload)
+    delivered_sequences: list[int] = []
+
+    def accept(request, **_kwargs):  # type: ignore[no-untyped-def]
+        delivered_sequences.append(int(json.loads(request.data)["sequence_no"]))
+        return _Response(200, {"data": {"status": "accepted"}})
+
+    monkeypatch.setattr(worker.urllib.request, "urlopen", accept)
+
+    assert worker._replay_outboxes(tmp_path) == 0
+    assert delivered_sequences == [1, 2]
+    assert json.loads((job_dir / "outbox" / "000001.json").read_text(encoding="utf-8"))["delivered"] is True
+    assert json.loads((job_dir / "outbox" / "000002.json").read_text(encoding="utf-8"))["delivered"] is True
+
+
+@pytest.mark.parametrize(
+    ("suffix", "failure", "expected_state", "expected_error_type", "expected_reason"),
+    [
+        (
+            "b",
+            _http_error(503, {"detail": {"reason_code": "AIstock_UNAVAILABLE", "message": "retry later"}}),
+            "retryable_http_error",
+            "http_5xx",
+            "AIstock_UNAVAILABLE",
+        ),
+        (
+            "c",
+            urllib.error.URLError(ConnectionRefusedError("connection refused")),
+            "retryable_transport_error",
+            "network_unreachable",
+            "QELT_RESOURCE_CALLBACK_NETWORK_UNREACHABLE",
+        ),
+        (
+            "d",
+            TimeoutError("timed out"),
+            "retryable_transport_error",
+            "timeout",
+            "QELT_RESOURCE_CALLBACK_TIMEOUT",
+        ),
+    ],
+)
+def test_http_5xx_network_and_timeout_keep_distinct_retryable_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    suffix: str,
+    failure: Exception,
+    expected_state: str,
+    expected_error_type: str,
+    expected_reason: str,
+) -> None:
+    _job_dir, outbox, _payload_value = _write_outbox_job(tmp_path, suffix=suffix)
+    monkeypatch.setattr(worker, "_now_utc", lambda: datetime(2026, 7, 24, tzinfo=timezone.utc))
+
+    def raise_failure(*_args: object, **_kwargs: object) -> NoReturn:
+        raise failure
+
+    monkeypatch.setattr(worker.urllib.request, "urlopen", raise_failure)
+    assert worker._deliver_outbox(outbox.parents[1], outbox) is False
+
+    persisted = json.loads(outbox.read_text(encoding="utf-8"))
+    assert persisted["delivery_state"] == expected_state
+    assert persisted["last_delivery_error"]["error_type"] == expected_error_type
+    assert persisted["last_delivery_error"]["reason_code"] == expected_reason
+    assert persisted["next_attempt_at"] is not None

@@ -12,6 +12,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,17 @@ from rdagent.app.api_endpoints.qe_long_trend_evaluation import (
     _sha256_file,
     _utc_now,
 )
+
+OUTBOX_SCHEMA_VERSION = "qe_long_trend_resource_outbox_v2"
+CONFLICT_RETRY_BASE_SECONDS = 300
+HTTP_RETRY_BASE_SECONDS = 30
+TRANSPORT_RETRY_BASE_SECONDS = 15
+DELIVERY_RETRY_MAX_SECONDS = 3600
+HTTP_CONFLICT_STATUS = 409
+HTTP_SERVER_ERROR_MIN = 500
+HTTP_SERVER_ERROR_MAX = 599
+HTTP_SUCCESS_MIN = 200
+HTTP_SUCCESS_MAX = 300
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -413,16 +425,256 @@ def _queue_resource_event(
     outbox_dir = job_dir / "outbox"
     outbox_dir.mkdir(exist_ok=True)
     outbox = outbox_dir / f"{sequence_no:06d}.json"
-    _atomic_json(outbox, {"payload": payload, "delivered": False})
+    _persist_outbox_event(outbox, payload)
     _deliver_outbox(job_dir, outbox)
 
 
-def _deliver_outbox(job_dir: Path, path: Path) -> bool:
+def _canonical_event_sha256(payload: Mapping[str, Any]) -> str:
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _payload_identity(payload: Mapping[str, Any]) -> dict[str, Any]:
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, Mapping):
+        raise RuntimeError("QELT_RESOURCE_OUTBOX_IDENTITY_INVALID: payload metadata is missing")
+    required = (
+        "session_id",
+        "source_run_key",
+        "task_id",
+        "loop_id",
+        "loop_index",
+        "node_id",
+        "sequence_no",
+        "phase",
+    )
+    missing = [key for key in required if payload.get(key) in (None, "")]
+    evaluation_id = str(metadata.get("evaluation_id") or "")
+    if missing or not evaluation_id:
+        raise RuntimeError(
+            "QELT_RESOURCE_OUTBOX_IDENTITY_INVALID: "
+            f"payload identity is incomplete missing={missing} evaluation_id_present={bool(evaluation_id)}",
+        )
+    identity = {key: payload[key] for key in required}
+    identity["loop_index"] = int(identity["loop_index"])
+    identity["sequence_no"] = int(identity["sequence_no"])
+    identity["evaluation_id"] = evaluation_id
+    expected_source = f"qelt:{evaluation_id}"
+    if str(identity["source_run_key"]) != expected_source:
+        raise RuntimeError(
+            "QELT_RESOURCE_OUTBOX_IDENTITY_INVALID: source_run_key differs from metadata.evaluation_id",
+        )
+    return identity
+
+
+def _persist_outbox_event(path: Path, payload: Mapping[str, Any]) -> dict[str, Any]:
+    event_sha256 = _canonical_event_sha256(payload)
+    identity = _payload_identity(payload)
+    if path.is_file():
+        row = _read_json(path)
+        existing_payload = row.get("payload")
+        if not isinstance(existing_payload, Mapping):
+            raise RuntimeError(f"QELT_RESOURCE_OUTBOX_EVENT_CONFLICT: existing outbox payload is invalid: {path}")
+        existing_sha256 = str(row.get("event_sha256") or _canonical_event_sha256(existing_payload))
+        existing_identity = _payload_identity(existing_payload)
+        if existing_sha256 != event_sha256 or existing_identity != identity:
+            message = (
+                "QELT_RESOURCE_OUTBOX_EVENT_CONFLICT: same path/sequence has a different durable event hash "
+                "or identity"
+            )
+            raise RuntimeError(
+                message,
+            )
+        upgraded = dict(row)
+        upgraded.update(
+            {
+                "schema_version": OUTBOX_SCHEMA_VERSION,
+                "event_sha256": event_sha256,
+                "payload_identity": identity,
+            },
+        )
+        if upgraded != row:
+            _atomic_json(path, upgraded)
+        return upgraded
+    row = {
+        "schema_version": OUTBOX_SCHEMA_VERSION,
+        "payload": dict(payload),
+        "payload_identity": identity,
+        "event_sha256": event_sha256,
+        "delivery_state": "pending",
+        "delivered": False,
+        "delivery_attempt_count": 0,
+        "next_attempt_at": None,
+        "last_delivery_error": None,
+    }
+    _atomic_json(path, row)
+    return row
+
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _iso_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _parse_utc(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _retry_delay(base_seconds: int, attempt_count: int) -> int:
+    exponent = min(max(attempt_count - 1, 0), 7)
+    return min(base_seconds * (2**exponent), DELIVERY_RETRY_MAX_SECONDS)
+
+
+def _delivery_due(row: Mapping[str, Any], *, now: datetime) -> bool:
+    persisted = row.get("next_attempt_at")
+    if persisted in (None, ""):
+        return True
+    next_attempt_at = _parse_utc(persisted)
+    if next_attempt_at is None:
+        raise RuntimeError("QELT_RESOURCE_OUTBOX_NEXT_ATTEMPT_INVALID: persisted retry timestamp is invalid")
+    return now >= next_attempt_at
+
+
+def _persist_delivery_failure(
+    path: Path,
+    row: dict[str, Any],
+    *,
+    now: datetime,
+    delivery_state: str,
+    retry_base_seconds: int,
+    error: Mapping[str, Any],
+) -> None:
+    attempt_count = int(row.get("delivery_attempt_count") or 0) + 1
+    row.update(
+        {
+            "schema_version": OUTBOX_SCHEMA_VERSION,
+            "delivery_state": delivery_state,
+            "delivered": False,
+            "delivery_attempt_count": attempt_count,
+            "last_delivery_attempt_at": _iso_utc(now),
+            "next_attempt_at": _iso_utc(now + timedelta(seconds=_retry_delay(retry_base_seconds, attempt_count))),
+            "last_delivery_error": dict(error),
+        },
+    )
+    _atomic_json(path, row)
+
+
+def _decode_http_payload(raw: bytes) -> tuple[Any, str]:
+    text = raw.decode("utf-8", errors="replace")
+    try:
+        return json.loads(text), text
+    except json.JSONDecodeError:
+        return None, text
+
+
+def _http_error_diagnostics(exc: urllib.error.HTTPError) -> dict[str, Any]:
+    read_error = None
+    try:
+        raw = exc.read(64 * 1024)
+    except (OSError, ValueError) as read_exc:
+        raw = b""
+        read_error = f"{type(read_exc).__name__}: {read_exc}"
+    payload, text = _decode_http_payload(raw)
+    detail = payload.get("detail") if isinstance(payload, Mapping) else None
+    detail_mapping = detail if isinstance(detail, Mapping) else {}
+    reason_code = str(
+        detail_mapping.get("reason_code")
+        or (payload.get("reason_code") if isinstance(payload, Mapping) else "")
+        or "QELT_RESOURCE_CALLBACK_HTTP_ERROR",
+    )
+    message = str(
+        detail_mapping.get("message")
+        or (payload.get("message") if isinstance(payload, Mapping) else "")
+        or detail
+        or exc.reason
+        or text,
+    )
+    diagnostics = {
+        "http_status": int(exc.code),
+        "reason_code": reason_code,
+        "message": message,
+        "detail": detail,
+        "response_body_sha256": hashlib.sha256(raw).hexdigest(),
+    }
+    if read_error is not None:
+        diagnostics["response_read_error"] = read_error
+    return diagnostics
+
+
+def _persist_http_failure(
+    path: Path,
+    row: dict[str, Any],
+    *,
+    now: datetime,
+    http_status: int,
+    diagnostics: Mapping[str, Any],
+) -> None:
+    if http_status == HTTP_CONFLICT_STATUS:
+        state = "reconciliation_required"
+        retry_base = CONFLICT_RETRY_BASE_SECONDS
+        error_type = "http_conflict"
+    elif HTTP_SERVER_ERROR_MIN <= http_status <= HTTP_SERVER_ERROR_MAX:
+        state = "retryable_http_error"
+        retry_base = HTTP_RETRY_BASE_SECONDS
+        error_type = "http_5xx"
+    else:
+        state = "http_rejected"
+        retry_base = CONFLICT_RETRY_BASE_SECONDS
+        error_type = "http_rejected"
+    _persist_delivery_failure(
+        path,
+        row,
+        now=now,
+        delivery_state=state,
+        retry_base_seconds=retry_base,
+        error={"error_type": error_type, **dict(diagnostics)},
+    )
+
+
+def _deliver_outbox(job_dir: Path, path: Path) -> bool:  # noqa: C901 - explicit transport classifications are durable state.
     row = _read_json(path)
     if row.get("delivered") is True:
         return True
+    payload = row.get("payload")
+    if not isinstance(payload, Mapping):
+        raise RuntimeError(f"QELT_RESOURCE_OUTBOX_INVALID: payload is missing: {path}")
+    identity = _payload_identity(payload)
+    event_sha256 = _canonical_event_sha256(payload)
+    persisted_sha256 = str(row.get("event_sha256") or event_sha256)
+    persisted_identity = row.get("payload_identity")
+    if persisted_sha256 != event_sha256 or (
+        persisted_identity is not None
+        and (not isinstance(persisted_identity, Mapping) or dict(persisted_identity) != identity)
+    ):
+        raise RuntimeError(
+            "QELT_RESOURCE_OUTBOX_EVENT_CONFLICT: persisted event hash or identity differs from durable payload",
+        )
+    row.update(
+        {
+            "schema_version": OUTBOX_SCHEMA_VERSION,
+            "event_sha256": event_sha256,
+            "payload_identity": identity,
+        },
+    )
+    now = _now_utc()
+    if not _delivery_due(row, now=now):
+        if row != _read_json(path):
+            _atomic_json(path, row)
+        return False
     secret = _read_json(job_dir / "secret.json")
-    body = json.dumps(row["payload"], ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     request = urllib.request.Request(
         str(secret["resource_callback_url"]),
         data=body,
@@ -431,37 +683,103 @@ def _deliver_outbox(job_dir: Path, path: Path) -> bool:
     )
     try:
         with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310 - frozen AIstock callback URL.
-            if response.status < 200 or response.status >= 300:
-                row["delivery_attempt_count"] = int(row.get("delivery_attempt_count") or 0) + 1
-                row["last_delivery_attempt_at"] = _utc_now()
-                row["last_delivery_error"] = {
-                    "reason_code": "QELT_RESOURCE_CALLBACK_REJECTED",
-                    "http_status": int(response.status),
-                }
-                _atomic_json(path, row)
+            if response.status < HTTP_SUCCESS_MIN or response.status >= HTTP_SUCCESS_MAX:
+                _persist_http_failure(
+                    path,
+                    row,
+                    now=now,
+                    http_status=int(response.status),
+                    diagnostics={
+                        "http_status": int(response.status),
+                        "reason_code": "QELT_RESOURCE_CALLBACK_HTTP_ERROR",
+                        "message": f"callback returned HTTP {response.status}",
+                        "detail": None,
+                    },
+                )
                 return False
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        row["delivery_attempt_count"] = int(row.get("delivery_attempt_count") or 0) + 1
-        row["last_delivery_attempt_at"] = _utc_now()
-        row["last_delivery_error"] = {
-            "reason_code": "QELT_RESOURCE_CALLBACK_TRANSPORT_FAILED",
-            "error_type": type(exc).__name__,
-            "message": str(exc),
-        }
-        _atomic_json(path, row)
+            raw = response.read(64 * 1024)
+            response_payload, _response_text = _decode_http_payload(raw)
+    except urllib.error.HTTPError as exc:
+        diagnostics = _http_error_diagnostics(exc)
+        _persist_http_failure(
+            path,
+            row,
+            now=now,
+            http_status=int(exc.code),
+            diagnostics=diagnostics,
+        )
         return False
-    row["delivered"] = True
-    row["delivered_at"] = _utc_now()
-    row["delivery_attempt_count"] = int(row.get("delivery_attempt_count") or 0) + 1
-    row["last_delivery_attempt_at"] = row["delivered_at"]
-    row["last_delivery_error"] = None
+    except TimeoutError as exc:
+        _persist_delivery_failure(
+            path,
+            row,
+            now=now,
+            delivery_state="retryable_transport_error",
+            retry_base_seconds=TRANSPORT_RETRY_BASE_SECONDS,
+            error={
+                "error_type": "timeout",
+                "reason_code": "QELT_RESOURCE_CALLBACK_TIMEOUT",
+                "message": str(exc),
+            },
+        )
+        return False
+    except urllib.error.URLError as exc:
+        timeout = isinstance(exc.reason, TimeoutError)
+        _persist_delivery_failure(
+            path,
+            row,
+            now=now,
+            delivery_state="retryable_transport_error",
+            retry_base_seconds=TRANSPORT_RETRY_BASE_SECONDS,
+            error={
+                "error_type": "timeout" if timeout else "network_unreachable",
+                "reason_code": (
+                    "QELT_RESOURCE_CALLBACK_TIMEOUT"
+                    if timeout
+                    else "QELT_RESOURCE_CALLBACK_NETWORK_UNREACHABLE"
+                ),
+                "message": str(exc),
+            },
+        )
+        return False
+    except OSError as exc:
+        _persist_delivery_failure(
+            path,
+            row,
+            now=now,
+            delivery_state="retryable_transport_error",
+            retry_base_seconds=TRANSPORT_RETRY_BASE_SECONDS,
+            error={
+                "error_type": "os_error",
+                "reason_code": "QELT_RESOURCE_CALLBACK_OS_ERROR",
+                "message": str(exc),
+            },
+        )
+        return False
+    delivered_at = _iso_utc(now)
+    row.update(
+        {
+            "delivery_state": "delivered",
+            "delivered": True,
+            "delivered_at": delivered_at,
+            "delivery_attempt_count": int(row.get("delivery_attempt_count") or 0) + 1,
+            "last_delivery_attempt_at": delivered_at,
+            "next_attempt_at": None,
+            "last_delivery_error": None,
+            "last_delivery_response": {
+                "http_status": int(response.status),
+                "payload": response_payload,
+                "response_body_sha256": hashlib.sha256(raw).hexdigest(),
+            },
+        },
+    )
     _atomic_json(path, row)
     return True
 
 
 def _replay_outboxes(root: Path) -> int:
     pending = 0
-    for path in root.glob("*/Loop*/long_trend_evaluations/qelt_*/outbox/*.json"):
+    for path in sorted(root.glob("*/Loop*/long_trend_evaluations/qelt_*/outbox/*.json")):
         try:
             if not _deliver_outbox(path.parents[1], path):
                 pending += 1
