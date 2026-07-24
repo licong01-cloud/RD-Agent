@@ -15,10 +15,11 @@ from jinja2 import Environment, TemplateSyntaxError
 
 from .models import TemplateHistoryRecord
 from .storage import append_history, list_history
+from rdagent.app.runtime_state import state_path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 APP_TPL_ROOT = PROJECT_ROOT / "app_tpl"
-HISTORY_ROOT = PROJECT_ROOT / "history"
+HISTORY_ROOT = state_path("history")
 TEMPLATE_HISTORY_DIR = HISTORY_ROOT / "template_bundles"
 LOCAL_TZ = timezone(timedelta(hours=8))
 
@@ -242,7 +243,7 @@ def rollback_template(payload: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 BINARY_SUFFIXES = {".h5"}
-BACKUPS_ROOT = PROJECT_ROOT / "git_ignore_folder" / "backups"
+BACKUPS_ROOT = state_path("backups")
 
 
 def _is_data_science_path(rel_path: str) -> bool:

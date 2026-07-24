@@ -72,6 +72,8 @@ def ds_user_interact(port=19900):
 
 def results_api(host: str = "127.0.0.1", port: int = 9000):
     """Start read-only results API server for AIstock integration."""
+    from rdagent.app.runtime_state import require_state_root
+    require_state_root()
     cmds = [
         "uvicorn",
         "rdagent.app.results_api_server:create_app",
