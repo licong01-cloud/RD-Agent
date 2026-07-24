@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -47,6 +48,7 @@ HTTP_SUCCESS_MIN = 200
 HTTP_SUCCESS_MAX_EXCLUSIVE = 300
 HTTP_CONFLICT_STATUS = 409
 HTTP_SERVER_ERROR_MIN = 500
+HTTP_SERVER_ERROR_MAX = 599
 OUTBOX_IDENTITY_CONFLICT_REASON = "QELT_RESOURCE_OUTBOX_IDENTITY_CONFLICT"
 OUTBOX_IDENTITY_INVALID_REASON = "QELT_RESOURCE_OUTBOX_IDENTITY_INVALID"
 CONTROL_STATE_CONFLICT_REASON = "QELT_CONTROL_STATE_CONFLICT"
@@ -649,7 +651,7 @@ def _http_failure_fields(
     detail: Any,
 ) -> dict[str, Any]:
     conflict = status == HTTP_CONFLICT_STATUS
-    server_error = status >= HTTP_SERVER_ERROR_MIN
+    server_error = HTTP_SERVER_ERROR_MIN <= status <= HTTP_SERVER_ERROR_MAX
     if conflict:
         delivery_state = "conflict_reconciliation_required"
         reason_code = "QELT_RESOURCE_CALLBACK_HTTP_CONFLICT"
@@ -723,11 +725,24 @@ def _deliver_outbox(job_dir: Path, path: Path) -> bool:
                 "conflict": False,
                 "message": str(exc),
             }
-        except (urllib.error.URLError, OSError) as exc:
+        except urllib.error.URLError as exc:
+            is_timeout = isinstance(exc.reason, (TimeoutError, socket.timeout))
+            failure = {
+                "delivery_state": "retryable_timeout" if is_timeout else "retryable_network",
+                "reason_code": (
+                    "QELT_RESOURCE_CALLBACK_TIMEOUT"
+                    if is_timeout
+                    else "QELT_RESOURCE_CALLBACK_NETWORK_FAILED"
+                ),
+                "error_type": "timeout" if is_timeout else "network",
+                "conflict": False,
+                "message": str(exc),
+            }
+        except OSError as exc:
             failure = {
                 "delivery_state": "retryable_network",
                 "reason_code": "QELT_RESOURCE_CALLBACK_NETWORK_FAILED",
-                "error_type": "network",
+                "error_type": "os_error",
                 "conflict": False,
                 "message": str(exc),
             }

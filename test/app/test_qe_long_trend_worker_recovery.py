@@ -4,7 +4,10 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import socket
 import urllib.error
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -357,6 +360,7 @@ def test_http_409_is_structured_conflict_and_is_not_replayed_each_scan(
     row = json.loads(outbox.read_text(encoding="utf-8"))
     assert row["delivered"] is False
     assert row["delivery_state"] == "conflict_reconciliation_required"
+    assert row["next_attempt_at"] is not None
     assert row["last_delivery_error"]["error_type"] == "http_conflict"
     assert row["last_delivery_error"]["http_status"] == worker.HTTP_CONFLICT_STATUS
     assert row["last_delivery_error"]["aistock_reason_code"] == "QE_RESOURCE_EVENT_PHASE_INVALID"
@@ -401,7 +405,7 @@ def test_conflict_replays_after_persisted_backoff_and_can_be_delivered(
         (
             urllib.error.HTTPError(
                 "http://callback",
-                503,
+                500,
                 "Unavailable",
                 {},
                 io.BytesIO(b'{"detail":{"reason_code":"BACKEND_UNAVAILABLE","message":"retry"}}'),
@@ -409,6 +413,42 @@ def test_conflict_replays_after_persisted_backoff_and_can_be_delivered(
             "retryable_http",
             "QELT_RESOURCE_CALLBACK_HTTP_5XX",
             "http_5xx",
+        ),
+        (
+            urllib.error.HTTPError(
+                "http://callback",
+                599,
+                "Unavailable",
+                {},
+                io.BytesIO(b'{"detail":{"reason_code":"BACKEND_UNAVAILABLE","message":"retry"}}'),
+            ),
+            "retryable_http",
+            "QELT_RESOURCE_CALLBACK_HTTP_5XX",
+            "http_5xx",
+        ),
+        (
+            urllib.error.HTTPError(
+                "http://callback",
+                600,
+                "Rejected",
+                {},
+                io.BytesIO(b'{"detail":{"reason_code":"CALLBACK_REJECTED","message":"reject"}}'),
+            ),
+            "http_rejected",
+            "QELT_RESOURCE_CALLBACK_HTTP_REJECTED",
+            "http_rejected",
+        ),
+        (
+            urllib.error.URLError(TimeoutError("wrapped timeout")),
+            "retryable_timeout",
+            "QELT_RESOURCE_CALLBACK_TIMEOUT",
+            "timeout",
+        ),
+        (
+            urllib.error.URLError(socket.timeout("socket timeout")),  # noqa: UP041 - explicit socket contract.
+            "retryable_timeout",
+            "QELT_RESOURCE_CALLBACK_TIMEOUT",
+            "timeout",
         ),
         (
             urllib.error.URLError("connection refused"),
@@ -421,6 +461,12 @@ def test_conflict_replays_after_persisted_backoff_and_can_be_delivered(
             "retryable_timeout",
             "QELT_RESOURCE_CALLBACK_TIMEOUT",
             "timeout",
+        ),
+        (
+            OSError("transport os failure"),
+            "retryable_network",
+            "QELT_RESOURCE_CALLBACK_NETWORK_FAILED",
+            "os_error",
         ),
     ],
 )
@@ -445,6 +491,53 @@ def test_retryable_callback_failures_keep_distinct_durable_types(
     assert row["last_delivery_error"]["reason_code"] == expected_reason
     assert row["last_delivery_error"]["error_type"] == expected_type
     assert row["next_attempt_at"] is not None
+
+
+def test_invalid_retry_timestamp_fails_closed_before_network_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_dir = tmp_path / "task-1" / "Loop3" / "long_trend_evaluations" / ("qelt_" + "a" * 64)
+    outbox = _write_outbox(job_dir)
+    row = json.loads(outbox.read_text(encoding="utf-8"))
+    row["next_attempt_at"] = "not-a-timestamp"
+    worker._atomic_json(outbox, row)
+    monkeypatch.setattr(
+        worker.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: pytest.fail("invalid retry timestamp must fail before network I/O"),
+    )
+
+    with pytest.raises(ValueError, match="Invalid isoformat string"):
+        worker._deliver_outbox(job_dir, outbox)
+
+
+def test_delivery_uses_exclusive_lock_and_delivered_outbox_is_not_resent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_dir = tmp_path / "task-1" / "Loop3" / "long_trend_evaluations" / ("qelt_" + "a" * 64)
+    outbox = _write_outbox(job_dir)
+    lock_paths: list[Path] = []
+    calls = 0
+
+    @contextmanager
+    def record_lock(path: Path) -> Iterator[None]:
+        lock_paths.append(path)
+        yield
+
+    def accepted(*_args: Any, **_kwargs: Any) -> _CallbackResponse:
+        nonlocal calls
+        calls += 1
+        return _CallbackResponse()
+
+    monkeypatch.setattr(worker, "_exclusive_file_lock", record_lock)
+    monkeypatch.setattr(worker.urllib.request, "urlopen", accepted)
+
+    assert worker._deliver_outbox(job_dir, outbox) is True
+    assert worker._deliver_outbox(job_dir, outbox) is True
+    assert calls == 1
+    assert lock_paths == [outbox.with_suffix(".lock"), outbox.with_suffix(".lock")]
 
 
 def _write_queue_job(job_dir: Path) -> dict:
@@ -500,6 +593,7 @@ def test_exact_duplicate_is_delivered_once_and_different_hash_cannot_overwrite_s
     )
     outbox = job_dir / "outbox" / "000001.json"
     original = json.loads(outbox.read_text(encoding="utf-8"))
+    assert original["payload_identity"] == worker._payload_identity(original["payload"])
     worker._queue_resource_event(
         job_dir,
         job,
