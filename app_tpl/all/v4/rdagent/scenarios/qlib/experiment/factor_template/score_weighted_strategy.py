@@ -9,13 +9,78 @@ Created: 2026-04-06
 
 import json
 import logging
+from datetime import date
+from typing import Dict, Optional
+
 import numpy as np
 import pandas as pd
-from typing import Dict, Optional
-from qlib.contrib.strategy.signal_strategy import TopkDropoutStrategy
 from qlib.backtest.decision import Order, OrderDir, TradeDecisionWO
+from qlib.contrib.strategy.signal_strategy import TopkDropoutStrategy
 
 logger = logging.getLogger(__name__)
+
+HMM_COEFFICIENT_SCHEMA_V2 = "hmm_sector_coefficients_v2"
+
+
+def _validate_hmm_coefficient_payload(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        raise RuntimeError("HMM coefficient artifact must be a JSON object")
+    daily = payload.get("daily_coefficients")
+    if not isinstance(daily, dict) or not daily:
+        raise RuntimeError("HMM coefficient artifact has no daily_coefficients")
+    date_keys = list(daily)
+    if date_keys != sorted(date_keys):
+        raise RuntimeError("HMM coefficient dates must be sorted in canonical ISO order")
+    for date_key, coefficients in daily.items():
+        try:
+            date.fromisoformat(date_key)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"HMM coefficient date is not ISO YYYY-MM-DD: {date_key!r}") from exc
+        if not isinstance(coefficients, dict) or not coefficients:
+            raise RuntimeError(f"HMM coefficient sector map is empty for {date_key}")
+        for sector_code, coefficient in coefficients.items():
+            if not isinstance(sector_code, str) or not sector_code.strip():
+                raise RuntimeError(f"HMM coefficient sector identity is invalid for {date_key}")
+            if isinstance(coefficient, bool) or not isinstance(coefficient, (int, float)):
+                raise RuntimeError(f"HMM coefficient is not numeric for {date_key}/{sector_code}")
+            if not np.isfinite(coefficient) or coefficient <= 0:
+                raise RuntimeError(f"HMM coefficient must be finite and positive for {date_key}/{sector_code}")
+
+    schema_version = payload.get("schema_version")
+    if schema_version is None:
+        mapping = payload.get("stock_sector_map")
+        if not isinstance(mapping, dict) or not mapping:
+            raise RuntimeError("legacy HMM coefficient artifact has no stock_sector_map")
+        payload["_detected_mapping_mode"] = "static_legacy_v1"
+    elif schema_version == HMM_COEFFICIENT_SCHEMA_V2:
+        if payload.get("mapping_mode") != "pit_by_trade_date_v1":
+            raise RuntimeError("HMM coefficient v2 mapping_mode must be pit_by_trade_date_v1")
+        mapping_by_date = payload.get("stock_sector_map_by_date")
+        daily_states = payload.get("daily_states")
+        if not isinstance(mapping_by_date, dict) or set(mapping_by_date) != set(date_keys):
+            raise RuntimeError("HMM coefficient v2 PIT mapping dates must exactly match coefficient dates")
+        if not isinstance(daily_states, dict) or set(daily_states) != set(date_keys):
+            raise RuntimeError("HMM coefficient v2 state dates must exactly match coefficient dates")
+        preset_coeffs = payload.get("preset_coeffs")
+        if not isinstance(preset_coeffs, dict):
+            raise RuntimeError("HMM coefficient v2 requires preset_coeffs")
+        for date_key in date_keys:
+            mapping = mapping_by_date[date_key]
+            states = daily_states[date_key]
+            if not isinstance(mapping, dict) or not mapping or not isinstance(states, dict) or not states:
+                raise RuntimeError(f"HMM coefficient v2 evidence is empty for {date_key}")
+            if set(states) != set(daily[date_key]):
+                raise RuntimeError(f"HMM coefficient v2 state/sector sets differ for {date_key}")
+            for sector_code, state in states.items():
+                if state not in {"trending", "neutral", "fading"}:
+                    raise RuntimeError(f"HMM coefficient v2 has unknown state for {date_key}/{sector_code}")
+                expected = preset_coeffs.get(state)
+                if expected is None or not np.isclose(daily[date_key][sector_code], expected, atol=1e-12):
+                    raise RuntimeError(f"HMM coefficient v2 state/coefficient mismatch for {date_key}/{sector_code}")
+        payload["_detected_mapping_mode"] = "pit_by_trade_date_v1"
+    else:
+        raise RuntimeError(f"unsupported HMM coefficient schema_version: {schema_version}")
+    return payload
 
 
 class ScoreWeightedTopkStrategy(TopkDropoutStrategy):
@@ -116,6 +181,7 @@ class ScoreWeightedTopkStrategy(TopkDropoutStrategy):
         self.hmm_signal_presets = hmm_signal_presets or {}
         self._hmm_config: Optional[Dict] = None
         self._hmm_config_loaded = False
+        self._last_hmm_adjustment_trace: dict | None = None
 
     # ── 辅助方法（复用 EnhancedTopkDropoutStrategy 模式）──
 
@@ -269,17 +335,12 @@ class ScoreWeightedTopkStrategy(TopkDropoutStrategy):
                 "无法加载 HMM 系数。请检查实验配置。"
             )
 
-        with open(self.hmm_coefficients_file, "r", encoding="utf-8") as f:
-            self._hmm_config = json.load(f)
-
-        if not self._hmm_config.get("daily_coefficients"):
-            raise RuntimeError(
-                f"HMM 配置文件 {self.hmm_coefficients_file} 缺少 daily_coefficients 字段"
-            )
-        if not self._hmm_config.get("stock_sector_map"):
-            raise RuntimeError(
-                f"HMM 配置文件 {self.hmm_coefficients_file} 缺少 stock_sector_map 字段"
-            )
+        with open(self.hmm_coefficients_file, encoding="utf-8") as f:
+            try:
+                payload = json.load(f)
+            except (UnicodeError, json.JSONDecodeError) as exc:
+                raise RuntimeError(f"HMM 配置文件不是有效 UTF-8 JSON: {self.hmm_coefficients_file}") from exc
+        self._hmm_config = _validate_hmm_coefficient_payload(payload)
 
         self._hmm_config_loaded = True
         logger.info(
@@ -294,11 +355,16 @@ class ScoreWeightedTopkStrategy(TopkDropoutStrategy):
         if not self.enable_sector_hmm:
             return pred_score
         if pred_score is None or (hasattr(pred_score, "empty") and pred_score.empty):
-            return pred_score
+            raise RuntimeError(f"HMM adjustment input score is empty: date={trade_date_str}")
 
         hmm_config = self._load_hmm_config()
         daily_coefficients = hmm_config["daily_coefficients"]
-        stock_sector_map = hmm_config["stock_sector_map"]
+        if hmm_config["_detected_mapping_mode"] == "pit_by_trade_date_v1":
+            stock_sector_map = hmm_config["stock_sector_map_by_date"].get(trade_date_str)
+            daily_states = hmm_config["daily_states"].get(trade_date_str)
+        else:
+            stock_sector_map = hmm_config["stock_sector_map"]
+            daily_states = None
 
         day_coeffs = daily_coefficients.get(trade_date_str)
         if not day_coeffs:
@@ -308,15 +374,61 @@ class ScoreWeightedTopkStrategy(TopkDropoutStrategy):
                 f"请检查预计算日期范围是否覆盖回测区间。"
             )
 
+        if not stock_sector_map:
+            raise RuntimeError(f"HMM 配置中缺少交易日 {trade_date_str} 的 PIT 股票行业映射")
+        if not np.isfinite(pred_score.to_numpy(dtype=float)).all():
+            raise RuntimeError(f"HMM 调整前评分包含非有限值: date={trade_date_str}")
+
+        missing_mapping = [stock_id for stock_id in pred_score.index if stock_id not in stock_sector_map]
+        missing_coefficient = [
+            (stock_id, stock_sector_map[stock_id])
+            for stock_id in pred_score.index
+            if stock_id in stock_sector_map and stock_sector_map[stock_id] not in day_coeffs
+        ]
+        if missing_mapping:
+            raise RuntimeError(
+                f"HMM 股票行业映射缺失: date={trade_date_str} count={len(missing_mapping)} "
+                f"sample={missing_mapping[:10]}",
+            )
+        if missing_coefficient:
+            raise RuntimeError(
+                f"HMM 行业系数缺失: date={trade_date_str} count={len(missing_coefficient)} "
+                f"sample={missing_coefficient[:10]}",
+            )
+
         adjusted = pred_score.copy()
         n_adjusted = 0
+        trace_rows = []
         for stock_id in adjusted.index:
-            sector_code = stock_sector_map.get(stock_id)
-            if sector_code and sector_code in day_coeffs:
-                coeff = day_coeffs[sector_code]
-                if abs(coeff - 1.0) > 1e-6:
-                    adjusted[stock_id] *= coeff
-                    n_adjusted += 1
+            sector_code = stock_sector_map[stock_id]
+            coeff = float(day_coeffs[sector_code])
+            raw_score = float(adjusted[stock_id])
+            adjusted_score = raw_score * coeff
+            if not np.isfinite(adjusted_score):
+                raise RuntimeError(
+                    f"HMM 调整后评分非有限: date={trade_date_str} stock={stock_id} sector={sector_code}",
+                )
+            adjusted[stock_id] = adjusted_score
+            if not np.isclose(coeff, 1.0, atol=1e-12):
+                n_adjusted += 1
+            trace_rows.append(
+                {
+                    "stock_id": str(stock_id),
+                    "sector_code": sector_code,
+                    "state": daily_states.get(sector_code) if daily_states is not None else None,
+                    "coefficient": coeff,
+                    "raw_score": raw_score,
+                    "adjusted_score": adjusted_score,
+                    "reason": "hmm_sector_coefficient_applied",
+                },
+            )
+
+        self._last_hmm_adjustment_trace = {
+            "trade_date": trade_date_str,
+            "mapping_mode": hmm_config["_detected_mapping_mode"],
+            "row_count": len(trace_rows),
+            "rows": trace_rows,
+        }
 
         if n_adjusted > 0:
             logger.info(
