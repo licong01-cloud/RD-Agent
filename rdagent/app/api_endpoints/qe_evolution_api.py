@@ -29,7 +29,7 @@ try:
     from dotenv import load_dotenv
 except ImportError:
     load_dotenv = None  # type: ignore
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from rdagent.app.api_endpoints.qe_dataset_identity import read_dataset_identity
@@ -44,6 +44,19 @@ from rdagent.app.api_endpoints.qe_kill_receipt import (
     execute_typed_kill_intent,
     public_kill_receipt_payload,
 )
+from rdagent.app.api_endpoints.qe_log_cursor import (
+    CURSOR_CONFLICT_REASON_CODE,
+    QELogCursorError,
+    QELogCursorState,
+    consume_new_lines,
+    decode_cursor,
+    encode_cursor,
+    initial_cursor_state,
+    resolve_resume_cursor,
+    stream_uuid_for_task,
+    validate_cursor_state,
+)
+from rdagent.app.api_endpoints.qe_long_trend_evaluation import build_long_trend_router
 from rdagent.app.api_endpoints.qe_submission_receipt import (
     SubmissionReceiptConflictError,
     SubmissionReceiptError,
@@ -68,7 +81,6 @@ from rdagent.app.api_endpoints.qe_workspace_catalog import (
     resolve_loop_dir,
     resolve_task_dir,
 )
-from rdagent.app.api_endpoints.qe_long_trend_evaluation import build_long_trend_router
 
 logger = logging.getLogger(__name__)
 
@@ -969,46 +981,88 @@ async def download_mlruns_params(task_id: str, loop_id: str):
     return Response(content=buf.read(), media_type="application/gzip")
 
 @router.get("/tasks/{task_id}/logs")
-async def stream_task_logs(task_id: str):
+async def stream_task_logs(
+    task_id: str,
+    request: Request,
+    after_cursor: str | None = Query(default=None, max_length=32768),
+):
     """
     输出任务日志流（SSE），供 AIstock 侧转发展示。
     """
     task_dir = _get_task_dir(task_id)
 
+    try:
+        resume_token = resolve_resume_cursor(after_cursor, request.headers.get("last-event-id"))
+        initial_state = decode_cursor(resume_token) if resume_token else None
+        if initial_state is not None:
+            if initial_state.stream_uuid != stream_uuid_for_task(task_id, task_dir):
+                raise QELogCursorError("QE log cursor belongs to another task stream")
+            if initial_state.terminal:
+                pass
+            elif not task_dir.exists() and initial_state.offsets:
+                raise QELogCursorError("QE log cursor task directory is unavailable")
+            elif task_dir.exists():
+                validate_cursor_state(initial_state, task_id=task_id, task_dir=task_dir)
+    except QELogCursorError as exc:
+        status_code = 400 if exc.reason_code == CURSOR_CONFLICT_REASON_CODE else 410
+        raise HTTPException(
+            status_code=status_code,
+            detail={"reason_code": exc.reason_code, "message": str(exc)},
+        ) from exc
+
+    def render_event(
+        state: QELogCursorState,
+        payload: dict[str, Any],
+        *,
+        event: str | None = None,
+    ) -> str:
+        cursor = encode_cursor(state)
+        body = {**payload, "cursor": cursor, "stream_uuid": state.stream_uuid, "seq": state.seq}
+        parts = [f"id: {cursor}"]
+        if event:
+            parts.append(f"event: {event}")
+        parts.append(f"data: {json.dumps(body, ensure_ascii=False)}")
+        return "\n".join(parts) + "\n\n"
+
     async def event_generator():
-        seen_offsets: dict[str, int] = {}
+        cursor_state = initial_state
+        if cursor_state is not None and cursor_state.terminal:
+            return
         idle_count = 0
         _MAX_IDLE = 300  # 300秒无新日志则终止 SSE
         while True:
+            if await request.is_disconnected():
+                return
             if not task_dir.exists():
-                payload = {"status": "waiting", "logs": [f"Task directory not found yet: {task_id}"]}
-                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-                await asyncio.sleep(1)
                 idle_count += 1
+                if idle_count % 15 == 0:
+                    yield ": heartbeat\n\n"
                 if idle_count >= _MAX_IDLE:
-                    payload = {"status": "timeout", "logs": ["SSE stream timeout: task directory not found"]}
-                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
                     return
+                await asyncio.sleep(1)
                 continue
+
+            if cursor_state is None:
+                cursor_state, initial_lines = initial_cursor_state(task_id=task_id, task_dir=task_dir)
+                if initial_lines:
+                    idle_count = 0
+                    yield render_event(cursor_state, {"status": "running", "logs": initial_lines})
 
             had_new_lines = False
             loop_dirs = sorted([p for p in task_dir.iterdir() if p.is_dir()], key=lambda p: p.name)
-            for loop_dir in loop_dirs:
-                log_file = loop_dir / "run.log"
-                if not log_file.exists():
-                    continue
-
-                file_key = str(log_file)
-                offset = seen_offsets.get(file_key, 0)
-                with open(log_file, encoding="utf-8") as f:
-                    f.seek(offset)
-                    new_lines = [line.rstrip("\n") for line in f]
-                    seen_offsets[file_key] = f.tell()
-
-                if new_lines:
-                    had_new_lines = True
-                    payload = {"status": "running", "logs": [f"[{loop_dir.name}] {line}" for line in new_lines]}
-                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            try:
+                cursor_state, new_lines = consume_new_lines(
+                    cursor_state,
+                    task_id=task_id,
+                    task_dir=task_dir,
+                )
+            except QELogCursorError as exc:
+                payload = {"status": "error", "reason_code": exc.reason_code, "message": str(exc), "logs": []}
+                yield render_event(cursor_state, payload, event="error")
+                return
+            if new_lines:
+                had_new_lines = True
+                yield render_event(cursor_state, {"status": "running", "logs": new_lines})
 
             # 检查是否所有 loop 都到达终态（支持并行策略演进场景）
             if loop_dirs:
@@ -1037,7 +1091,14 @@ async def stream_task_logs(task_id: str):
                             if loop_status == "cancelled":
                                 final_status = "cancelled"
                     payload = {"status": final_status, "logs": [f"All loops finished with status: {final_status}"]}
-                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    cursor_state = QELogCursorState(
+                        stream_uuid=cursor_state.stream_uuid,
+                        seq=cursor_state.seq + 1,
+                        offsets=dict(cursor_state.offsets),
+                        identities=dict(cursor_state.identities),
+                        terminal=True,
+                    )
+                    yield render_event(cursor_state, payload, event="terminal")
                     return
 
             if had_new_lines:
@@ -1045,13 +1106,17 @@ async def stream_task_logs(task_id: str):
             else:
                 idle_count += 1
                 if idle_count >= _MAX_IDLE:
-                    payload = {"status": "timeout", "logs": ["SSE stream timeout: no new logs"]}
-                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
                     return
+                if idle_count % 15 == 0:
+                    yield ": heartbeat\n\n"
 
             await asyncio.sleep(1)
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 @router.get("/execution-environment")
 async def get_execution_environment() -> dict[str, Any]:
