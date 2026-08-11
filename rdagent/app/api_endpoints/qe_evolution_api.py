@@ -12,12 +12,15 @@ QE (QuantEvolver) 演进 API 端点
 """
 
 import asyncio
+import base64
 import json
 import logging
 import os
+import shlex
 import shutil
 import signal
 import subprocess
+import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, NoReturn
@@ -70,6 +73,63 @@ from rdagent.app.api_endpoints.qe_long_trend_evaluation import build_long_trend_
 logger = logging.getLogger(__name__)
 
 
+_QE_BASH_PATH = "/bin/bash"
+_QE_BASH_STARTUP_ENV_KEYS = frozenset({"BASH_ENV", "ENV", "BASHOPTS", "SHELLOPTS"})
+_QE_DYNAMIC_LOADER_INJECTION_KEYS = frozenset({"LD_AUDIT", "LD_PRELOAD"})
+_QE_DB_CREDENTIAL_PREFIXES = ("TDX_DB_", "POSTGRES_")
+_QE_DB_CREDENTIAL_KEYS = frozenset(
+    {
+        "DATABASE_URL",
+        "DB_HOST",
+        "DB_NAME",
+        "DB_PASSWORD",
+        "DB_PORT",
+        "DB_USER",
+        "PGDATABASE",
+        "PGHOST",
+        "PGPASSFILE",
+        "PGPASSWORD",
+        "PGPORT",
+        "PGSERVICE",
+        "PGUSER",
+        "SQLALCHEMY_DATABASE_URI",
+        "SQLALCHEMY_DATABASE_URL",
+    },
+)
+_QE_SECRET_CREDENTIAL_KEYS = frozenset(
+    {
+        "ACCESS_TOKEN",
+        "API_KEY",
+        "AUTH_TOKEN",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "HF_TOKEN",
+        "PASSWORD",
+        "PRIVATE_KEY",
+        "SECRET",
+        "TOKEN",
+        "TUSHARE_TOKEN",
+    },
+)
+_QE_SECRET_CREDENTIAL_SUFFIXES = (
+    "_ACCESS_KEY_ID",
+    "_ACCESS_TOKEN",
+    "_API_KEY",
+    "_AUTH_TOKEN",
+    "_CLIENT_SECRET",
+    "_PASSWORD",
+    "_PRIVATE_KEY",
+    "_SECRET",
+    "_SECRET_ACCESS_KEY",
+    "_SECRET_KEY",
+    "_TOKEN",
+)
+_QE_RESOURCE_SESSION_SECRET_FILE = "qe_resource_session_secret.json"  # noqa: S105 - filename, not a credential.
+
+
 def _raise_runtime_error(message: str) -> NoReturn:
     raise RuntimeError(message)
 
@@ -94,6 +154,29 @@ def _raise_execution_environment_mismatch(
             "expected": expected,
             "actual": actual,
         },
+    )
+
+
+def _is_forbidden_qe_child_env_key(key: str) -> bool:
+    """Return whether an environment key is forbidden at the QE exec boundary.
+
+    QE compute is a file-only data plane.  Database and conventional external
+    service credentials are carried by neither argv nor environment; the one
+    scoped resource-session credential is materialized as a private workspace
+    file.  Loader and Bash startup injection variables are also excluded before
+    Bash itself starts, so command-level unsets are defense in depth rather
+    than the first point at which a credential becomes unavailable.
+    """
+
+    name = str(key or "").upper()
+    return (
+        name in _QE_BASH_STARTUP_ENV_KEYS
+        or name in _QE_DYNAMIC_LOADER_INJECTION_KEYS
+        or name.startswith("BASH_FUNC_")
+        or name.startswith(_QE_DB_CREDENTIAL_PREFIXES)
+        or name in _QE_DB_CREDENTIAL_KEYS
+        or name in _QE_SECRET_CREDENTIAL_KEYS
+        or name.endswith(_QE_SECRET_CREDENTIAL_SUFFIXES)
     )
 
 
@@ -132,17 +215,108 @@ def _spawn_qe_process(
     env: dict[str, str],
     cwd: Path,
 ) -> subprocess.Popen[Any]:
-    # QE intentionally executes its frozen command through the Linux shell;
-    # argv is fixed and shell=True is never used.
+    # QE frozen commands are authored as Bash (for example they use ``source``,
+    # ``compgen`` and ``pipefail``).  Execute that contract explicitly rather
+    # than relying on /bin/sh, which is dash on the supported Ubuntu workers.
+    # Startup files, exported shell functions, loader injection and credential
+    # material are excluded before exec.  Errexit plus pipefail makes any
+    # unhandled command/pipeline failure the process result.
+    child_env = {
+        key: value
+        for key, value in env.items()
+        if not _is_forbidden_qe_child_env_key(key)
+    }
     return subprocess.Popen(  # noqa: S603 - audited QE command execution boundary.
-        ["/bin/sh", "-c", command],
+        [
+            _QE_BASH_PATH,
+            "--noprofile",
+            "--norc",
+            "-o",
+            "errexit",
+            "-o",
+            "pipefail",
+            "-c",
+            command,
+        ],
         stdout=stdout_fd,
         stderr=subprocess.STDOUT,
-        env=env,
+        env=child_env,
         cwd=str(cwd),
         start_new_session=True,
         close_fds=True,
     )
+
+
+def _atomic_write_private_text(target: Path, content: str) -> None:
+    """Atomically replace *target* with a mode-0600 UTF-8 text file.
+
+    ``mkstemp`` creates the inode private from its first observable moment.
+    Replacing only after a flushed write prevents readers from observing a
+    partial secret.  Every failure path removes the temporary file while
+    leaving any previous target untouched.
+    """
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd = -1
+    temporary: Path | None = None
+    try:
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            dir=str(target.parent),
+        )
+        temporary = Path(temporary_name)
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            fd = -1
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)  # noqa: PTH105 - explicit atomic replace is the security boundary.
+    except BaseException:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                logger.exception(
+                    "Failed to close temporary QE resource-session secret: %s",
+                    temporary,
+                )
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                logger.exception(
+                    "Failed to remove temporary QE resource-session secret: %s",
+                    temporary,
+                )
+                raise
+        raise
+
+
+def _write_experiment_file(*, target: Path, relative_path: str, content: str) -> bool:
+    """Write one validated experiment file and return whether it was base64.
+
+    Ordinary text and binary files deliberately retain their existing write
+    semantics.  Only the resource-session secret uses the private atomic path.
+    """
+
+    output_relative_path = relative_path.removesuffix(".b64")
+    if output_relative_path == _QE_RESOURCE_SESSION_SECRET_FILE:
+        if relative_path.endswith(".b64"):
+            message = (
+                "QE_RESOURCE_SESSION_SECRET_ENCODING_INVALID: "
+                "qe_resource_session_secret.json must be submitted as UTF-8 text"
+            )
+            raise RuntimeError(message)
+        _atomic_write_private_text(target, content)
+        return False
+    if relative_path.endswith(".b64"):
+        target.write_bytes(base64.b64decode(content, validate=True))
+        return True
+    target.write_text(content, encoding="utf-8")
+    return False
 
 
 def _terminate_untracked_process(process: subprocess.Popen[Any]) -> None:
@@ -476,7 +650,6 @@ async def _run_qlib_backtest(
 
         # 写入实验文件
         if experiment_files:
-            import base64
             written_targets: set[Path] = set()
             for rel_path, content in experiment_files.items():
                 output_rel_path = rel_path.removesuffix(".b64")
@@ -486,14 +659,16 @@ async def _run_qlib_backtest(
                         f"QE_WORKSPACE_PATH_CONFLICT: duplicate output target: {rel_path!r}",
                     )
                 written_targets.add(validated_target)
-                if rel_path.endswith(".b64"):
+                validated_target.parent.mkdir(parents=True, exist_ok=True)
+                decoded_from_base64 = _write_experiment_file(
+                    target=validated_target,
+                    relative_path=rel_path,
+                    content=content,
+                )
+                if decoded_from_base64:
                     # base64 编码的二进制文件（如 benchmark_sh000300.parquet.b64）
-                    validated_target.parent.mkdir(parents=True, exist_ok=True)
-                    validated_target.write_bytes(base64.b64decode(content, validate=True))
                     _append_log(loop_dir, f"[INFO] Wrote binary file: {rel_path[:-4]} (decoded from b64)")
                 else:
-                    validated_target.parent.mkdir(parents=True, exist_ok=True)
-                    validated_target.write_text(content, encoding="utf-8")
                     _append_log(loop_dir, f"[INFO] Wrote experiment file: {rel_path}")
 
         # 将环境变量注入，确保 model.py 等模块可被 qrun 导入
@@ -544,7 +719,7 @@ async def _run_qlib_backtest(
             _append_log(loop_dir, f"[INFO] Using wsl_command: {final_cmd}")
         else:
             # 默认命令链：cd → prepare_factors → qrun → read_exp_res
-            cmd_parts = [f"cd {loop_dir}"]
+            cmd_parts = [f"cd {shlex.quote(str(loop_dir))}"]
             if (loop_dir / "prepare_factors.py").exists():
                 cmd_parts.append("python prepare_factors.py")
             cmd_parts.append("qrun conf.yaml")
