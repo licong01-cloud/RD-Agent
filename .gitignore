@@ -202,6 +202,14 @@ backups/
 history/
 scheduler_data/
 
+# Repo-local runtime and verification artifacts
+/qe_workspace_artifact_store/
+/mlruns_compare/
+/mlruns_verify/
+/compare_result_*.json
+/run_log.txt
+/scripts/_tmp/*.csv
+
 # Temporary debug artifacts in root
 backfill_*.json
 cached_diff.txt
