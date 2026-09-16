@@ -141,6 +141,13 @@ def _rehash_qe_payload(payload):
     payload["artifact_sha256"] = hashlib.sha256(encoded).hexdigest()
 
 
+def _configure_qe_fixture_contract(module, monkeypatch):
+    monkeypatch.setattr(module, "HMM_QE_EXPECTED_DATE_COUNT", 1)
+    monkeypatch.setattr(module, "HMM_QE_EXPECTED_PREDICTION_ROWS", 2)
+    monkeypatch.setattr(module, "HMM_QE_EXPECTED_APPLIED_ROWS", 1)
+    monkeypatch.setattr(module, "HMM_QE_EXPECTED_NOT_APPLICABLE_ROWS", 1)
+
+
 def test_v2_payload_adjustment_is_pit_exact_and_traceable(tmp_path: Path, monkeypatch) -> None:
     module = _load_template(monkeypatch)
     path = tmp_path / "coefficients.json"
@@ -225,6 +232,7 @@ def test_legacy_static_payload_remains_explicitly_detected(tmp_path: Path, monke
 
 def test_qe_assistance_uses_sign_safe_formula_and_explicit_non_applicable(tmp_path: Path, monkeypatch) -> None:
     module = _load_template(monkeypatch)
+    _configure_qe_fixture_contract(module, monkeypatch)
     path = tmp_path / "qe-assistance.json"
     path.write_text(json.dumps(_qe_payload()), encoding="utf-8")
     strategy = _strategy(module, path)
@@ -268,6 +276,7 @@ def test_qe_assistance_rejects_hash_or_entry_drift(
     expected_reason,
 ) -> None:
     module = _load_template(monkeypatch)
+    _configure_qe_fixture_contract(module, monkeypatch)
     payload = _qe_payload()
     mutation(payload)
     path = tmp_path / "qe-assistance.json"
@@ -284,6 +293,7 @@ def test_qe_assistance_rejects_hash_or_entry_drift(
 
 def test_qe_assistance_requires_exact_daily_prediction_denominator(tmp_path: Path, monkeypatch) -> None:
     module = _load_template(monkeypatch)
+    _configure_qe_fixture_contract(module, monkeypatch)
     path = tmp_path / "qe-assistance.json"
     path.write_text(json.dumps(_qe_payload()), encoding="utf-8")
     strategy = _strategy(module, path)
@@ -292,8 +302,23 @@ def test_qe_assistance_requires_exact_daily_prediction_denominator(tmp_path: Pat
         strategy._apply_hmm_adjustment(pd.Series({"000001.SZ": -2.0}), "2026-01-05")
 
 
+def test_qe_assistance_partial_artifact_cannot_enter_formal_consumer(tmp_path: Path, monkeypatch) -> None:
+    module = _load_template(monkeypatch)
+    path = tmp_path / "qe-assistance-partial.json"
+    path.write_text(json.dumps(_qe_payload()), encoding="utf-8")
+    strategy = _strategy(module, path)
+
+    with pytest.raises(module.HMMQEAssistanceContractError) as exc_info:
+        strategy._apply_hmm_adjustment(
+            pd.Series({"000001.SZ": -2.0, "000002.SZ": 3.0}),
+            "2026-01-05",
+        )
+    assert exc_info.value.reason_code == "hmm_risk_qe_assistance_pit_mapping_missing"
+
+
 def test_qe_assistance_duplicate_json_identity_fails_closed(tmp_path: Path, monkeypatch) -> None:
     module = _load_template(monkeypatch)
+    _configure_qe_fixture_contract(module, monkeypatch)
     payload = _qe_payload()
     raw = json.dumps(payload)
     raw = raw[:-1] + ', "schema_version": "hmm_risk_qe_assistance_coefficients_v1"}'

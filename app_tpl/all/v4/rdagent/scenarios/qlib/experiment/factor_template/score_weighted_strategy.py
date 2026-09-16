@@ -50,6 +50,10 @@ HMM_QE_EXPECTED_MAPPING_HASH = "e478722f700535ac4e37744a651291bc6d179cb899dccd28
 HMM_QE_EXPECTED_SOURCE_HASH = "0957ae8a6527fb28ba337a449ce0f72dfe9f43513003492329d7e770aa9da8e2"
 HMM_QE_EXPECTED_AUTHORITY_HASH = "203effb611d00edde4c0ee9c40f205759097628b8c5eb249907f3b33e6932ddf"
 HMM_QE_EXPECTED_WINDOW = ("2024-07-02", "2026-03-31")
+HMM_QE_EXPECTED_DATE_COUNT = 423
+HMM_QE_EXPECTED_PREDICTION_ROWS = 1_951_448
+HMM_QE_EXPECTED_APPLIED_ROWS = 1_780_359
+HMM_QE_EXPECTED_NOT_APPLICABLE_ROWS = 171_089
 HMM_QE_ALLOWED_COEFFICIENTS = {0.98, 1.0, 1.02}
 _HMM_QE_SECTOR = re.compile(r"^801[0-9]{3}[.]SI$")
 
@@ -227,6 +231,10 @@ def _validate_qe_assistance_payload(payload: dict, daily: dict, date_keys: list[
         or applied_count + not_applicable_count != payload.get("prediction_row_count")
         or len(date_keys) != payload.get("date_count")
         or payload.get("sector_denominator") != 31
+        or payload.get("date_count") != HMM_QE_EXPECTED_DATE_COUNT
+        or payload.get("prediction_row_count") != HMM_QE_EXPECTED_PREDICTION_ROWS
+        or payload.get("applied_row_count") != HMM_QE_EXPECTED_APPLIED_ROWS
+        or payload.get("not_applicable_row_count") != HMM_QE_EXPECTED_NOT_APPLICABLE_ROWS
     ):
         raise HMMQEAssistanceContractError(
             HMM_QE_REASON_MAPPING,
