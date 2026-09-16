@@ -7,8 +7,10 @@ Score-Weighted TopK Strategy with Dynamic n_drop
 Created: 2026-04-06
 """
 
+import hashlib
 import json
 import logging
+import re
 from datetime import date
 from typing import Dict, Optional
 
@@ -20,33 +22,293 @@ from qlib.contrib.strategy.signal_strategy import TopkDropoutStrategy
 logger = logging.getLogger(__name__)
 
 HMM_COEFFICIENT_SCHEMA_V2 = "hmm_sector_coefficients_v2"
+HMM_QE_ASSISTANCE_SCHEMA_V1 = "hmm_risk_qe_assistance_coefficients_v1"
+HMM_QE_ADJUSTMENT_MODE = "sign_safe_magnitude_v1"
+HMM_QE_FORMULA_TEXT = "adjusted_score=raw_score+(coefficient-1.0)*abs(raw_score)"
+HMM_QE_FORMULA_SHA256 = hashlib.sha256(HMM_QE_FORMULA_TEXT.encode("utf-8")).hexdigest()
+HMM_QE_APPLIED = "applied"
+HMM_QE_NOT_APPLICABLE = "not_applicable_authority_unavailable"
+HMM_QE_UNAVAILABLE_REASON = "classification:classification_authority_unavailable"
+HMM_QE_ENTRY_FIELDS = {
+    "status",
+    "sector_code",
+    "reason_code",
+    "adjustment_applied",
+    "classification_receipt_hash",
+    "index_membership_receipt_hash",
+    "classification_row_hashes",
+    "index_membership_row_hashes",
+}
+HMM_QE_REASON_INPUT = "hmm_risk_qe_assistance_input_invalid"
+HMM_QE_REASON_AUTHORITY = "hmm_risk_qe_assistance_authority_identity_mismatch"
+HMM_QE_REASON_MAPPING = "hmm_risk_qe_assistance_pit_mapping_missing"
+HMM_QE_REASON_STATE = "hmm_risk_qe_assistance_state_missing"
+HMM_QE_REASON_FORMULA = "hmm_risk_qe_assistance_formula_invalid"
+HMM_QE_EXPECTED_MODEL_CONTRACT = "hmm_risk_rotation_l1_g2a_v1_6"
+HMM_QE_EXPECTED_MODEL_HASH = "3956107600a3aef4b51ac1da0c56f7940ce49a34777c836e974d14a5b45fbee6"
+HMM_QE_EXPECTED_MAPPING_HASH = "e478722f700535ac4e37744a651291bc6d179cb899dccd28cdb957ed4491b82f"
+HMM_QE_EXPECTED_SOURCE_HASH = "0957ae8a6527fb28ba337a449ce0f72dfe9f43513003492329d7e770aa9da8e2"
+HMM_QE_EXPECTED_AUTHORITY_HASH = "203effb611d00edde4c0ee9c40f205759097628b8c5eb249907f3b33e6932ddf"
+HMM_QE_EXPECTED_WINDOW = ("2024-07-02", "2026-03-31")
+HMM_QE_EXPECTED_DATE_COUNT = 423
+HMM_QE_EXPECTED_PREDICTION_ROWS = 1_951_448
+HMM_QE_EXPECTED_APPLIED_ROWS = 1_780_359
+HMM_QE_EXPECTED_NOT_APPLICABLE_ROWS = 171_089
+HMM_QE_ALLOWED_COEFFICIENTS = {0.98, 1.0, 1.02}
+_HMM_QE_SECTOR = re.compile(r"^801[0-9]{3}[.]SI$")
+
+
+class HMMQEAssistanceContractError(RuntimeError):
+    """Typed fail-closed consumer error for the approved QE-assistance schema."""
+
+    def __init__(self, reason_code: str, message: str) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
+def _canonical_json_sha256(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _is_sha256(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(char in "0123456789abcdef" for char in value)
+
+
+def _json_object_without_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise HMMQEAssistanceContractError(
+                HMM_QE_REASON_INPUT,
+                f"HMM coefficient JSON contains duplicate key: {key}",
+            )
+        result[key] = value
+    return result
+
+
+def _validate_qe_applicability_entry(date_key: str, stock_id: str, entry: dict, day_coeffs: dict) -> None:
+    if not isinstance(entry, dict) or set(entry) != HMM_QE_ENTRY_FIELDS:
+        raise HMMQEAssistanceContractError(
+            HMM_QE_REASON_MAPPING,
+            f"HMM QE applicability shape differs for {date_key}/{stock_id}",
+        )
+    for field in ("classification_receipt_hash", "index_membership_receipt_hash"):
+        if not _is_sha256(entry[field]):
+            raise HMMQEAssistanceContractError(
+                HMM_QE_REASON_AUTHORITY,
+                f"HMM QE authority identity is invalid for {date_key}/{stock_id}/{field}",
+            )
+    for field in ("classification_row_hashes", "index_membership_row_hashes"):
+        if not isinstance(entry[field], list) or any(not _is_sha256(value) for value in entry[field]):
+            raise HMMQEAssistanceContractError(
+                HMM_QE_REASON_AUTHORITY,
+                f"HMM QE row lineage is invalid for {date_key}/{stock_id}/{field}",
+            )
+    status = entry["status"]
+    if status == HMM_QE_APPLIED:
+        if (
+            entry["adjustment_applied"] is not True
+            or entry["reason_code"] is not None
+            or entry["sector_code"] not in day_coeffs
+            or not entry["classification_row_hashes"]
+            or not entry["index_membership_row_hashes"]
+        ):
+            raise HMMQEAssistanceContractError(
+                HMM_QE_REASON_MAPPING,
+                f"HMM QE applied entry differs for {date_key}/{stock_id}",
+            )
+    elif status == HMM_QE_NOT_APPLICABLE:
+        if (
+            entry["adjustment_applied"] is not False
+            or entry["reason_code"] != HMM_QE_UNAVAILABLE_REASON
+            or entry["sector_code"] is not None
+        ):
+            raise HMMQEAssistanceContractError(
+                HMM_QE_REASON_MAPPING,
+                f"HMM QE non-applicable entry differs for {date_key}/{stock_id}",
+            )
+    else:
+        raise HMMQEAssistanceContractError(
+            HMM_QE_REASON_MAPPING,
+            f"HMM QE applicability status is unknown for {date_key}/{stock_id}",
+        )
+
+
+def _validate_qe_assistance_payload(payload: dict, daily: dict, date_keys: list[str]) -> dict:
+    body = dict(payload)
+    observed_hash = body.pop("artifact_sha256", None)
+    if not _is_sha256(observed_hash) or observed_hash != _canonical_json_sha256(body):
+        raise HMMQEAssistanceContractError(
+            HMM_QE_REASON_AUTHORITY,
+            "HMM QE assistance artifact canonical hash differs",
+        )
+    if payload.get("adjustment_mode") != HMM_QE_ADJUSTMENT_MODE or payload.get("adapter_formula") != {
+        "text": HMM_QE_FORMULA_TEXT,
+        "sha256": HMM_QE_FORMULA_SHA256,
+    }:
+        raise HMMQEAssistanceContractError(
+            HMM_QE_REASON_FORMULA,
+            "HMM QE assistance formula identity differs",
+        )
+    if payload.get("tail_accessed") is not False:
+        raise HMMQEAssistanceContractError(
+            HMM_QE_REASON_INPUT,
+            "HMM QE assistance artifact must not access the sealed tail",
+        )
+    if (
+        payload.get("source_model_contract") != HMM_QE_EXPECTED_MODEL_CONTRACT
+        or payload.get("model_hash") != HMM_QE_EXPECTED_MODEL_HASH
+        or payload.get("source_mapping_sha256") != HMM_QE_EXPECTED_MAPPING_HASH
+        or payload.get("source_prediction_file_sha256") != HMM_QE_EXPECTED_SOURCE_HASH
+        or not _is_sha256(payload.get("source_prediction_row_sha256"))
+        or not isinstance(payload.get("authority_identity"), dict)
+        or payload["authority_identity"].get("bundle_hash") != HMM_QE_EXPECTED_AUTHORITY_HASH
+        or (payload.get("window_start"), payload.get("window_end")) != HMM_QE_EXPECTED_WINDOW
+    ):
+        raise HMMQEAssistanceContractError(
+            HMM_QE_REASON_AUTHORITY,
+            "HMM QE assistance fixed model/source/authority identity differs",
+        )
+    mapping_by_date = payload.get("stock_sector_applicability_by_date")
+    canonical_sectors = payload.get("canonical_l1_codes")
+    if not isinstance(mapping_by_date, dict) or set(mapping_by_date) != set(date_keys):
+        raise HMMQEAssistanceContractError(
+            HMM_QE_REASON_MAPPING,
+            "HMM QE applicability dates must exactly match coefficient dates",
+        )
+    if (
+        not isinstance(canonical_sectors, list)
+        or len(canonical_sectors) != 31
+        or len(set(canonical_sectors)) != 31
+        or any(_HMM_QE_SECTOR.fullmatch(str(sector)) is None for sector in canonical_sectors)
+    ):
+        raise HMMQEAssistanceContractError(
+            HMM_QE_REASON_AUTHORITY,
+            "HMM QE canonical L1 authority must contain 31 unique sectors",
+        )
+    canonical_sector_set = set(canonical_sectors)
+    applied_count = 0
+    not_applicable_count = 0
+    for date_key in date_keys:
+        day_coeffs = daily[date_key]
+        applicability = mapping_by_date[date_key]
+        if set(day_coeffs) != canonical_sector_set:
+            raise HMMQEAssistanceContractError(
+                HMM_QE_REASON_STATE,
+                f"HMM QE daily coefficient denominator differs for {date_key}",
+            )
+        if any(float(value) not in HMM_QE_ALLOWED_COEFFICIENTS for value in day_coeffs.values()):
+            raise HMMQEAssistanceContractError(
+                HMM_QE_REASON_STATE,
+                f"HMM QE daily coefficient is outside the approved contract for {date_key}",
+            )
+        if not isinstance(applicability, dict) or not applicability:
+            raise HMMQEAssistanceContractError(
+                HMM_QE_REASON_MAPPING,
+                f"HMM QE applicability is empty for {date_key}",
+            )
+        for stock_id, entry in applicability.items():
+            if not isinstance(stock_id, str) or not stock_id:
+                raise HMMQEAssistanceContractError(
+                    HMM_QE_REASON_MAPPING,
+                    f"HMM QE stock identity is invalid for {date_key}",
+                )
+            _validate_qe_applicability_entry(date_key, stock_id, entry, day_coeffs)
+            if entry["status"] == HMM_QE_APPLIED:
+                applied_count += 1
+            else:
+                not_applicable_count += 1
+    if (
+        applied_count != payload.get("applied_row_count")
+        or not_applicable_count != payload.get("not_applicable_row_count")
+        or applied_count + not_applicable_count != payload.get("prediction_row_count")
+        or len(date_keys) != payload.get("date_count")
+        or payload.get("sector_denominator") != 31
+        or payload.get("date_count") != HMM_QE_EXPECTED_DATE_COUNT
+        or payload.get("prediction_row_count") != HMM_QE_EXPECTED_PREDICTION_ROWS
+        or payload.get("applied_row_count") != HMM_QE_EXPECTED_APPLIED_ROWS
+        or payload.get("not_applicable_row_count") != HMM_QE_EXPECTED_NOT_APPLICABLE_ROWS
+    ):
+        raise HMMQEAssistanceContractError(
+            HMM_QE_REASON_MAPPING,
+            "HMM QE assistance artifact cardinality differs",
+        )
+    payload["_detected_mapping_mode"] = "qe_assistance_by_trade_date_v1"
+    return payload
+
+
+def _payload_contract_error(schema_version: object, reason_code: str, message: str) -> RuntimeError:
+    if schema_version == HMM_QE_ASSISTANCE_SCHEMA_V1:
+        return HMMQEAssistanceContractError(reason_code, message)
+    return RuntimeError(message)
+
+
+def _adjustment_contract_error(mapping_mode: str, reason_code: str, message: str) -> RuntimeError:
+    if mapping_mode == "qe_assistance_by_trade_date_v1":
+        return HMMQEAssistanceContractError(reason_code, message)
+    return RuntimeError(message)
 
 
 def _validate_hmm_coefficient_payload(payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise RuntimeError("HMM coefficient artifact must be a JSON object")
+    schema_version = payload.get("schema_version")
     daily = payload.get("daily_coefficients")
     if not isinstance(daily, dict) or not daily:
-        raise RuntimeError("HMM coefficient artifact has no daily_coefficients")
+        raise _payload_contract_error(
+            schema_version,
+            HMM_QE_REASON_STATE,
+            "HMM coefficient artifact has no daily_coefficients",
+        )
     date_keys = list(daily)
     if date_keys != sorted(date_keys):
-        raise RuntimeError("HMM coefficient dates must be sorted in canonical ISO order")
+        raise _payload_contract_error(
+            schema_version,
+            HMM_QE_REASON_INPUT,
+            "HMM coefficient dates must be sorted in canonical ISO order",
+        )
     for date_key, coefficients in daily.items():
         try:
             date.fromisoformat(date_key)
         except (TypeError, ValueError) as exc:
-            raise RuntimeError(f"HMM coefficient date is not ISO YYYY-MM-DD: {date_key!r}") from exc
+            raise _payload_contract_error(
+                schema_version,
+                HMM_QE_REASON_INPUT,
+                f"HMM coefficient date is not ISO YYYY-MM-DD: {date_key!r}",
+            ) from exc
         if not isinstance(coefficients, dict) or not coefficients:
-            raise RuntimeError(f"HMM coefficient sector map is empty for {date_key}")
+            raise _payload_contract_error(
+                schema_version,
+                HMM_QE_REASON_STATE,
+                f"HMM coefficient sector map is empty for {date_key}",
+            )
         for sector_code, coefficient in coefficients.items():
             if not isinstance(sector_code, str) or not sector_code.strip():
-                raise RuntimeError(f"HMM coefficient sector identity is invalid for {date_key}")
+                raise _payload_contract_error(
+                    schema_version,
+                    HMM_QE_REASON_STATE,
+                    f"HMM coefficient sector identity is invalid for {date_key}",
+                )
             if isinstance(coefficient, bool) or not isinstance(coefficient, (int, float)):
-                raise RuntimeError(f"HMM coefficient is not numeric for {date_key}/{sector_code}")
+                raise _payload_contract_error(
+                    schema_version,
+                    HMM_QE_REASON_STATE,
+                    f"HMM coefficient is not numeric for {date_key}/{sector_code}",
+                )
             if not np.isfinite(coefficient) or coefficient <= 0:
-                raise RuntimeError(f"HMM coefficient must be finite and positive for {date_key}/{sector_code}")
+                raise _payload_contract_error(
+                    schema_version,
+                    HMM_QE_REASON_STATE,
+                    f"HMM coefficient must be finite and positive for {date_key}/{sector_code}",
+                )
 
-    schema_version = payload.get("schema_version")
     if schema_version is None:
         mapping = payload.get("stock_sector_map")
         if not isinstance(mapping, dict) or not mapping:
@@ -78,6 +340,8 @@ def _validate_hmm_coefficient_payload(payload: dict) -> dict:
                 if expected is None or not np.isclose(daily[date_key][sector_code], expected, atol=1e-12):
                     raise RuntimeError(f"HMM coefficient v2 state/coefficient mismatch for {date_key}/{sector_code}")
         payload["_detected_mapping_mode"] = "pit_by_trade_date_v1"
+    elif schema_version == HMM_QE_ASSISTANCE_SCHEMA_V1:
+        return _validate_qe_assistance_payload(payload, daily, date_keys)
     else:
         raise RuntimeError(f"unsupported HMM coefficient schema_version: {schema_version}")
     return payload
@@ -337,7 +601,7 @@ class ScoreWeightedTopkStrategy(TopkDropoutStrategy):
 
         with open(self.hmm_coefficients_file, encoding="utf-8") as f:
             try:
-                payload = json.load(f)
+                payload = json.load(f, object_pairs_hook=_json_object_without_duplicate_keys)
             except (UnicodeError, json.JSONDecodeError) as exc:
                 raise RuntimeError(f"HMM 配置文件不是有效 UTF-8 JSON: {self.hmm_coefficients_file}") from exc
         self._hmm_config = _validate_hmm_coefficient_payload(payload)
@@ -359,39 +623,80 @@ class ScoreWeightedTopkStrategy(TopkDropoutStrategy):
 
         hmm_config = self._load_hmm_config()
         daily_coefficients = hmm_config["daily_coefficients"]
-        if hmm_config["_detected_mapping_mode"] == "pit_by_trade_date_v1":
+        mapping_mode = hmm_config["_detected_mapping_mode"]
+        if mapping_mode == "pit_by_trade_date_v1":
             stock_sector_map = hmm_config["stock_sector_map_by_date"].get(trade_date_str)
             daily_states = hmm_config["daily_states"].get(trade_date_str)
+        elif mapping_mode == "qe_assistance_by_trade_date_v1":
+            stock_sector_map = hmm_config["stock_sector_applicability_by_date"].get(trade_date_str)
+            daily_states = None
         else:
             stock_sector_map = hmm_config["stock_sector_map"]
             daily_states = None
 
         day_coeffs = daily_coefficients.get(trade_date_str)
         if not day_coeffs:
-            raise RuntimeError(
+            raise _adjustment_contract_error(
+                mapping_mode,
+                HMM_QE_REASON_STATE,
                 f"HMM 配置中缺少交易日 {trade_date_str} 的系数。"
                 f"预计算覆盖范围: {hmm_config.get('test_start')} ~ {hmm_config.get('backtest_end')}。"
                 f"请检查预计算日期范围是否覆盖回测区间。"
             )
 
         if not stock_sector_map:
-            raise RuntimeError(f"HMM 配置中缺少交易日 {trade_date_str} 的 PIT 股票行业映射")
+            raise _adjustment_contract_error(
+                mapping_mode,
+                HMM_QE_REASON_MAPPING,
+                f"HMM 配置中缺少交易日 {trade_date_str} 的 PIT 股票行业映射",
+            )
         if not np.isfinite(pred_score.to_numpy(dtype=float)).all():
-            raise RuntimeError(f"HMM 调整前评分包含非有限值: date={trade_date_str}")
+            raise _adjustment_contract_error(
+                mapping_mode,
+                HMM_QE_REASON_FORMULA,
+                f"HMM 调整前评分包含非有限值: date={trade_date_str}",
+            )
 
+        if not pred_score.index.is_unique:
+            raise _adjustment_contract_error(
+                mapping_mode,
+                HMM_QE_REASON_INPUT,
+                f"HMM adjustment input contains duplicate stocks: date={trade_date_str}",
+            )
+        if mapping_mode == "qe_assistance_by_trade_date_v1" and set(pred_score.index) != set(stock_sector_map):
+            raise HMMQEAssistanceContractError(
+                HMM_QE_REASON_MAPPING,
+                f"HMM QE applicability denominator differs: date={trade_date_str} "
+                f"score_count={len(pred_score.index)} applicability_count={len(stock_sector_map)}",
+            )
         missing_mapping = [stock_id for stock_id in pred_score.index if stock_id not in stock_sector_map]
         missing_coefficient = [
-            (stock_id, stock_sector_map[stock_id])
+            (
+                stock_id,
+                stock_sector_map[stock_id].get("sector_code")
+                if mapping_mode == "qe_assistance_by_trade_date_v1"
+                else stock_sector_map[stock_id],
+            )
             for stock_id in pred_score.index
-            if stock_id in stock_sector_map and stock_sector_map[stock_id] not in day_coeffs
+            if stock_id in stock_sector_map
+            and (
+                stock_sector_map[stock_id].get("status") == HMM_QE_APPLIED
+                and stock_sector_map[stock_id].get("sector_code") not in day_coeffs
+                if mapping_mode == "qe_assistance_by_trade_date_v1"
+                else stock_sector_map[stock_id] not in day_coeffs
+            )
         ]
         if missing_mapping:
-            raise RuntimeError(
+            raise _adjustment_contract_error(
+                mapping_mode,
+                HMM_QE_REASON_MAPPING,
                 f"HMM 股票行业映射缺失: date={trade_date_str} count={len(missing_mapping)} "
                 f"sample={missing_mapping[:10]}",
             )
         if missing_coefficient:
-            raise RuntimeError(
+            raise _adjustment_contract_error(
+                mapping_mode,
+                HMM_QE_REASON_STATE,
                 f"HMM 行业系数缺失: date={trade_date_str} count={len(missing_coefficient)} "
                 f"sample={missing_coefficient[:10]}",
             )
@@ -400,12 +705,33 @@ class ScoreWeightedTopkStrategy(TopkDropoutStrategy):
         n_adjusted = 0
         trace_rows = []
         for stock_id in adjusted.index:
-            sector_code = stock_sector_map[stock_id]
-            coeff = float(day_coeffs[sector_code])
             raw_score = float(adjusted[stock_id])
-            adjusted_score = raw_score * coeff
+            if mapping_mode == "qe_assistance_by_trade_date_v1":
+                applicability = stock_sector_map[stock_id]
+                status = applicability["status"]
+                sector_code = applicability["sector_code"]
+                if status == HMM_QE_NOT_APPLICABLE:
+                    coeff = 1.0
+                    adjusted_score = raw_score
+                    reason = HMM_QE_NOT_APPLICABLE
+                elif status == HMM_QE_APPLIED:
+                    coeff = float(day_coeffs[sector_code])
+                    adjusted_score = raw_score + (coeff - 1.0) * abs(raw_score)
+                    reason = "hmm_qe_assistance_applied"
+                else:
+                    raise HMMQEAssistanceContractError(
+                        HMM_QE_REASON_MAPPING,
+                        f"HMM QE applicability status is unknown: date={trade_date_str} stock={stock_id}",
+                    )
+            else:
+                sector_code = stock_sector_map[stock_id]
+                coeff = float(day_coeffs[sector_code])
+                adjusted_score = raw_score * coeff
+                reason = "hmm_sector_coefficient_applied"
             if not np.isfinite(adjusted_score):
-                raise RuntimeError(
+                raise _adjustment_contract_error(
+                    mapping_mode,
+                    HMM_QE_REASON_FORMULA,
                     f"HMM 调整后评分非有限: date={trade_date_str} stock={stock_id} sector={sector_code}",
                 )
             adjusted[stock_id] = adjusted_score
@@ -419,7 +745,7 @@ class ScoreWeightedTopkStrategy(TopkDropoutStrategy):
                     "coefficient": coeff,
                     "raw_score": raw_score,
                     "adjusted_score": adjusted_score,
-                    "reason": "hmm_sector_coefficient_applied",
+                    "reason": reason,
                 },
             )
 
