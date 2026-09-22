@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -11,7 +12,11 @@ from typing import Any
 import pytest
 from fastapi import HTTPException
 from rdagent.app.api_endpoints import qe_environment_identity
-from rdagent.app.api_endpoints.qe_dataset_identity import read_dataset_identity
+from rdagent.app.api_endpoints.qe_dataset_identity import (
+    DATASET_RELEASE_REGISTRY_ENV,
+    DATASET_RELEASE_REGISTRY_SCHEMA_VERSION,
+    read_dataset_identity,
+)
 from rdagent.app.api_endpoints.qe_submission_receipt import (
     get_submission_receipt,
     loop_lifecycle_lock,
@@ -60,6 +65,43 @@ def _manifest_payload() -> dict[str, str]:
     }
 
 
+def _canonical(value: dict[str, Any]) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _registered_release(parent: Path, *, name: str) -> tuple[Path, Path, dict[str, Any]]:
+    root = parent / name
+    root.mkdir()
+    payload: dict[str, Any] = {
+        **_manifest_payload(),
+        "release_id": "qe_hmm_full_v2_20260930",
+    }
+    payload["dataset_manifest_sha256"] = hashlib.sha256(_canonical(payload)).hexdigest()
+    manifest_raw = _canonical(payload) + b"\n"
+    (root / "qe_dataset_manifest.json").write_bytes(manifest_raw)
+    registry = parent / ".aistock-release-registry"
+    registry.mkdir(exist_ok=True)
+    registration: dict[str, Any] = {
+        "schema_version": DATASET_RELEASE_REGISTRY_SCHEMA_VERSION,
+        "candidate_root_name": root.name,
+        "release_id": payload["release_id"],
+        "cutoff_trade_date": payload["cutoff_trade_date"],
+        "dataset_manifest_sha256": payload["dataset_manifest_sha256"],
+        "manifest_file_sha256": hashlib.sha256(manifest_raw).hexdigest(),
+        "manifest_size": len(manifest_raw),
+    }
+    registration["registration_sha256"] = hashlib.sha256(_canonical(registration)).hexdigest()
+    entry = registry / f"{payload['dataset_manifest_sha256']}.json"
+    entry.write_bytes(_canonical(registration) + b"\n")
+    return root, entry, payload
+
+
 def test_environment_identity_is_deployment_cached_without_gpu_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = 0
 
@@ -106,6 +148,77 @@ def test_dataset_identity_reads_published_manifest_and_missing_manifest_is_evide
     assert incomplete["complete"] is False
     assert incomplete["reason_code"] == "qe_dataset_manifest_missing"
     assert incomplete["acquisition_suggestions"]
+
+
+def test_dataset_identity_discovers_new_registered_release_without_env_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "releases"
+    parent.mkdir()
+    registry = parent / ".aistock-release-registry"
+    registry.mkdir()
+    root = parent / "20260930-candidate"
+    root.mkdir()
+    monkeypatch.delenv("QE_QLIB_DATA_PATH", raising=False)
+    monkeypatch.delenv("QE_DATASET_IDENTITY_ROOTS", raising=False)
+    monkeypatch.delenv("QE_REGISTERED_DATASET_ROOTS", raising=False)
+    monkeypatch.setenv(DATASET_RELEASE_REGISTRY_ENV, str(registry))
+
+    before = read_dataset_identity(data_root_uri=str(root), node_id="wsl2-5080")
+    assert before["complete"] is False
+    assert before["reason_code"] == "qe_dataset_release_registration_invalid"
+
+    root.rmdir()
+    registered_root, _entry, payload = _registered_release(parent, name=root.name)
+    after = read_dataset_identity(data_root_uri=str(registered_root), node_id="wsl2-5080")
+
+    assert after["complete"] is True
+    assert after["dataset"]["dataset_manifest_sha256"] == payload["dataset_manifest_sha256"]
+
+
+def test_dataset_identity_rejects_registration_for_another_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "releases"
+    parent.mkdir()
+    root, entry, _payload = _registered_release(parent, name="20260930-candidate")
+    registration = json.loads(entry.read_text(encoding="utf-8"))
+    registration["candidate_root_name"] = "another-candidate"
+    unsigned = dict(registration)
+    unsigned.pop("registration_sha256")
+    registration["registration_sha256"] = hashlib.sha256(_canonical(unsigned)).hexdigest()
+    entry.write_bytes(_canonical(registration) + b"\n")
+    monkeypatch.delenv("QE_QLIB_DATA_PATH", raising=False)
+    monkeypatch.delenv("QE_DATASET_IDENTITY_ROOTS", raising=False)
+    monkeypatch.delenv("QE_REGISTERED_DATASET_ROOTS", raising=False)
+    monkeypatch.setenv(DATASET_RELEASE_REGISTRY_ENV, str(parent / ".aistock-release-registry"))
+
+    result = read_dataset_identity(data_root_uri=str(root), node_id="wsl2-5080")
+
+    assert result["complete"] is False
+    assert result["reason_code"] == "qe_dataset_release_registration_missing"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation is not portable on Windows")
+def test_dataset_identity_rejects_linked_registered_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "releases"
+    parent.mkdir()
+    root, _entry, _payload = _registered_release(parent, name="20260930-candidate")
+    linked_root = tmp_path / "linked-candidate"
+    linked_root.symlink_to(root, target_is_directory=True)
+    monkeypatch.delenv("QE_DATASET_IDENTITY_ROOTS", raising=False)
+    monkeypatch.delenv("QE_REGISTERED_DATASET_ROOTS", raising=False)
+    monkeypatch.setenv(DATASET_RELEASE_REGISTRY_ENV, str(parent / ".aistock-release-registry"))
+
+    result = read_dataset_identity(data_root_uri=str(linked_root), node_id="wsl2-5080")
+
+    assert result["complete"] is False
+    assert result["reason_code"] == "qe_dataset_identity_root_unavailable"
 
 
 def test_submission_receipt_binds_current_environment_or_rejects_mismatch(
