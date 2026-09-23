@@ -1,44 +1,0 @@
-Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
-Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
-Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
-See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
-[314893:MainThread](2026-02-22 21:27:06,574) INFO - qlib.Initialization - [config.py:420] - default_conf: client.
-[314893:MainThread](2026-02-22 21:27:06,586) INFO - qlib.Initialization - [__init__.py:74] - qlib successfully initialized based on client settings.
-[314893:MainThread](2026-02-22 21:27:06,592) INFO - qlib.Initialization - [__init__.py:76] - data_path={'__DEFAULT_FREQ': PosixPath('/mnt/f/Dev/AIstock/qlib_bin/qlib_bin_20251209')}
-[314893:MainThread](2026-02-22 21:27:06,899) INFO - qlib.workflow - [exp.py:258] - Experiment 198456617950361380 starts running ...
-[314893:MainThread](2026-02-22 21:27:07,742) INFO - qlib.workflow - [recorder.py:345] - Recorder c94d09af60724c67a90b6e99126986e6 starts running under Experiment 198456617950361380 ...
-成功加载模型预测结果: /mnt/f/Dev/RD-Agent-main/qe_workspace/qe_exp_e521aa14/mlruns/212559193176491789/89257e88e4264f4a922df47f55143529/artifacts/pred.pkl
-预测数据量: 1600891
-开始执行纯回测流程...
-Downloading artifacts:   0%|          | 0/1 [00:00<?, ?it/s]Downloading artifacts:   0%|          | 0/1 [00:00<?, ?it/s]
-Downloading artifacts:   0%|          | 0/1 [00:00<?, ?it/s]Downloading artifacts: 100%|██████████| 1/1 [00:00<00:00,  6.22it/s]Downloading artifacts: 100%|██████████| 1/1 [00:00<00:00,  6.22it/s]Downloading artifacts: 100%|██████████| 1/1 [00:00<00:00,  6.19it/s]
-[314893:MainThread](2026-02-22 21:27:19,670) INFO - qlib.backtest caller - [__init__.py:93] - Create new exchange
-[314893:MainThread](2026-02-22 21:28:32,321) ERROR - qlib.workflow - [utils.py:41] - An exception has been raised[KeyboardInterrupt: ].
-  File "/mnt/f/Dev/RD-Agent-main/debug_tools/run_rebacktest.py", line 76, in <module>
-    artifact_dict = port_ana._generate()
-  File "/home/lc999/miniconda3/envs/rdagent-gpu/lib/python3.10/site-packages/qlib/workflow/record_temp.py", line 483, in _generate
-    portfolio_metric_dict, indicator_dict = normal_backtest(
-  File "/home/lc999/miniconda3/envs/rdagent-gpu/lib/python3.10/site-packages/qlib/backtest/__init__.py", line 266, in backtest
-    trade_strategy, trade_executor = get_strategy_executor(
-  File "/home/lc999/miniconda3/envs/rdagent-gpu/lib/python3.10/site-packages/qlib/backtest/__init__.py", line 206, in get_strategy_executor
-    trade_exchange = get_exchange(**exchange_kwargs)
-  File "/home/lc999/miniconda3/envs/rdagent-gpu/lib/python3.10/site-packages/qlib/backtest/__init__.py", line 95, in get_exchange
-    exchange = Exchange(
-  File "/home/lc999/miniconda3/envs/rdagent-gpu/lib/python3.10/site-packages/qlib/backtest/exchange.py", line 195, in __init__
-    self.get_quote_from_qlib()
-  File "/home/lc999/miniconda3/envs/rdagent-gpu/lib/python3.10/site-packages/qlib/backtest/exchange.py", line 205, in get_quote_from_qlib
-    self.quote_df = D.features(
-  File "/home/lc999/miniconda3/envs/rdagent-gpu/lib/python3.10/site-packages/qlib/data/data.py", line 1190, in features
-    return DatasetD.dataset(instruments, fields, start_time, end_time, freq, inst_processors=inst_processors)
-  File "/home/lc999/miniconda3/envs/rdagent-gpu/lib/python3.10/site-packages/qlib/data/data.py", line 923, in dataset
-    data = self.dataset_processor(
-  File "/home/lc999/miniconda3/envs/rdagent-gpu/lib/python3.10/site-packages/qlib/data/data.py", line 577, in dataset_processor
-    ParallelExt(n_jobs=workers, backend=C.joblib_backend, maxtasksperchild=C.maxtasksperchild)(task_l),
-  File "/home/lc999/miniconda3/envs/rdagent-gpu/lib/python3.10/site-packages/joblib/parallel.py", line 2072, in __call__
-    return output if self.return_generator else list(output)
-  File "/home/lc999/miniconda3/envs/rdagent-gpu/lib/python3.10/site-packages/joblib/parallel.py", line 1682, in _get_outputs
-    yield from self._retrieve()
-  File "/home/lc999/miniconda3/envs/rdagent-gpu/lib/python3.10/site-packages/joblib/parallel.py", line 1800, in _retrieve
-    time.sleep(0.01)
-[314893:MainThread](2026-02-22 21:28:32,334) INFO - qlib.timer - [log.py:127] - Time cost: 0.000s | waiting `async_log` Done
-KeyboardInterrupt: 
