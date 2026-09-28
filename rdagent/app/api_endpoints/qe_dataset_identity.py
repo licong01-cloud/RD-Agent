@@ -30,6 +30,19 @@ _REQUIRED_FIELDS = (
     "st_pit_snapshot_id",
     "st_pit_manifest_sha256",
 )
+_RELEASE_REGISTRY_ENV = "QE_DATASET_RELEASE_REGISTRY_ROOTS"
+_RELEASE_REGISTRY_DIRECTORY = ".aistock-release-registry"
+_RELEASE_REGISTRATION_SCHEMA = "aistock_dataset_release_runtime_registration_v1"
+_RELEASE_REGISTRATION_FIELDS = {
+    "schema_version",
+    "candidate_root_name",
+    "release_id",
+    "cutoff_trade_date",
+    "dataset_manifest_sha256",
+    "manifest_file_sha256",
+    "manifest_size",
+    "registration_sha256",
+}
 
 
 def read_dataset_identity(  # noqa: PLR0911 - each explicit evidence branch is part of the public contract.
@@ -45,7 +58,8 @@ def read_dataset_identity(  # noqa: PLR0911 - each explicit evidence branch is p
             reason_code=root_reason or "qe_dataset_identity_root_unavailable",
             missing=["resolved_data_root_uri", "qe_dataset_manifest.json"],
             suggestions=[
-                "configure QE_QLIB_DATA_PATH or QE_DATASET_IDENTITY_ROOTS for this QE deployment",
+                "configure QE_QLIB_DATA_PATH, QE_DATASET_IDENTITY_ROOTS, "
+                "or the stable QE_DATASET_RELEASE_REGISTRY_ROOTS",
                 "publish qe_dataset_manifest.json with the immutable Qlib/ST PIT snapshot",
             ],
         )
@@ -191,22 +205,110 @@ def _resolve_allowed_data_root(value: str | None) -> tuple[Path | None, str | No
     requested = str(value or os.environ.get("QE_QLIB_DATA_PATH") or "").strip()
     if not requested:
         return None, "qe_dataset_identity_root_unavailable"
+    requested_path = Path(requested)
     try:
-        candidate = Path(requested).resolve(strict=True)
+        candidate = requested_path.resolve(strict=True)
     except OSError:
         return None, "qe_dataset_identity_root_unavailable"
     if not candidate.is_dir():
         return None, "qe_dataset_identity_root_unavailable"
     allowed = _configured_roots()
-    if not allowed:
-        return None, "qe_dataset_identity_root_not_configured"
     for root in allowed:
         try:
             candidate.relative_to(root)
         except ValueError:
             continue
         return candidate, None
+    if _registered_release_root(candidate, requested_path=requested_path):
+        return candidate, None
     return None, "qe_dataset_identity_root_not_configured"
+
+
+def _registered_release_root(candidate: Path, *, requested_path: Path) -> bool:
+    configured = str(os.environ.get(_RELEASE_REGISTRY_ENV) or "").strip()
+    if not configured or requested_path.is_symlink():
+        return False
+    for raw in (item.strip() for item in configured.split(os.pathsep)):
+        if not raw:
+            continue
+        configured_parent = Path(raw)
+        try:
+            parent = configured_parent.resolve(strict=True)
+        except OSError:
+            continue
+        if not parent.is_dir() or configured_parent.is_symlink() or candidate.parent != parent:
+            continue
+        manifest_path = candidate / DATASET_MANIFEST_FILENAME
+        if not manifest_path.is_file() or manifest_path.is_symlink():
+            continue
+        try:
+            manifest_raw = manifest_path.read_bytes()
+            manifest = json.loads(manifest_raw.decode("utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(manifest, Mapping):
+            continue
+        identity = str(manifest.get("dataset_manifest_sha256") or "").strip().lower()
+        if _is_sha256(identity) and _registration_matches(
+            parent=parent,
+            candidate=candidate,
+            manifest_raw=manifest_raw,
+            manifest=manifest,
+            identity=identity,
+        ):
+            return True
+    return False
+
+
+def _registration_matches(
+    *,
+    parent: Path,
+    candidate: Path,
+    manifest_raw: bytes,
+    manifest: Mapping[str, Any],
+    identity: str,
+) -> bool:
+    registry = parent / _RELEASE_REGISTRY_DIRECTORY
+    try:
+        registry_root = registry.resolve(strict=True)
+    except OSError:
+        return False
+    if not registry_root.is_dir() or registry.is_symlink() or registry_root.parent != parent:
+        return False
+    registration_path = registry_root / f"{identity}.json"
+    if not registration_path.is_file() or registration_path.is_symlink():
+        return False
+    try:
+        registration_raw = registration_path.read_bytes()
+        registration = json.loads(registration_raw.decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(registration, Mapping):
+        return False
+    canonical_registration = (
+        json.dumps(
+            dict(registration),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    unsigned = dict(registration)
+    claimed_registration = str(unsigned.pop("registration_sha256", ""))
+    return bool(
+        set(registration) == _RELEASE_REGISTRATION_FIELDS
+        and registration_raw == canonical_registration
+        and registration.get("schema_version") == _RELEASE_REGISTRATION_SCHEMA
+        and registration.get("candidate_root_name") == candidate.name
+        and registration.get("release_id") == manifest.get("release_id")
+        and registration.get("cutoff_trade_date") == manifest.get("cutoff_trade_date")
+        and registration.get("dataset_manifest_sha256") == identity
+        and registration.get("manifest_file_sha256") == hashlib.sha256(manifest_raw).hexdigest()
+        and registration.get("manifest_size") == len(manifest_raw)
+        and claimed_registration == _sha256_json(unsigned),
+    )
 
 
 def _configured_roots() -> tuple[Path, ...]:

@@ -108,6 +108,72 @@ def test_dataset_identity_reads_published_manifest_and_missing_manifest_is_evide
     assert incomplete["acquisition_suggestions"]
 
 
+def test_dataset_identity_resolves_create_exclusive_monthly_release_registration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "releases"
+    root = parent / "20260930-successor"
+    root.mkdir(parents=True)
+    payload = _manifest_payload()
+    payload["release_id"] = "qe_hmm_full_v2_20260930"
+    payload["dataset_manifest_sha256"] = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+    ).hexdigest()
+    manifest_raw = (
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    (root / "qe_dataset_manifest.json").write_bytes(manifest_raw)
+    registry = parent / ".aistock-release-registry"
+    registry.mkdir()
+    registration = {
+        "schema_version": "aistock_dataset_release_runtime_registration_v1",
+        "candidate_root_name": root.name,
+        "release_id": payload["release_id"],
+        "cutoff_trade_date": payload["cutoff_trade_date"],
+        "dataset_manifest_sha256": payload["dataset_manifest_sha256"],
+        "manifest_file_sha256": hashlib.sha256(manifest_raw).hexdigest(),
+        "manifest_size": len(manifest_raw),
+    }
+    registration["registration_sha256"] = hashlib.sha256(
+        json.dumps(registration, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+    ).hexdigest()
+    registration_path = registry / f"{payload['dataset_manifest_sha256']}.json"
+    registration_path.write_bytes(
+        (
+            json.dumps(registration, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8"),
+    )
+    for name in (
+        "QE_QLIB_DATA_PATH",
+        "RDAGENT_FACTOR_DATA_WSL",
+        "QE_DATASET_IDENTITY_ROOTS",
+        "QE_REGISTERED_DATASET_ROOTS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("QE_DATASET_RELEASE_REGISTRY_ROOTS", str(parent))
+
+    complete = read_dataset_identity(data_root_uri=str(root), node_id="wsl2-5080")
+
+    assert complete["complete"] is True
+    assert complete["dataset"]["dataset_manifest_sha256"] == payload["dataset_manifest_sha256"]
+
+    registration["release_id"] = "another-release"
+    unsigned = dict(registration)
+    unsigned.pop("registration_sha256")
+    registration["registration_sha256"] = hashlib.sha256(
+        json.dumps(unsigned, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+    ).hexdigest()
+    registration_path.write_bytes(
+        (
+            json.dumps(registration, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8"),
+    )
+    incomplete = read_dataset_identity(data_root_uri=str(root), node_id="wsl2-5080")
+    assert incomplete["complete"] is False
+    assert incomplete["reason_code"] == "qe_dataset_identity_root_not_configured"
+
+
 def test_submission_receipt_binds_current_environment_or_rejects_mismatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
