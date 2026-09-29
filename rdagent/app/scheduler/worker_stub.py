@@ -16,6 +16,8 @@ import re
 import subprocess
 import csv
 import pickle
+import sys
+import tempfile
 import threading
 import time
 from collections import deque
@@ -55,6 +57,163 @@ _LOG_TAIL_SIZE = 50
 _LOOP_RE = re.compile(r"(?:Starting|Begin|Enter)\s+Loop[_ ]?(\d+)", re.IGNORECASE)
 _STEP_RE = re.compile(r"(?:Step|Phase|Stage)\s*[:\s]+(\w+)", re.IGNORECASE)
 _TOTAL_LOOPS_RE = re.compile(r"total[_ ]?loops?\s*[=:]\s*(\d+)", re.IGNORECASE)
+
+_CUSTOM_TASK_SCRIPTS = {
+    "correlation_compute": "run_correlation_compute_wsl.py",
+    "official_evaluation": "run_official_evaluation_wsl.py",
+}
+
+
+def _custom_task_result(line: str) -> dict[str, Any] | None:
+    """Return one normalized custom-runner result envelope, if present."""
+    if not line.lstrip().startswith("{"):
+        return None
+    try:
+        parsed = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    if parsed.get("type") == "result" and isinstance(parsed.get("data"), dict):
+        return dict(parsed["data"])
+    if "success" in parsed:
+        return parsed
+    return None
+
+
+def _custom_task_runtime(task_type: str, task: Any) -> tuple[dict[str, str], Path, Path, str]:
+    """Resolve one allow-listed handler and its frozen runtime environment."""
+    env = {str(key): str(value) for key, value in os.environ.items()}
+    env.update(
+        {
+            str(key): str(value)
+            for key, value in (getattr(task, "env_overrides", {}) or {}).items()
+            if value is not None
+        },
+    )
+    repo_hint = env.get("AISTOCK_REPO_ROOT")
+    if repo_hint:
+        aistock_repo = Path(repo_hint).expanduser().resolve()
+    elif Path("/mnt/f/Dev/AIstock").is_dir():
+        aistock_repo = Path("/mnt/f/Dev/AIstock").resolve()
+    else:
+        aistock_repo = (Path.home() / "AIstock").resolve()
+
+    script_name = _CUSTOM_TASK_SCRIPTS.get(task_type)
+    if script_name is None:
+        message = f"unsupported custom scheduler task_type: {task_type}"
+        raise ValueError(message)
+    script_path = aistock_repo / "backend" / "scripts" / script_name
+    if not script_path.is_file():
+        message = f"custom task script not found: {script_path}"
+        raise FileNotFoundError(message)
+
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    pythonpath = [str(aistock_repo), str(PROJECT_ROOT)]
+    if existing_pythonpath:
+        pythonpath.append(existing_pythonpath)
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath)
+    python_exe = env.get("AISTOCK_SCHEDULER_PYTHON") or sys.executable
+    return env, aistock_repo, script_path, python_exe
+
+
+def _read_custom_task_result(log_path: Path) -> dict[str, Any]:
+    if not log_path.exists():
+        return {}
+    for raw_line in reversed(
+        log_path.read_text(encoding="utf-8", errors="replace").splitlines(),
+    ):
+        result = _custom_task_result(raw_line)
+        if result is not None:
+            return result
+    return {}
+
+
+def _run_custom_python_handler(task_id: str, task_type: str, payload: dict[str, Any]) -> int:
+    """Execute an allow-listed AIstock worker task without RD-Agent CLI fallback."""
+    task = get_task(task_id)
+    if task is None:
+        raise LookupError(task_id)
+
+    payload_path: Path | None = None
+    try:
+        env, aistock_repo, script_path, python_exe = _custom_task_runtime(task_type, task)
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False, encoding="utf-8",
+        ) as tmp:
+            json.dump(payload, tmp, ensure_ascii=False)
+            payload_path = Path(tmp.name)
+
+        log_path = LOG_DIR / f"{task_id}.log"
+        cmd = [python_exe, str(script_path), str(payload_path)]
+        update_task_status(task_id, "running")
+        _task_progress[task_id] = {
+            "current_loop": 0,
+            "total_loops": 1,
+            "current_step": task_type,
+            "progress_pct": 0.0,
+        }
+        _log_tail[task_id] = deque(maxlen=_LOG_TAIL_SIZE)
+        append_task_log(task_id, f"[worker] starting custom task {task_type}")
+
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as log_fd:
+            proc = subprocess.Popen(  # noqa: S603 - command uses an allow-listed script path
+                cmd,
+                cwd=str(aistock_repo),
+                stdout=log_fd,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                close_fds=True,
+                env=env,
+            )
+        _running_processes[task_id] = proc
+        _running_pids[task_id] = proc.pid
+        _save_pid_file(task_id, proc.pid, cmd, str(aistock_repo))
+        _start_tail_thread(task_id, log_path, proc.pid, finalize_status=False)
+        proc.wait()
+
+        _running_processes.pop(task_id, None)
+        _running_pids.pop(task_id, None)
+        _remove_pid_file(task_id)
+
+        result_payload = _read_custom_task_result(log_path)
+        success = proc.returncode == 0 and result_payload.get("success") is True
+        final_status = "success" if success else "fail"
+        _task_progress[task_id].update(
+            {
+                "current_loop": 1 if success else 0,
+                "progress_pct": 100.0 if success else 0.0,
+                "status": final_status,
+            },
+        )
+        record_result(
+            task_id,
+            {
+                **result_payload,
+                "success": success,
+                "task_type": task_type,
+                "returncode": proc.returncode,
+                "cmd": cmd,
+                "log_path": str(log_path),
+            },
+        )
+        update_task_status(task_id, final_status)
+        return 0 if success else 1  # noqa: TRY300 - failure must share cleanup below
+    except Exception as exc:  # noqa: BLE001 - scheduler must persist every handler failure
+        _running_processes.pop(task_id, None)
+        _running_pids.pop(task_id, None)
+        _remove_pid_file(task_id)
+        update_task_status(task_id, "fail")
+        append_task_log(task_id, f"[worker] custom task failed: {exc}")
+        record_result(
+            task_id,
+            {"task_type": task_type, "success": False, "error": str(exc)},
+        )
+        return 1
+    finally:
+        if payload_path is not None:
+            payload_path.unlink(missing_ok=True)
 
 
 def _ensure_dirs():
@@ -212,7 +371,32 @@ def _parse_progress(task_id: str, line: str) -> None:
         _task_progress[task_id]["total_loops"] = int(m.group(1))
 
 
-def _tail_log_file(task_id: str, log_path: Path, pid: int) -> None:
+def _finalize_recovered_task(task_id: str, task: Any, log_path: Path) -> str:
+    """Finalize an orphaned task after API restart without changing task semantics."""
+    task_type = getattr(task, "task_type", "rdagent") or "rdagent"
+    if task_type == "rdagent":
+        final_status = "fail"
+        if task.rdagent_log_dir:
+            log_dir = RDAGENT_LOG_ROOT / task.rdagent_log_dir
+            if log_dir.exists():
+                final_status = _infer_task_status(log_dir, pid=None)
+        return final_status
+
+    result_payload = _read_custom_task_result(log_path)
+    success = task_type in _CUSTOM_TASK_SCRIPTS and result_payload.get("success") is True
+    record_result(
+        task_id,
+        {
+            **result_payload,
+            "success": success,
+            "task_type": task_type,
+            "recovered_after_restart": True,
+        },
+    )
+    return "success" if success else "fail"
+
+
+def _tail_log_file(task_id: str, log_path: Path, pid: int, *, finalize_status: bool = True) -> None:
     """后台线程：持续 tail 日志文件，更新进度和缓存。当进程退出时结束。"""
     if task_id not in _log_tail:
         _log_tail[task_id] = deque(maxlen=_LOG_TAIL_SIZE)
@@ -260,14 +444,10 @@ def _tail_log_file(task_id: str, log_path: Path, pid: int) -> None:
 
     # 根据文件系统推断最终状态并写回 JSONL
     try:
-        from .task_service import get_task, update_task_status, _infer_task_status, RDAGENT_LOG_ROOT
+        from .task_service import get_task, update_task_status
         task = get_task(task_id)
-        if task and task.status == "running":
-            final_status = "fail"
-            if task.rdagent_log_dir:
-                log_dir = RDAGENT_LOG_ROOT / task.rdagent_log_dir
-                if log_dir.exists():
-                    final_status = _infer_task_status(log_dir, pid=None)
+        if finalize_status and task and task.status == "running":
+            final_status = _finalize_recovered_task(task_id, task, log_path)
             update_task_status(task_id, final_status)
     except Exception as _e:
         pass
@@ -280,12 +460,17 @@ def _tail_log_file(task_id: str, log_path: Path, pid: int) -> None:
     threading.Timer(60, _deferred_cleanup).start()
 
 
-def _start_tail_thread(task_id: str, log_path: Path, pid: int) -> None:
+def _start_tail_thread(task_id: str, log_path: Path, pid: int, *, finalize_status: bool = True) -> None:
     """启动日志 tail 线程（带去重）。"""
     existing = _tail_threads.get(task_id)
     if existing and existing.is_alive():
         return
-    t = threading.Thread(target=_tail_log_file, args=(task_id, log_path, pid), daemon=True)
+    t = threading.Thread(
+        target=_tail_log_file,
+        args=(task_id, log_path, pid),
+        kwargs={"finalize_status": finalize_status},
+        daemon=True,
+    )
     t.start()
     _tail_threads[task_id] = t
 
@@ -373,6 +558,14 @@ def run_rdagent_task(task_id: str, workspace: Optional[str] = None) -> int:
     task = get_task(task_id)
     if task is None:
         raise ValueError(f"Task not found: {task_id}")
+
+    task_type = getattr(task, "task_type", "rdagent") or "rdagent"
+    if task_type != "rdagent":
+        return _run_custom_python_handler(
+            task_id,
+            task_type,
+            getattr(task, "payload", {}) or {},
+        )
 
     workdir = workspace or task.workspace_path or str(PROJECT_ROOT)
     env_overrides = task.env_overrides if hasattr(task, 'env_overrides') else {}
@@ -510,11 +703,7 @@ def recover_running_tasks() -> int:
             _remove_pid_file(task_id)
             task = get_task(task_id)
             if task and task.status == "running":
-                final_status = "fail"
-                if task.rdagent_log_dir:
-                    log_dir = RDAGENT_LOG_ROOT / task.rdagent_log_dir
-                    if log_dir.exists():
-                        final_status = _infer_task_status(log_dir, pid=None)
+                final_status = _finalize_recovered_task(task_id, task, log_path)
                 update_task_status(task_id, final_status)
                 append_task_log(task_id, f"[recovery] Process (PID={pid}) no longer alive after API restart, marking as {final_status}")
 

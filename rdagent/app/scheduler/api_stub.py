@@ -51,6 +51,8 @@ def api_create_task(payload: dict) -> dict:
         all_duration=payload.get("all_duration", "1:00:00"),
         evolving_mode=payload.get("evolving_mode", "llm"),
         command=payload.get("command", "fin_quant"),
+        task_type=payload.get("task_type") or "rdagent",
+        payload=payload.get("payload") or {},
         source_history_id=payload.get("source_history_id"),
         template_version=payload.get("template_version"),
         manifest_hash=payload.get("manifest_hash"),
