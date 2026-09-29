@@ -29,6 +29,8 @@ class TaskRecord:
     workspace_path: str | None = None
     config_hash: str | None = None
     command: str = "fin_quant"  # rdagent 子命令: fin_factor/fin_model/fin_quant
+    task_type: str = "rdagent"
+    payload: dict = field(default_factory=dict)
     env_overrides: dict = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(LOCAL_TZ))
     updated_at: datetime = field(default_factory=lambda: datetime.now(LOCAL_TZ))
