@@ -47,36 +47,52 @@ def _get_qe_workspace_root() -> Path:
 
 
 def _get_factor_data_root() -> Path:
-    """获取因子数据目录根路径（通过环境变量配置，不依赖RD-Agent内部模块）"""
+    """获取因子数据目录根路径（仅认 QE_FACTOR_DATA_DIR，禁回退 repo Windows mirror）。
+
+    F-019: 不得静默回退到 repo 内 git_ignore_folder/factor_implementation_source_data
+    (那是 staging/mirror，非 runtime authority)。未设置即 fail fast。
+    """
     env_val = os.environ.get("QE_FACTOR_DATA_DIR")
     if env_val:
         return Path(env_val)
-    # 回退：尝试从RD-Agent配置读取（兼容过渡期）
-    try:
-        from rdagent.components.coder.factor_coder.config import FACTOR_COSTEER_SETTINGS
-        return Path(FACTOR_COSTEER_SETTINGS.data_folder)
-    except ImportError:
-        repo_root = Path(__file__).resolve().parents[3]
-        return repo_root / "git_ignore_folder" / "factor_implementation_source_data"
+    raise RuntimeError(
+        "reason_code=qe_factor_data_dir_unset: QE_FACTOR_DATA_DIR 未设置；"
+        "禁回退 repo git_ignore_folder Windows mirror（staging，非 runtime authority）。"
+        "请显式设置 runtime factor_data 目录（如 /home/lc999/data/factor_data）。"
+    )
 
 
 def _get_factor_data_debug_root() -> Path:
-    """获取因子数据调试目录根路径（通过环境变量配置，不依赖RD-Agent内部模块）"""
+    """获取因子数据调试目录根路径（仅认 QE_FACTOR_DATA_DEBUG_DIR，禁回退 repo mirror）。"""
     env_val = os.environ.get("QE_FACTOR_DATA_DEBUG_DIR")
     if env_val:
         return Path(env_val)
-    # 回退：尝试从RD-Agent配置读取（兼容过渡期）
-    try:
-        from rdagent.components.coder.factor_coder.config import FACTOR_COSTEER_SETTINGS
-        return Path(FACTOR_COSTEER_SETTINGS.data_folder_debug)
-    except ImportError:
-        repo_root = Path(__file__).resolve().parents[3]
-        return repo_root / "git_ignore_folder" / "factor_implementation_source_data_debug"
+    raise RuntimeError(
+        "reason_code=qe_factor_data_debug_dir_unset: QE_FACTOR_DATA_DEBUG_DIR 未设置；"
+        "禁回退 repo git_ignore_folder Windows mirror。请显式设置 runtime debug 目录。"
+    )
+
+
+def _require_factor_data_root() -> Path:
+    """在实际使用时解析,未配置即 fail fast(不在 import 期崩溃)。"""
+    return _get_factor_data_root()
+
+
+def _require_factor_data_debug_root() -> Path:
+    return _get_factor_data_debug_root()
 
 
 QE_WORKSPACE_ROOT = _get_qe_workspace_root()
-FACTOR_DATA_ROOT = _get_factor_data_root()
-FACTOR_DATA_DEBUG_ROOT = _get_factor_data_debug_root()
+# F-019: import-safe —— 未设 QE_FACTOR_DATA_DIR 时不在 import 崩溃,置 None,
+# 由端点在实际使用时通过 _require_* 显式 fail fast(禁 mirror 回退)。
+try:
+    FACTOR_DATA_ROOT = _get_factor_data_root()
+except RuntimeError:
+    FACTOR_DATA_ROOT = None
+try:
+    FACTOR_DATA_DEBUG_ROOT = _get_factor_data_debug_root()
+except RuntimeError:
+    FACTOR_DATA_DEBUG_ROOT = None
 
 
 # ================================================================
@@ -316,7 +332,7 @@ async def setup_experiment_workspace(
     
     # 1. 链接数据文件（从因子数据目录）
     if request.link_data_files:
-        data_source = FACTOR_DATA_DEBUG_ROOT if request.use_debug_data else FACTOR_DATA_ROOT
+        data_source = _require_factor_data_debug_root() if request.use_debug_data else _require_factor_data_root()
         _link_all_files_to_workspace(data_source, exp_dir, linked_files, errors)
     
     # 2. 写入 conf.yaml（如果有）
@@ -504,10 +520,11 @@ async def get_factor_data_files():
                 })
         return sorted(files, key=lambda x: x["name"])
     
+    _fdr = _require_factor_data_root()
     return FactorDataFilesResponse(
-        data_root=str(FACTOR_DATA_ROOT),
-        debug_root=str(FACTOR_DATA_DEBUG_ROOT),
-        files=_collect_files(FACTOR_DATA_ROOT),
+        data_root=str(_fdr),
+        debug_root=str(_require_factor_data_debug_root()),
+        files=_collect_files(_fdr),
     )
 
 
