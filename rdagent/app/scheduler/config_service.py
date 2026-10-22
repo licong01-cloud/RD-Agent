@@ -17,14 +17,15 @@ from pathlib import Path
 from typing import Dict, Optional
 
 import yaml
+from rdagent.app.runtime_state import state_path
 
 from .models import TemplateHistoryRecord
 from .storage import append_history
 
 # Base paths
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-ENV_PATH = PROJECT_ROOT / ".env"
-HISTORY_ROOT = PROJECT_ROOT / "history"
+ENV_PATH = state_path("config", "rdagent.env")
+HISTORY_ROOT = state_path("history")
 
 
 
