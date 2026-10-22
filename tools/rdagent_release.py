@@ -4,7 +4,9 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import socket
+import stat
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +18,53 @@ def _git(repo: Path, *args: str) -> str:
 
 def _canonical(value: object) -> bytes:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+
+
+def _write_deployment_environment(path: Path, state_root: Path) -> None:
+    """Update release-owned paths without discarding node-specific configuration."""
+    managed = {
+        "RDAGENT_STATE_ROOT": state_root,
+        "QE_WORKSPACE_ROOT": state_root / "qe_workspace",
+        "QE_WORKSPACE_WSL": state_root / "qe_workspace",
+        "QE_WORKSPACE_ARTIFACT_STORE": state_root / "artifact_cas",
+        "QE_FACTOR_DATA_DIR": state_root / "factor_data",
+        "QE_FACTOR_DATA_DEBUG_DIR": state_root / "factor_data_debug",
+        "RD_AGENT_REGISTRY_DB_PATH": state_root / "registry" / "registry.sqlite",
+    }
+    if path.is_symlink():
+        message = "RDAGENT_RELEASE_ENVIRONMENT_SYMLINK"
+        raise RuntimeError(message)
+    original = path.read_bytes() if path.exists() else None
+    pattern = re.compile(rb"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=")
+    preserved = []
+    for line in (original or b"").splitlines(keepends=True):
+        match = pattern.match(line)
+        if match is None or match[1].decode("ascii") not in managed:
+            preserved.append(line)
+    prefix = b"".join(preserved)
+    if prefix and not prefix.endswith(b"\n"):
+        prefix += b"\n"
+    payload = prefix + "".join(f"{key}={value}\n" for key, value in managed.items()).encode()
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    mode = stat.S_IMODE(path.stat().st_mode) if original is not None else 0o600
+    created = False
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+        created = True
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.chmod(mode)
+        current = path.read_bytes() if path.exists() else None
+        if current != original:
+            message = "RDAGENT_RELEASE_ENVIRONMENT_CHANGED"
+            raise RuntimeError(message)
+        temporary.replace(path)
+    finally:
+        # This helper owns only this exact exclusive temporary file.
+        if created and temporary.exists():
+            temporary.unlink()
 
 
 def build_release(
@@ -49,6 +98,10 @@ def build_release(
     manifest_hash = hashlib.sha256(_canonical(manifest)).hexdigest()
     manifest |= {"manifest_hash": manifest_hash}
     (release / ".rdagent-release-manifest.json").write_bytes(_canonical(manifest) + b"\n")
+    deployments = state_root / "deployments"
+    deployments.mkdir(parents=True, exist_ok=True)
+    env = deployments / f"{socket.gethostname()}.env"
+    _write_deployment_environment(env, state_root)
     current = release_root / "current"
     previous = str(current.resolve()) if current.exists() else None
     temp = release_root / f".current-{os.getpid()}"
@@ -64,17 +117,6 @@ def build_release(
     receipts.mkdir(parents=True, exist_ok=True)
     receipt_path = receipts / f"{merge_sha}-{receipt['node']}.json"
     receipt_path.write_bytes(_canonical(receipt) + b"\n")
-    env = state_root / "deployments" / f"{receipt['node']}.env"
-    env.write_text(
-        "\n".join([
-            f"RDAGENT_STATE_ROOT={state_root}",
-            f"QE_WORKSPACE_ROOT={state_root / 'qe_workspace'}",
-            f"QE_WORKSPACE_ARTIFACT_STORE={state_root / 'artifact_cas'}",
-            f"QE_FACTOR_DATA_DIR={state_root / 'factor_data'}",
-            f"QE_FACTOR_DATA_DEBUG_DIR={state_root / 'factor_data_debug'}",
-            f"RD_AGENT_REGISTRY_DB_PATH={state_root / 'registry' / 'registry.sqlite'}",
-        ]) + "\n", encoding="utf-8",
-    )
     return {**receipt, "receipt_path": str(receipt_path), "environment_file": str(env), "current": str(current)}
 
 

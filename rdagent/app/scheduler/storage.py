@@ -12,9 +12,11 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import List, Optional
 
+from rdagent.app.runtime_state import state_path
+
 from .models import TemplateHistoryRecord
 
-HISTORY_ROOT = Path(__file__).resolve().parents[3] / "history"
+HISTORY_ROOT = state_path("history")
 
 META_FILE = HISTORY_ROOT / ".meta_history.jsonl"
 
